@@ -1,0 +1,19 @@
+.DS_Store
+.build/
+.swiftpm/
+DerivedData/
+xcuserdata/
+artifacts/
+
+# Never commit local credentials or signing material.
+/auth.json
+/credentials/
+/profiles.json
+/switch-journal.json
+/switch.lock
+/.env
+/.env.*
+!.env.example
+*.key
+*.pem
+*.p12
