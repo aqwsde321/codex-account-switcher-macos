@@ -2,6 +2,10 @@
 
 import PackageDescription
 
+let faultInjectionSettings: [SwiftSetting] = [
+    .define("SPIKE_FAULT_INJECTION", .when(configuration: .debug)),
+]
+
 let package = Package(
     name: "CodexAccountSwitcher",
     platforms: [.macOS(.v13)],
@@ -11,15 +15,20 @@ let package = Package(
         .executable(name: "codex-account-core-tests", targets: ["CodexAccountCoreTests"]),
     ],
     targets: [
-        .target(name: "CodexAccountCore"),
+        .target(
+            name: "CodexAccountCore",
+            swiftSettings: faultInjectionSettings
+        ),
         .executableTarget(
             name: "CodexAccountSpike",
-            dependencies: ["CodexAccountCore"]
+            dependencies: ["CodexAccountCore"],
+            swiftSettings: faultInjectionSettings
         ),
         .executableTarget(
             name: "CodexAccountCoreTests",
             dependencies: ["CodexAccountCore"],
-            path: "Tests/CodexAccountCoreTests"
+            path: "Tests/CodexAccountCoreTests",
+            swiftSettings: faultInjectionSettings
         ),
     ]
 )

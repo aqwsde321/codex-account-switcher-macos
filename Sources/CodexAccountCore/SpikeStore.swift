@@ -214,6 +214,13 @@ public enum SpikeStoreError: Error, Equatable, Sendable {
 }
 
 enum PrivateDirectory {
+    static func sync(at url: URL) throws {
+        try validate(at: url)
+        let fd = try openDirectory(path: url.path, code: .openDirectory)
+        defer { Darwin.close(fd) }
+        try sync(fd)
+    }
+
     static func validate(at url: URL) throws {
         guard url.isFileURL, url.path.hasPrefix("/") else {
             throw PrivateDirectoryFailure(code: .invalidPath, errno: EINVAL)

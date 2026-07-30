@@ -28,6 +28,12 @@ private func sendSIGTERM(to expected: ProcessRecord) throws {
     }
 }
 
+#if SPIKE_FAULT_INJECTION
+private enum InjectedSwitchFailure: Error {
+    case postLaunchTargetVerification
+}
+#endif
+
 public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
     private let storeURL: URL
     private let activeAuthURL: URL
@@ -62,6 +68,10 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
     private var switchAppOwnedTerminationCandidates = [ProcessIdentity: ProcessRecord]()
     private var switchSentSIGTERM = false
     private var targetValidationProfileID: ProfileID?
+#if SPIKE_FAULT_INJECTION
+    private var injectPostLaunchVerificationFailure = false
+    private var postLaunchVerificationFailureInjected = false
+#endif
 
     public init(
         storeURL: URL,
@@ -247,6 +257,145 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
             email: target.email,
             active: true,
             needsRelogin: target.needsRelogin
+        )
+    }
+
+#if SPIKE_FAULT_INJECTION
+    public func testPostLaunchRollback(target value: String) async throws -> ProfileListItem {
+        guard !switchInProgress, !injectPostLaunchVerificationFailure else {
+            throw LocalCLIDataProviderFailure.switchAlreadyRunning
+        }
+        guard let store = try openStoreIfPresent() else {
+            throw LocalCLIDataProviderFailure.targetProfileUnavailable
+        }
+        let originalRegistry = try store.loadRegistry()
+        guard let sourceID = originalRegistry.activeProfileID,
+              let source = originalRegistry.profiles.first(where: { $0.id == sourceID }) else {
+            throw LocalCLIDataProviderFailure.activeProfileUnavailable
+        }
+
+        injectPostLaunchVerificationFailure = true
+        postLaunchVerificationFailureInjected = false
+        defer {
+            injectPostLaunchVerificationFailure = false
+            postLaunchVerificationFailureInjected = false
+        }
+
+        do {
+            _ = try await switchProfile(target: value)
+            throw PostLaunchRollbackTestFailure.injectionNotTriggered
+        } catch let failure as SwitchCoordinatorFailure
+            where failure == .operationFailed && postLaunchVerificationFailureInjected
+        {
+            do {
+                let restoredRegistry = try store.loadRegistry()
+                guard restoredRegistry == originalRegistry,
+                      try store.loadJournalIfPresent() == nil,
+                      try readCurrentCredential().credential == store.loadCredential(for: source.id),
+                      !(try await runningApplicationPIDs(locateApp())).isEmpty else {
+                    throw PostLaunchRollbackTestFailure.finalStateMismatch
+                }
+                return ProfileListItem(
+                    id: source.id,
+                    label: source.label,
+                    email: source.email,
+                    active: true,
+                    needsRelogin: source.needsRelogin
+                )
+            } catch {
+                throw PostLaunchRollbackTestFailure.finalStateMismatch
+            }
+        }
+    }
+#endif
+
+    public func restoreRecoveryProfile(target value: String) async throws -> ProfileListItem {
+        guard !switchInProgress else {
+            throw LocalCLIDataProviderFailure.switchAlreadyRunning
+        }
+        switchInProgress = true
+        defer {
+            switchInProgress = false
+            resetSwitchTransactionState()
+        }
+
+        guard !value.isEmpty,
+              value.unicodeScalars.count <= 64,
+              !value.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains),
+              let store = try openStoreIfPresent() else {
+            throw LocalCLIDataProviderFailure.manualRecoveryUnavailable
+        }
+        let registry = try store.loadRegistry()
+        let captureProfileID = try store.loadCaptureProfileIDIfPresent()
+        guard let journal = try store.loadJournalIfPresent(),
+              journal.phase == .rollbackFailed,
+              journal.previousProfileID != journal.targetProfileID,
+              captureProfileID == nil || captureProfileID == journal.targetProfileID,
+              registry.activeProfileID == journal.previousProfileID
+                || registry.activeProfileID == journal.targetProfileID else {
+            throw LocalCLIDataProviderFailure.manualRecoveryUnavailable
+        }
+        let profileIDs = Set(registry.profiles.map(\.id))
+        guard profileIDs == Set([journal.previousProfileID])
+                || profileIDs == Set([journal.previousProfileID, journal.targetProfileID]) else {
+            throw LocalCLIDataProviderFailure.manualRecoveryUnavailable
+        }
+        let requestedID = UUID(uuidString: value).map { ProfileID($0) }
+        let matches = registry.profiles.filter { $0.label == value || $0.id == requestedID }
+        guard matches.count == 1,
+              let profile = matches.first,
+              profile.id == journal.previousProfileID,
+              !profile.needsRelogin else {
+            throw LocalCLIDataProviderFailure.manualRecoveryUnavailable
+        }
+
+        let descriptor = try await locateApp()
+        guard ApprovedResidentRule.codexCrashpad(for: descriptor) != nil else {
+            throw LocalCLIDataProviderFailure.incompatibleApplication
+        }
+        switchDescriptor = descriptor
+        switchExpectedRegistry = registry
+        guard try await beginExclusiveTransaction() else {
+            throw LocalCLIDataProviderFailure.lockBusy
+        }
+        guard try await locateApp() == descriptor,
+              try store.loadRegistry() == registry,
+              try store.loadJournalIfPresent() == journal,
+              try store.loadCaptureProfileIDIfPresent() == captureProfileID else {
+            throw LocalCLIDataProviderFailure.manualRecoveryUnavailable
+        }
+        if registry.profiles.contains(where: { $0.id == journal.targetProfileID }) {
+            _ = try store.loadCredential(for: journal.targetProfileID)
+        }
+
+        try await requestNormalQuit()
+        try await waitForQuiescence()
+        try await revalidateCredentialMutationGate()
+        try quarantineVerificationHomes(transactionID: journal.transactionID)
+        guard try !verificationWorkspaceExists() else {
+            throw LocalCLIDataProviderFailure.manualRecoveryUnavailable
+        }
+        try await revalidateCredentialMutationGate()
+        switchActiveAuthDestination = try files.snapshot(at: activeAuthURL)
+        try await restorePreviousCredential(profile.id)
+        try await verifyPrevious(expectedEmail: profile.email)
+        try await revalidateCredentialMutationGate()
+        try await commitActiveProfile(profile.id)
+        if !registry.profiles.contains(where: { $0.id == journal.targetProfileID }) {
+            _ = try store.removeCredential(for: journal.targetProfileID)
+        }
+        if captureProfileID != nil {
+            _ = try store.removeCaptureProfileID()
+        }
+        try await removeJournalDurably()
+        try await launchPrevious()
+
+        return ProfileListItem(
+            id: profile.id,
+            label: profile.label,
+            email: profile.email,
+            active: true,
+            needsRelogin: profile.needsRelogin
         )
     }
 
@@ -683,6 +832,7 @@ public enum LocalCLIDataProviderFailure: Error, Equatable, Sendable {
     case verificationWorkspaceFailed
     case rollbackUnavailable
     case rollbackFailed
+    case manualRecoveryUnavailable
 }
 
 extension LocalCLIDataProvider: SwitchTransactionDriving {
@@ -760,14 +910,29 @@ extension LocalCLIDataProvider: SwitchTransactionDriving {
     public func waitForQuiescence() async throws {
         let descriptor = try requireSwitchContext().descriptor
         for poll in 0..<120 {
-            let inventory = try await switchProcessInventory(for: descriptor)
-            let survivors = try capturedAppOwnedSurvivors(in: inventory)
-            let survivorIdentities = Set(survivors.map(\.identity))
-            guard inventory.processes.allSatisfy({
-                !$0.disposition.blocksAuthMutation || survivorIdentities.contains($0.record.identity)
+            let inventory: ProcessInventory
+            do {
+                inventory = try await processInventory(for: descriptor)
+            } catch LocalCLIDataProviderFailure.processSnapshotUnstable {
+                try await quiescenceSleep(.milliseconds(250))
+                continue
+            }
+            let newlyDiscovered = inventory.processes.filter {
+                $0.disposition.blocksAuthMutation
+                    && switchAppOwnedTerminationCandidates[$0.record.identity] == nil
+            }
+            guard newlyDiscovered.allSatisfy({
+                $0.disposition == .appOwnedBlocker && $0.record.executablePath != nil
             }) else {
                 throw SwitchCoordinatorFailure.processBlocked
             }
+            if !newlyDiscovered.isEmpty {
+                for process in newlyDiscovered {
+                    switchAppOwnedTerminationCandidates[process.record.identity] = process.record
+                }
+                switchSentSIGTERM = false
+            }
+            let survivors = try capturedAppOwnedSurvivors(in: inventory)
             if survivors.isEmpty {
                 return
             }
@@ -880,6 +1045,13 @@ extension LocalCLIDataProvider: SwitchTransactionDriving {
               try await runningApplicationPIDs(descriptor).contains(pid) else {
             throw CodexAppLifecycleFailure.launchFailed
         }
+#if SPIKE_FAULT_INJECTION
+        if injectPostLaunchVerificationFailure {
+            injectPostLaunchVerificationFailure = false
+            postLaunchVerificationFailureInjected = true
+            throw InjectedSwitchFailure.postLaunchTargetVerification
+        }
+#endif
         switchActiveAuthDestination = .exact(
             try await verifyActiveCredential(
                 expectedEmail: expectedEmail,
@@ -932,6 +1104,23 @@ extension LocalCLIDataProvider: SwitchTransactionDriving {
         let context = try requireSwitchContext()
         guard let profile = context.registry.profiles.first(where: { $0.id == profileID }) else {
             throw LocalCLIDataProviderFailure.rollbackFailed
+        }
+        guard let expectedDestination = switchActiveAuthDestination else {
+            throw LocalCLIDataProviderFailure.rollbackFailed
+        }
+        if try files.snapshot(at: activeAuthURL) != expectedDestination {
+            guard let journal = try context.store.loadJournalIfPresent(),
+                  journal.phase == .rollbackStarted,
+                  journal.previousProfileID == profileID,
+                  let target = context.registry.profiles.first(where: { $0.id == journal.targetProfileID }) else {
+                throw LocalCLIDataProviderFailure.rollbackFailed
+            }
+            switchActiveAuthDestination = .exact(
+                try await verifyActiveCredential(
+                    expectedEmail: target.email,
+                    descriptor: context.descriptor
+                )
+            )
         }
         try await TargetCredentialValidator(driver: self).validate(profile: profile)
         let credential = try context.store.loadCredential(for: profileID)
@@ -1189,6 +1378,7 @@ private extension LocalCLIDataProvider {
 
     func removeVerificationHome(_ url: URL) throws {
         do {
+            try PrivateDirectory.validate(at: url)
             try FileManager.default.removeItem(at: url)
         } catch {
             throw LocalCLIDataProviderFailure.verificationWorkspaceFailed
@@ -1205,6 +1395,59 @@ private extension LocalCLIDataProvider {
 
     var verificationHomeURLs: [URL] {
         [credentialVerificationHomeURL, captureVerificationHomeURL]
+    }
+
+    var recoveryEvidenceURL: URL {
+        storeURL.appendingPathComponent("recovery-evidence", isDirectory: true)
+    }
+
+    func quarantineVerificationHomes(transactionID: UUID) throws {
+        let staleHomes = try verificationHomeURLs.filter(pathExists)
+        let evidenceExists = try pathExists(recoveryEvidenceURL)
+        guard !staleHomes.isEmpty || evidenceExists else { return }
+        do {
+            if evidenceExists {
+                try PrivateDirectory.validate(at: recoveryEvidenceURL)
+            } else {
+                _ = try PrivateDirectory.ensure(at: recoveryEvidenceURL)
+            }
+            for homeURL in staleHomes {
+                try PrivateDirectory.validate(at: homeURL)
+                let destination = recoveryEvidenceURL.appendingPathComponent(
+                    "\(transactionID.uuidString)-\(homeURL.lastPathComponent)-\(UUID().uuidString)",
+                    isDirectory: true
+                )
+                guard try !pathExists(destination) else {
+                    throw LocalCLIDataProviderFailure.verificationWorkspaceFailed
+                }
+                try moveVerificationHome(homeURL, to: destination)
+                try PrivateDirectory.validate(at: destination)
+            }
+            try PrivateDirectory.sync(at: recoveryEvidenceURL)
+            try PrivateDirectory.sync(at: storeURL)
+        } catch {
+            throw LocalCLIDataProviderFailure.verificationWorkspaceFailed
+        }
+    }
+
+    func moveVerificationHome(_ source: URL, to destination: URL) throws {
+        var result: Int32
+        repeat {
+            result = source.path.withCString { sourcePath in
+                destination.path.withCString { destinationPath in
+                    Darwin.rename(sourcePath, destinationPath)
+                }
+            }
+        } while result == -1 && errno == EINTR
+        guard result == 0 else {
+            throw LocalCLIDataProviderFailure.verificationWorkspaceFailed
+        }
+        do {
+            try PrivateDirectory.sync(at: destination.deletingLastPathComponent())
+            try PrivateDirectory.sync(at: source.deletingLastPathComponent())
+        } catch {
+            throw LocalCLIDataProviderFailure.verificationWorkspaceFailed
+        }
     }
 
     func createVerificationHome(_ url: URL) throws {

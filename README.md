@@ -20,10 +20,11 @@
 - 두 번째 계정 B capture, 중복 계정 차단, 실패 rollback, 첫 프로필 A 자동 복귀
 - 수동 재로그인 뒤 현재 활성 인증을 같은 이메일의 저장 프로필에 동기화
 - 저장 프로필 `switch --target`, 정상 종료, 격리 검증·refresh, 원자 교체, 재실행·검증, 실패 rollback
+- debug build의 post-launch 검증 실패 주입과 source 자동 롤백 실검증
+- `rollbackFailed` journal의 이전 프로필을 명시적으로 복구하는 `recovery restore`
 
 아직 구현·노출하지 않음:
 
-- manual recovery 명령과 concrete recovery adapter
 - 메뉴바 UI
 
 capture 명령은 앱을 자동 종료하지 않는다. 첫 capture는 현재 인증을 갱신·저장한다. 두 번째 capture는 B를 저장한 뒤 `~/.codex/auth.json`을 저장된 A로 원자 복구하고 ChatGPT 앱을 A로 다시 실행한다. 모든 auth 변경은 외부 Terminal의 대화형 확인과 process gate 뒤에만 수행한다.
@@ -113,13 +114,43 @@ cd codex-account-switcher-spike
 
 `SWITCH`를 입력해야 진행한다. 1초 뒤 앱 소유 프로세스가 남으면 `TERMINATE`를 추가로 입력해야 한다. 현재 계정 저장본 갱신 → 대상 저장본 격리 검증·갱신 → `auth.json` 원자 교체 → 앱 재실행 → 대상 이메일 검증 순서로 처리한다. `recovery_required` 또는 `rollback_failed`면 재실행하지 말고 `recovery status`를 확인한다.
 
+### Post-launch 자동 롤백 실검증
+
+debug build에서만 B-011 검증 실패를 1회 주입할 수 있다. 일반 전환처럼 실제 target 인증을 설치하고 앱을 실행하지만, target PID 확인 직후 검증 실패를 발생시켜 기존 source rollback 경로를 실행한다. 실제 `auth.json`을 수동 훼손하지 않는다.
+
+현재 A가 활성이라면 외부 Terminal에서 실행한다.
+
+```sh
+./Scripts/dev.sh run switch --target B --test-post-launch-rollback
+```
+
+`ROLLBACK_TEST`를 입력해야 진행한다. 잔존 앱 프로세스가 있으면 forward와 rollback 종료에서 각각 `TERMINATE` 확인이 나올 수 있다. 성공 출력은 `rollback_test=passed`와 A `active=true`다. 이어서 다음을 확인한다.
+
+```sh
+./Scripts/dev.sh run inspect
+./Scripts/dev.sh run profiles list
+./Scripts/dev.sh run recovery status
+```
+
+A 활성, B 비활성, `recovery=none`이어야 한다. `rollback_failed`, `recovery=pending`, `recovery=blocked`면 다시 실행하지 말고 상태를 보존한다. release build에는 실패 주입 명령이 포함되지 않는다.
+
+### rollbackFailed 수동 복구
+
+`recovery status`가 `phase=rollbackFailed`일 때만 journal의 이전 프로필을 명시적으로 복구한다. 새 전환이나 수동 파일 복사를 먼저 하지 않는다.
+
+```sh
+./Scripts/dev.sh run recovery restore --profile A
+```
+
+`RESTORE`를 입력하고, 잔존 앱 소유 프로세스 확인이 나오면 `TERMINATE`를 입력한다. process gate → stale verifier를 private `recovery-evidence`로 격리 → 저장된 A 검증 → 공용 auth 원자 복구 → A 이메일 검증 → registry A commit → capture 임시 artifact 정리 → journal 삭제 → 앱 실행 순서다. 등록된 B 프로필·저장본과 stale verifier 증거는 보존한다. 성공 출력은 `recovery=restored`, A `active=true`이며 `recovery status`는 `recovery=none`이어야 한다.
+
 ## 안전 규칙
 
 - 실제 credential, token, cookie를 repo·로그·테스트 fixture에 넣지 않는다.
 - `auth.json` 원문, raw App Server stderr, 전체 process argv/environment를 출력하지 않는다.
 - 공식 앱과 관련 writer가 완전히 종료되기 전 auth를 쓰지 않는다.
 - 독립 Codex CLI를 자동 종료하지 않는다.
-- 종료 전 확인한 exact 앱 소유 프로세스만 1초 유예와 별도 사용자 확인 뒤 `SIGTERM`한다.
+- 종료 대기 중 확인한 exact 앱 소유 프로세스만 1초 유예와 별도 사용자 확인 뒤 `SIGTERM`한다.
 - `SIGKILL`, `kill -9`, 독립·분류 불명 프로세스 자동 종료는 사용하지 않는다.
 - 실제 앱 종료·계정 전환은 Codex 앱 내부 task가 아니라 외부 Terminal에서 수행한다.
 

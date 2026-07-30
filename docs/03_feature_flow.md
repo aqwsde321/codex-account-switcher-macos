@@ -30,7 +30,7 @@
 
 ### 진입 조건
 
-- macOS에 공식 `/Applications/Codex.app` 또는 동일 bundle identifier의 앱이 설치돼 있다.
+- macOS에 공식 `/Applications/ChatGPT.app` 또는 동일 bundle identifier의 앱이 설치돼 있다.
 - MVP는 환경변수로 변경한 `CODEX_HOME`이 아니라 기본 `~/.codex`만 지원한다.
 - 파일 기반 `auth.json`을 읽고 쓸 수 있다.
 - ChatGPT 로그인 계정이며 App Server `account/read`가 이메일을 반환한다.
@@ -318,23 +318,22 @@ preparing → quitRequested → quiescent → refreshingCurrent → currentSaved
 
 ### 현재 설치본에서 확인된 부분
 
-- 앱 경로: `/Applications/Codex.app`
+- 앱 경로: `/Applications/ChatGPT.app`
 - bundle identifier: `com.openai.codex`
-- 표시 버전/build: `26.721.41059` / `5848`
+- 표시 버전/build: `26.721.81911` / `5973`
 - 메인 실행 파일: `Contents/MacOS/ChatGPT`
 - bundled CLI: `Contents/Resources/codex`
-- bundled CLI 버전: `codex-cli 0.146.0-alpha.3.1`
 - App Server stdio는 LF-delimited JSON이고 `account/read`가 설치 스키마에 존재한다.
 - 현재 기본 `~/.codex/auth.json`은 일반 `0600` 파일로 관찰됐다. 내용은 출력하지 않았다.
 
-### 아직 실증되지 않은 핵심 가정
+### 실제 계정 확인 결과
 
-1. 완전 종료 후 `auth.json` 교체를 공식 앱이 새 로그인으로 채택하는가?
-2. Electron/Chromium 상태가 이전 계정을 다시 덮어쓰지 않는가?
-3. A가 만든 동일 task를 B가 열고 실제 메시지를 보낼 수 있는가?
-4. B에서 다시 A로 돌아왔을 때 같은 task를 계속 사용할 수 있는가?
+1. 완전 종료 후 `auth.json` 교체를 공식 앱과 실제 메시지가 채택했다.
+2. A↔B 기능 왕복 3회에서 이전 Electron/helper가 인증을 되돌리지 않았다.
+3. A가 만든 같은 task를 B에서 열어 실제 메시지를 보냈다.
+4. B에서 A로 돌아온 뒤 같은 task를 계속 사용했다.
 
-이 네 항목은 문서로 확정할 수 없으며 실제 계정 Spike가 유일한 통과 근거다.
+cycle nonce와 객관적 task ID 증거를 보존하지 않아 B-010 정식 PASS는 보류한다.
 
 ## 7. 확인 필요한 핵심 엣지케이스
 

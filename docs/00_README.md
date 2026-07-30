@@ -1,9 +1,8 @@
 # Codex Account Switcher 문서 인덱스
 
 - 문서 상태: 기준안 완료
-- 구현 상태: A/B capture·동기화·일반 switch CLI 완료; manual recovery는 미구현
-- 실제 등록: A/B capture와 A 저장본 동기화 완료
-- 실제 A↔B switch: 수행하지 않음
+- 구현 상태: A/B capture·동기화·일반 switch·rollbackFailed 수동 복구 CLI 완료
+- 실제 검증: A↔B 기능 왕복 3회, 수동 A 복구 2회, B-011 자동 롤백 PASS
 - 마지막 조사일: 2026-07-30
 
 ## 1. 결론
@@ -118,16 +117,15 @@
 
 | 항목 | 값 |
 |---|---|
-| 앱 | `/Applications/Codex.app` |
+| 앱 | `/Applications/ChatGPT.app` |
 | bundle id | `com.openai.codex` |
-| version/build | `26.721.41059` / `5848` |
+| version/build | `26.721.81911` / `5973` |
 | main executable | `Contents/MacOS/ChatGPT` |
 | bundled Codex | `Contents/Resources/codex` |
-| bundled CLI version | `0.146.0-alpha.3.1` |
 | Swift | `6.2.3` |
 | 현재 auth file mode | `0600` |
 
-구현 후 hard-gate 재검사에서는 `/Applications/Codex.app`의 OS signature가 `invalid signature (code or signature have been modified)`로 실패했다. 현재 read-only CLI는 이를 `application=incompatible`로 보고한다. 이 gate는 완화하지 않으며, 공식 앱 재설치 또는 업데이트 후 재검증한다.
+현재 설치본은 signature/build hard gate를 통과해 `application=ready`이며 auth-changing 명령 실검증을 완료했다.
 
 빈 임시 `CODEX_HOME`에서 App Server를 실측해 다음을 확인했다.
 
@@ -140,19 +138,19 @@
 
 현재 앱 process tree에서 main app, Service/Renderer, bundled Codex, node/code-mode child, 재부모화된 crashpad를 관찰했다. 상세 분류는 `05_technical_design.md`를 따른다.
 
-### 실제 계정으로 아직 확인하지 않음
+### 실제 계정 확인 결과
 
-- 앱 완전 종료 후 auth 교체를 UI와 실제 요청이 모두 채택하는지
-- 이전 Electron/helper가 auth를 다시 덮어쓰지 않는지
-- 같은 task가 다른 로그인에 노출되고 요청 권한도 있는지
-- A↔B 반복 중 refresh token이 안정적으로 보존되는지
-- crashpad를 auth 무관 process로 안전하게 허용할 수 있는지
+- A↔B 기능 왕복 3회에서 UI와 실제 메시지가 교체된 인증을 채택했다.
+- 같은 task를 복사·fork 없이 계속 사용하고 최종 A로 복귀했다.
+- `rollbackFailed` 상태의 수동 A 복구를 2회 완료했다.
+- B-011 실패 주입은 source 자동 롤백과 최종 A 복귀를 완료했다.
+- cycle nonce와 객관적 task ID 증거를 보존하지 않아 B-010 정식 PASS는 보류한다.
 
 ## 7. 최상위 안전 불변조건
 
 1. 관련 process가 살아 있으면 auth를 쓰지 않는다.
 2. 독립 CLI를 자동 종료하지 않는다.
-3. 종료 전 확인한 exact 앱 소유 잔존도 별도 사용자 확인 없이는 `SIGTERM`하지 않는다. `SIGKILL`은 금지한다.
+3. 종료 대기 중 확인한 exact 앱 소유 잔존도 별도 사용자 확인 없이는 `SIGTERM`하지 않는다. `SIGKILL`은 금지한다.
 4. 현재 이메일이 등록 프로필과 다르면 해당 프로필 저장본을 갱신하지 않는다.
 5. 실제 auth/token/cookie/raw command line을 출력·로그·commit하지 않는다.
 6. 저널 단계는 다음 side effect 전에 원자적·내구성 있게 기록한다.
@@ -168,10 +166,10 @@ Swift CLI Core의 비파괴 기반 구현은 저장소 루트에 있다. 빌드�
 
 1. 완료: SwiftPM Core/CLI/test harness
 2. 완료: credential/file/journal/lock, App Server, bundle/process, 상태 머신
-3. 완료: custom async harness의 fake fixture 77개 테스트와 `inspect`/`profiles list`/`profile capture`/`profile sync-active`/`switch`/`recovery status`
+3. 완료: custom async harness의 fake fixture 78개 테스트와 `inspect`/`profiles list`/`profile capture`/`profile sync-active`/`switch`/`recovery status`/`recovery restore`
 4. 완료: 공식 ChatGPT 앱의 OS signature와 고정 build 검증
 5. 완료: A/B registration coordinator, B 등록 후 A 자동 복귀, 외부 Terminal confirmation gate
-6. 대기: 실제 A↔B switch, manual recovery, 동일 task 3회 왕복 Spike
+6. 대기: §8 형식의 동일 task 왕복 증거 보존
 7. Spike PASS인 경우에만 `MenuBarExtra` MVP
 
 구현 상세와 각 단계 검증은 `08_implementation_handoff.md`에 있다.

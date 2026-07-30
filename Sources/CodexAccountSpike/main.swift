@@ -27,7 +27,9 @@ struct CodexAccountSpikeCLI {
         let application = CLIApplication(provider: provider)
         let arguments = Array(CommandLine.arguments.dropFirst())
         let mutationConfirmed: Bool
-        if arguments.count == 3,
+        if let rollbackTestConfirmed = rollbackTestConfirmation(arguments: arguments) {
+            mutationConfirmed = rollbackTestConfirmed
+        } else if arguments.count == 3,
            arguments[0...1] == ["switch", "--target"],
            isatty(STDIN_FILENO) == 1 {
             let prompt = "공식 ChatGPT 앱을 정상 종료하고 기본 Codex 인증을 대상 프로필로 교체한 뒤 앱을 다시 실행합니다. 잔존 앱 프로세스 SIGTERM은 별도 확인합니다. 계속하려면 SWITCH 입력: "
@@ -41,6 +43,14 @@ struct CodexAccountSpikeCLI {
                 try? FileHandle.standardError.write(contentsOf: data)
             }
             mutationConfirmed = readLine() == "SYNC"
+        } else if arguments.count == 4,
+                  arguments[0...2] == ["recovery", "restore", "--profile"],
+                  isatty(STDIN_FILENO) == 1 {
+            let prompt = "rollbackFailed 상태에서 저장된 이전 프로필 인증을 검증·복구하고 journal을 제거한 뒤 ChatGPT 앱을 실행합니다. 계속하려면 RESTORE 입력: "
+            if let data = prompt.data(using: .utf8) {
+                try? FileHandle.standardError.write(contentsOf: data)
+            }
+            mutationConfirmed = readLine() == "RESTORE"
         } else if arguments.count == 4,
                   arguments[0...2] == ["profile", "capture", "--label"],
                   isatty(STDIN_FILENO) == 1 {
@@ -64,5 +74,23 @@ struct CodexAccountSpikeCLI {
             try? FileHandle.standardError.write(contentsOf: error)
         }
         exit(result.exitCode)
+    }
+
+    private static func rollbackTestConfirmation(arguments: [String]) -> Bool? {
+#if SPIKE_FAULT_INJECTION
+        guard arguments.count == 4,
+              arguments[0...1] == ["switch", "--target"],
+              arguments[3] == "--test-post-launch-rollback" else {
+            return nil
+        }
+        guard isatty(STDIN_FILENO) == 1 else { return false }
+        let prompt = "대상 계정으로 실제 전환·실행한 뒤 post-launch 검증 실패를 주입하고 이전 계정 복구를 검증합니다. 계속하려면 ROLLBACK_TEST 입력: "
+        if let data = prompt.data(using: .utf8) {
+            try? FileHandle.standardError.write(contentsOf: data)
+        }
+        return readLine() == "ROLLBACK_TEST"
+#else
+        return nil
+#endif
     }
 }

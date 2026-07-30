@@ -68,12 +68,23 @@ public enum RecoveryCLIStatus: Equatable, Sendable {
     case blocked
 }
 
+#if SPIKE_FAULT_INJECTION
+public enum PostLaunchRollbackTestFailure: Error, Equatable, Sendable {
+    case injectionNotTriggered
+    case finalStateMismatch
+}
+#endif
+
 public protocol CLIDataProviding: Sendable {
     func inspect() async throws -> InspectionReport
     func profiles() async throws -> [ProfileListItem]
     func captureProfile(label: String) async throws -> ProfileListItem
     func syncActiveProfile() async throws -> ProfileListItem
     func switchProfile(target: String) async throws -> ProfileListItem
+    func restoreRecoveryProfile(target: String) async throws -> ProfileListItem
+#if SPIKE_FAULT_INJECTION
+    func testPostLaunchRollback(target: String) async throws -> ProfileListItem
+#endif
     func recoveryStatus() async throws -> RecoveryCLIStatus
 }
 
@@ -98,6 +109,25 @@ public struct CLIApplication: Sendable {
 
     public func run(arguments: [String], mutationConfirmed: Bool = false) async -> CLIResult {
         do {
+#if SPIKE_FAULT_INJECTION
+            if arguments.count == 4,
+               arguments[0...1] == ["switch", "--target"],
+               arguments[3] == "--test-post-launch-rollback" {
+                guard mutationConfirmed else {
+                    return CLIResult(
+                        exitCode: 77,
+                        standardOutput: "",
+                        standardError: "error=confirmation_required\n"
+                    )
+                }
+                let profile = try await provider.testPostLaunchRollback(target: arguments[2])
+                return CLIResult(
+                    exitCode: 0,
+                    standardOutput: "rollback_test=passed\n" + render([profile]),
+                    standardError: ""
+                )
+            }
+#endif
             if arguments.count == 3,
                arguments[0...1] == ["switch", "--target"] {
                 guard mutationConfirmed else {
@@ -110,6 +140,22 @@ public struct CLIApplication: Sendable {
                 return CLIResult(
                     exitCode: 0,
                     standardOutput: render([try await provider.switchProfile(target: arguments[2])]),
+                    standardError: ""
+                )
+            }
+            if arguments.count == 4,
+               arguments[0...2] == ["recovery", "restore", "--profile"] {
+                guard mutationConfirmed else {
+                    return CLIResult(
+                        exitCode: 77,
+                        standardOutput: "",
+                        standardError: "error=confirmation_required\n"
+                    )
+                }
+                let profile = try await provider.restoreRecoveryProfile(target: arguments[3])
+                return CLIResult(
+                    exitCode: 0,
+                    standardOutput: "recovery=restored\n" + render([profile]),
                     standardError: ""
                 )
             }
@@ -178,15 +224,23 @@ public struct CLIApplication: Sendable {
 
 private extension CLIApplication {
     var usage: String {
-        """
-        codex-account-spike <command>
-          inspect
-          profiles list
-          profile capture --label <label>
-          profile sync-active
-          switch --target <profile-id-or-label>
-          recovery status
-        """ + "\n"
+        var commands = [
+            "codex-account-spike <command>",
+            "  inspect",
+            "  profiles list",
+            "  profile capture --label <label>",
+            "  profile sync-active",
+            "  switch --target <profile-id-or-label>",
+            "  recovery status",
+            "  recovery restore --profile <profile-id-or-label>",
+        ]
+#if SPIKE_FAULT_INJECTION
+        commands.insert(
+            "  switch --target <profile-id-or-label> --test-post-launch-rollback",
+            at: commands.count - 1
+        )
+#endif
+        return commands.joined(separator: "\n") + "\n"
     }
 
     func render(_ report: InspectionReport) -> String {
@@ -255,6 +309,8 @@ private extension CLIApplication {
             "capture_busy"
         case LocalCLIDataProviderFailure.pendingRecovery:
             "recovery_required"
+        case LocalCLIDataProviderFailure.manualRecoveryUnavailable:
+            "recovery_unavailable"
         case LocalCLIDataProviderFailure.profileAlreadyExists:
             "profile_already_exists"
         case LocalCLIDataProviderFailure.activeProfileUnavailable:
@@ -281,6 +337,12 @@ private extension CLIApplication {
             "process_blocked"
         case LocalCLIDataProviderFailure.activeAuthChanged:
             "active_auth_changed"
+        case LocalCLIDataProviderFailure.rollbackFailed:
+            "rollback_failed"
+#if SPIKE_FAULT_INJECTION
+        case is PostLaunchRollbackTestFailure:
+            "rollback_test_failed"
+#endif
         case is AppServerProbeFailure:
             "account_probe_failed"
         default:

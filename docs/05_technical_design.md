@@ -1,6 +1,6 @@
 # 기술 설계
 
-- 상태: 구현 준비용 기준안, 실제 계정 Spike 전
+- 상태: Swift CLI Spike 구현·실계정 기능 검증 완료, 메뉴바 앱 구현 전
 - 기준일: 2026-07-28
 - 구현 순서: Swift CLI Spike 통과 후 SwiftUI 메뉴바 앱
 
@@ -35,14 +35,13 @@ Swift CLI Spike는 현재 환경에서 SwiftPM으로 빌드할 수 있다. `Menu
 
 | 항목 | 관찰값 |
 |---|---|
-| bundle path | `/Applications/Codex.app` |
+| bundle path | `/Applications/ChatGPT.app` |
 | bundle identifier | `com.openai.codex` |
 | display/name | ChatGPT / Codex |
 | main executable | `Contents/MacOS/ChatGPT` |
-| version | `26.721.41059` |
-| build | `5848` |
+| version | `26.721.81911` |
+| build | `5973` |
 | bundled Codex | `Contents/Resources/codex` |
-| Codex CLI version | `0.146.0-alpha.3.1` |
 | signing Team ID | `2DC432GLL2` (현재 설치본 관찰값) |
 | hardened runtime | 활성 |
 | notarization ticket | stapled |
@@ -263,7 +262,7 @@ startedAt, updatedAt
 ### 실행
 
 ```text
-/Applications/Codex.app/Contents/Resources/codex app-server --stdio
+/Applications/ChatGPT.app/Contents/Resources/codex app-server --stdio
 ```
 
 실제 경로는 locator 결과를 사용한다. `--listen stdio://`와 `--stdio`는 현재 설치본에서 지원된다.
@@ -489,13 +488,13 @@ registry alone 또는 journal alone으로 commit을 추론하지 않는다. phas
 | `verifyingTarget` | target 앱을 정상 종료하고 process gate 후 previous rollback한다. network 실패는 target revocation이나 `needsRelogin` 근거로 사용하지 않는다. |
 | `targetVerified` | active target을 다시 확인하고 registry target commit을 durable하게 완료한다. 이미 commit됐어도 idempotent하게 확인한 뒤 journal `unlink`와 parent `fsync`를 수행한다. active가 target이 아니면 previous rollback으로 간다. |
 | `rollbackStarted` | 관련 writer를 quiescent하게 만든 뒤 stored previous blob을 공용 auth에 원자 복구하고 격리 `false` probe로 previous 이메일을 검증한다. 성공하면 registry previous durable commit→journal unlink와 parent `fsync`→previous 앱 재실행 순서로 끝낸다. |
-| `rollbackFailed` | 자동 auth write와 앱 재실행을 하지 않는다. configured credential store의 previous/target 원본을 보존하고 명시적 수동 recovery만 허용한다. |
+| `rollbackFailed` | 자동 auth write와 앱 재실행을 하지 않는다. configured credential store의 previous/target 원본을 보존하고 명시적 수동 recovery만 허용한다. 수동 recovery는 process gate 뒤 stale verifier를 private evidence로 격리하고 previous 복구를 먼저 durable commit한다. 등록된 target은 보존하고 미등록 capture target만 marker와 함께 제거하며 journal은 마지막에 삭제한다. |
 
 previous rollback 중 어떤 단계든 실패하면 `rollbackFailed`를 durable하게 기록한다. 성공 phase를 추측해 journal을 지우지 않는다.
 
-## 11. 예정 CLI 인터페이스
+## 11. CLI 인터페이스
 
-`inspect`, `profiles list`, 첫·두 번째 `profile capture`, 두 번째 등록 후 첫 프로필 자동 복귀, `profile sync-active`, 일반 `switch`, `recovery status`는 구현됐다. manual recovery 등 나머지는 예정 인터페이스다.
+`inspect`, `profiles list`, 첫·두 번째 `profile capture`, 두 번째 등록 후 첫 프로필 자동 복귀, `profile sync-active`, 일반 `switch`, `recovery status`, `recovery restore`는 구현됐다. `verify`, `cleanup`은 예정 인터페이스다.
 
 ```text
 codex-account-spike inspect

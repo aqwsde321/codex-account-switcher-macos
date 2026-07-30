@@ -1,6 +1,6 @@
 # 보안·복구 설계
 
-- 상태: Swift CLI Spike 범위 구현 완료, manual recovery·제품 Keychain·배포 보안 구현 전
+- 상태: Swift CLI Spike와 manual recovery 구현 완료, 제품 Keychain·배포 보안 구현 전
 - 기준일: 2026-07-28
 - 적용 대상: Swift CLI Spike와 후속 macOS 메뉴바 앱
 
@@ -265,7 +265,7 @@ preparing
 1. 원래 오류를 안전한 오류 코드로 보존한다.
 2. 다음 rollback side effect 전에 journal을 `rollbackStarted`로 내구 기록한다.
 3. 대상 앱을 실행했다면 정상 종료한다.
-4. 종료 요청이 실패하거나 잔존 프로세스가 있으면 `rollbackFailed`를 내구 기록하고 파일을 쓰지 않은 채 정지한다.
+4. 종료 대기 중 새로 확인한 exact 앱 소유 프로세스는 별도 승인 후 `SIGTERM` 후보에 포함한다. 독립·분류 불명 프로세스나 종료 실패가 있으면 `rollbackFailed`를 내구 기록하고 파일을 쓰지 않은 채 정지한다.
 5. 이전 프로필의 최신 configured credential-store 저장본을 가져온다.
 6. 이전 blob 자체를 격리 홈의 App Server로 검증한다.
 7. 이메일 일치 시 공용 `auth.json`에 내구 원자 복구한다.
@@ -300,19 +300,21 @@ journal 단계만 믿고 파일을 쓰지 않는다. 항상 현재 프로세스 
 
 자동 롤백이 실패했을 때만 사용한다.
 
-1. 공식 Codex 앱을 사용자가 정상 종료한다.
-2. Helper가 보여주는 모든 관련 PID가 종료됐는지 확인한다.
-3. 독립 Codex CLI/IDE 작업도 사용자가 정상 종료한다.
-4. Helper의 `recovery status` 예정 명령으로 journal, 활성 프로필 ID, 현재 이메일 판독 가능 여부를 확인한다.
-5. 사용자가 복구할 등록 프로필을 명시적으로 선택한다.
-6. Helper가 저장본 이메일을 격리 홈에서 검증한다.
-7. Helper의 `recovery restore <profile>` 예정 명령으로 원자 복구한다.
-8. 공용 홈 이메일 일치를 확인한다.
-9. registry의 active profile을 복구 프로필로 내구 저장한다.
-10. journal을 unlink하고 parent directory를 `fsync`한다.
+1. 새 전환, 로그아웃, 수동 auth 복사를 하지 않고 실패 상태를 보존한다.
+2. 독립 Codex CLI/IDE 작업은 사용자가 정상 종료한다.
+3. `recovery status`로 `phase=rollbackFailed`를 확인한다.
+4. `recovery restore --profile <profile-id-or-label>`로 journal의 이전 프로필을 명시한다.
+5. `RESTORE`를 입력하고, 잔존 앱 소유 프로세스 확인이 나오면 `TERMINATE`를 입력한다.
+6. process gate 뒤 알려진 verifier workspace가 소유자 전용 `0700` 실제 디렉터리인지 검증하고 private `recovery-evidence`로 격리한다. symlink·권한 변조면 상태를 보존하고 중단한다.
+7. Helper가 저장본 이메일 검증→공용 auth 원자 복구→공용 이메일 재검증을 수행한다.
+8. registry의 active profile을 복구 프로필로 내구 저장한다.
+9. capture 실패라면 등록된 target은 보존하고, 미등록 임시 target credential과 capture marker만 제거한다.
+10. journal을 마지막에 unlink하고 parent directory를 `fsync`한다.
 11. 확인 성공 후 공식 앱을 실행한다.
 
 수동 복구에서도 auth 원문을 터미널에 출력하거나 텍스트 편집기로 붙여넣지 않는다. 저장본을 직접 `cp`하는 절차는 최후의 개발자 복구 수단이며 일반 사용자 UI로 제공하지 않는다.
+
+Spike는 stale verifier workspace 내용을 복구 입력으로 사용하지 않고 private store의 `recovery-evidence`에 보존한다. 제품판은 durable probe metadata로 소유 프로필을 판별하고 명시적 evidence cleanup을 제공해야 한다.
 
 ## 11. 로그·진단 정책
 

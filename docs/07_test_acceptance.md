@@ -428,7 +428,7 @@ MVP는 정확히 2개 계정만 노출하지만 `personalAuth`, `workAuth` 같�
 - 최종 A 복구와 재실행 유지 B-012 PASS
 - secret exposure 0건
 
-2026-07-30 기능 왕복은 확인했지만 B-010의 §16 증거와 B-011 black-box 검증이 남아 있어 엄격한 GO는 보류한다. 현재 결과는 `04_spike_runbook.md` §18에 기록한다.
+2026-07-30 B-011 black-box 자동 롤백은 PASS했다. B-010의 §16 형식 증거를 보존하지 않아 엄격한 GO는 보류한다. 현재 결과는 `04_spike_runbook.md` §18에 기록한다.
 
 ### NO-GO — 제품 구현 중단
 

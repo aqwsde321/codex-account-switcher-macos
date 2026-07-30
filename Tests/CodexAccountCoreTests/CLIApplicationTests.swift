@@ -2,7 +2,7 @@ import Foundation
 import CodexAccountCore
 
 func cliApplicationTests() -> [TestCase] {
-    [
+    var tests = [
         TestCase("CodexAppLocator falls back to the installed ChatGPT bundle") {
             let candidates = CodexAppLocator.candidateURLs(
                 discovered: [],
@@ -301,23 +301,139 @@ func cliApplicationTests() -> [TestCase] {
                 let switchedRecovery = await application.run(arguments: ["recovery", "status"])
                 let switchedLaunchCount = await MainActor.run { launches.count }
 
-                let independentProcesses = TerminableProcessSnapshotProvider()
-                independentProcesses.install(
-                    ProcessRecord(
-                        identity: ProcessIdentity(pid: 88, startSeconds: 200, startMicroseconds: 1),
-                        parentPID: 1,
-                        executablePath: "/opt/homebrew/bin/codex",
-                        nameHint: "codex"
+#if SPIKE_FAULT_INJECTION
+                let faultProcesses = TerminableProcessSnapshotProvider()
+                let faultLaunches = await MainActor.run { AppLaunchRecorder() }
+                let faultConfirmations = TerminationConfirmationRecorder()
+                let faultInitialRoot = ProcessRecord(
+                    identity: ProcessIdentity(pid: 105, startSeconds: 304, startMicroseconds: 1),
+                    parentPID: 1,
+                    executablePath: descriptor.mainExecutableURL.path,
+                    nameHint: "ChatGPT"
+                )
+                let faultTargetRoot = ProcessRecord(
+                    identity: ProcessIdentity(pid: 103, startSeconds: 302, startMicroseconds: 1),
+                    parentPID: 1,
+                    executablePath: descriptor.mainExecutableURL.path,
+                    nameHint: "ChatGPT"
+                )
+                let faultLateTargetChild = ProcessRecord(
+                    identity: ProcessIdentity(pid: 106, startSeconds: 305, startMicroseconds: 1),
+                    parentPID: faultTargetRoot.identity.pid,
+                    executablePath: bundleURL
+                        .appendingPathComponent("Contents/Helpers/late-target-worker")
+                        .path,
+                    nameHint: "late-target-worker"
+                )
+                let faultSourceRoot = ProcessRecord(
+                    identity: ProcessIdentity(pid: 104, startSeconds: 303, startMicroseconds: 1),
+                    parentPID: 1,
+                    executablePath: descriptor.mainExecutableURL.path,
+                    nameHint: "ChatGPT"
+                )
+                faultProcesses.install(faultInitialRoot)
+                let faultRunningPIDs = await MainActor.run {
+                    RootExitDuringSnapshotPIDs(
+                        processes: faultProcesses,
+                        roots: [faultInitialRoot, faultTargetRoot, faultSourceRoot]
+                    )
+                }
+                let faultApplication = CLIApplication(
+                    provider: LocalCLIDataProvider(
+                        storeURL: storeURL,
+                        activeAuthURL: authURL,
+                        processProvider: faultProcesses,
+                        locateApp: { descriptor },
+                        runningApplicationPIDs: { _ in faultRunningPIDs.current() },
+                        requestApplicationTermination: { _ in
+                            let running = [faultInitialRoot, faultTargetRoot, faultSourceRoot]
+                                .filter { faultProcesses.contains(pid: $0.identity.pid) }
+                            if running.contains(faultInitialRoot) {
+                                faultRunningPIDs.requestRootExit()
+                            } else if running.contains(faultSourceRoot) {
+                                running.forEach(faultProcesses.terminate)
+                            }
+                            return running.map(\.identity.pid)
+                        },
+                        confirmAppOwnedTermination: faultConfirmations.confirm,
+                        requestProcessTermination: { process in
+                            faultProcesses.terminate(process)
+                            if process.identity == faultTargetRoot.identity {
+                                faultProcesses.install(faultLateTargetChild)
+                            }
+                        },
+                        normalTerminationGracePolls: 0,
+                        quiescenceSleep: { _ in },
+                        launchApplication: { _ in
+                            faultLaunches.record()
+                            let root = faultLaunches.count == 1 ? faultTargetRoot : faultSourceRoot
+                            if faultLaunches.count == 1 {
+                                let files = DarwinDurableFileOperations()
+                                let current = try files.read(at: authURL)
+                                _ = try files.replace(
+                                    contents: current.contents,
+                                    at: authURL,
+                                    expecting: .exact(current.identity)
+                                )
+                            }
+                            faultProcesses.install(root)
+                            return root.identity.pid
+                        }
                     )
                 )
+                let faultAuthBefore = try Data(contentsOf: authURL)
+                let faultRegistryBefore = try store.loadRegistry()
+                let faultResult = await faultApplication.run(
+                    arguments: ["switch", "--target", "A", "--test-post-launch-rollback"],
+                    mutationConfirmed: true
+                )
+                let faultAuthAfter = try Data(contentsOf: authURL)
+                let faultRegistryAfter = try store.loadRegistry()
+                let faultRecovery = await faultApplication.run(arguments: ["recovery", "status"])
+                let faultLaunchCount = await MainActor.run { faultLaunches.count }
+
+                try expect(faultResult.exitCode == 0, "B-011 rollback test failed: \(faultResult.standardError)")
+                try expect(faultResult.standardOutput.contains("rollback_test=passed"), "B-011 PASS missing")
+                try expect(faultResult.standardOutput.contains("active=true label=B"), "B was not restored")
+                try expect(faultAuthAfter == faultAuthBefore, "B-011 did not restore active auth")
+                try expect(faultRegistryAfter == faultRegistryBefore, "B-011 changed active registry")
+                try expect(faultRecovery.standardOutput == "recovery=none\n", "B-011 left recovery state")
+                try expect(faultLaunchCount == 2, "B-011 did not launch target and restored source")
+                try expect(faultConfirmations.counts == [1, 1], "late target child was not confirmed separately")
+                try expect(!faultProcesses.contains(pid: faultTargetRoot.identity.pid), "target app remained running")
+                try expect(!faultProcesses.contains(pid: faultLateTargetChild.identity.pid), "late target child remained running")
+                try expect(faultProcesses.contains(pid: faultSourceRoot.identity.pid), "source app was not relaunched")
+#endif
+
+                let independentProcesses = TerminableProcessSnapshotProvider()
+                let independentAppRoot = ProcessRecord(
+                    identity: ProcessIdentity(pid: 87, startSeconds: 199, startMicroseconds: 1),
+                    parentPID: 1,
+                    executablePath: descriptor.mainExecutableURL.path,
+                    nameHint: "ChatGPT"
+                )
+                let independentCodex = ProcessRecord(
+                    identity: ProcessIdentity(pid: 88, startSeconds: 200, startMicroseconds: 1),
+                    parentPID: 1,
+                    executablePath: "/opt/homebrew/bin/codex",
+                    nameHint: "codex"
+                )
+                independentProcesses.install(independentAppRoot)
                 let blockedApplication = CLIApplication(
                     provider: LocalCLIDataProvider(
                         storeURL: storeURL,
                         activeAuthURL: authURL,
                         processProvider: independentProcesses,
                         locateApp: { descriptor },
-                        runningApplicationPIDs: { _ in [] },
-                        requestApplicationTermination: { _ in [] },
+                        runningApplicationPIDs: { _ in
+                            independentProcesses.contains(pid: independentAppRoot.identity.pid)
+                                ? [independentAppRoot.identity.pid]
+                                : []
+                        },
+                        requestApplicationTermination: { _ in
+                            independentProcesses.install(independentCodex)
+                            return [independentAppRoot.identity.pid]
+                        },
                         requestProcessTermination: { independentProcesses.terminate($0) },
                         normalTerminationGracePolls: 0,
                         quiescenceSleep: { _ in }
@@ -489,6 +605,180 @@ func cliApplicationTests() -> [TestCase] {
                 try expect(rollbackAuthAfter == rollbackAuthBefore, "rollback did not restore active auth")
                 try expect(rollbackRegistryAfter == rollbackRegistryBefore, "rollback changed the active registry")
                 try expect(rollbackRecovery.standardOutput == "recovery=none\n", "successful rollback left recovery state")
+
+                let manualRegistry = try ProfileRegistry(
+                    activeProfileID: profileA.id,
+                    profiles: try store.loadRegistry().profiles
+                )
+                _ = try store.saveRegistry(manualRegistry)
+                let manualCurrentAuth = try CredentialBlob(validating: Data(contentsOf: authURL))
+                let manualStoredB = try store.loadCredential(for: profileB.id)
+                try expect(
+                    manualCurrentAuth == manualStoredB,
+                    "manual recovery fixture does not have target B auth"
+                )
+                let manualStartedAt = Date(timeIntervalSince1970: 1_700_000_100)
+                _ = try store.createJournalIfAbsent(
+                    SwitchJournalRecord(
+                        transactionID: UUID(),
+                        phase: .rollbackFailed,
+                        previousProfileID: profileA.id,
+                        targetProfileID: profileB.id,
+                        startedAt: manualStartedAt,
+                        updatedAt: manualStartedAt
+                    )
+                )
+                let staleVerificationHome = storeURL.appendingPathComponent(
+                    "credential-verification-workspace",
+                    isDirectory: true
+                )
+                try FileManager.default.createDirectory(
+                    at: staleVerificationHome,
+                    withIntermediateDirectories: false
+                )
+                try FileManager.default.setAttributes(
+                    [.posixPermissions: 0o700],
+                    ofItemAtPath: staleVerificationHome.path
+                )
+                let staleEvidence = Data("stale verifier evidence".utf8)
+                let staleEvidenceURL = staleVerificationHome.appendingPathComponent("auth.json")
+                try staleEvidence.write(to: staleEvidenceURL, options: .withoutOverwriting)
+                try FileManager.default.setAttributes(
+                    [.posixPermissions: 0o600],
+                    ofItemAtPath: staleEvidenceURL.path
+                )
+                let staleCaptureVerificationHome = storeURL.appendingPathComponent(
+                    "capture-verification-workspace",
+                    isDirectory: true
+                )
+                try FileManager.default.createDirectory(
+                    at: staleCaptureVerificationHome,
+                    withIntermediateDirectories: false
+                )
+                try FileManager.default.setAttributes(
+                    [.posixPermissions: 0o700],
+                    ofItemAtPath: staleCaptureVerificationHome.path
+                )
+                let manualBlockedProcesses = TerminableProcessSnapshotProvider()
+                manualBlockedProcesses.install(
+                    ProcessRecord(
+                        identity: ProcessIdentity(pid: 203, startSeconds: 306, startMicroseconds: 1),
+                        parentPID: 1,
+                        executablePath: "/opt/homebrew/bin/codex",
+                        nameHint: "codex"
+                    )
+                )
+                let blockedManualApplication = CLIApplication(
+                    provider: LocalCLIDataProvider(
+                        storeURL: storeURL,
+                        activeAuthURL: authURL,
+                        processProvider: manualBlockedProcesses,
+                        locateApp: { descriptor },
+                        runningApplicationPIDs: { _ in [] },
+                        requestApplicationTermination: { _ in [] },
+                        normalTerminationGracePolls: 0,
+                        quiescenceSleep: { _ in }
+                    )
+                )
+                let manualLaunches = await MainActor.run { AppLaunchRecorder() }
+                let manualApplication = CLIApplication(
+                    provider: LocalCLIDataProvider(
+                        storeURL: storeURL,
+                        activeAuthURL: authURL,
+                        processProvider: EmptyProcessSnapshotProvider(),
+                        locateApp: { descriptor },
+                        runningApplicationPIDs: { _ in manualLaunches.count > 0 ? [201] : [] },
+                        requestApplicationTermination: { _ in [] },
+                        normalTerminationGracePolls: 0,
+                        quiescenceSleep: { _ in },
+                        launchApplication: { _ in
+                            manualLaunches.record()
+                            return 201
+                        }
+                    )
+                )
+                let manualArguments = ["recovery", "restore", "--profile", "A"]
+                let deniedManualRecovery = await manualApplication.run(arguments: manualArguments)
+                let wrongManualRecovery = await manualApplication.run(
+                    arguments: ["recovery", "restore", "--profile", "B"],
+                    mutationConfirmed: true
+                )
+                let blockedManualRecovery = await blockedManualApplication.run(
+                    arguments: manualArguments,
+                    mutationConfirmed: true
+                )
+                let journalAfterWrongManualRecovery = try store.loadJournalIfPresent()
+                let authAfterWrongManualRecovery = try CredentialBlob(validating: Data(contentsOf: authURL))
+                let staleWorkspacePreserved = FileManager.default.fileExists(
+                    atPath: staleVerificationHome.path
+                ) && FileManager.default.fileExists(atPath: staleCaptureVerificationHome.path)
+                let restoredManualRecovery = await manualApplication.run(
+                    arguments: manualArguments,
+                    mutationConfirmed: true
+                )
+                let manualRecoveryStatus = await manualApplication.run(arguments: ["recovery", "status"])
+                let restoredManualRegistry = try store.loadRegistry()
+                let restoredManualAuth = try CredentialBlob(validating: Data(contentsOf: authURL))
+                let manualStoredA = try store.loadCredential(for: profileA.id)
+                let manualLaunchCount = await MainActor.run { manualLaunches.count }
+                let recoveryEvidenceURL = storeURL.appendingPathComponent(
+                    "recovery-evidence",
+                    isDirectory: true
+                )
+                let recoveryEvidenceHomes = try FileManager.default.contentsOfDirectory(
+                    at: recoveryEvidenceURL,
+                    includingPropertiesForKeys: nil
+                )
+                let staleEvidencePreserved = recoveryEvidenceHomes.contains {
+                    (try? Data(contentsOf: $0.appendingPathComponent("auth.json"))) == staleEvidence
+                }
+
+                try expect(
+                    deniedManualRecovery.standardError == "error=confirmation_required\n",
+                    "manual recovery ran without confirmation"
+                )
+                try expect(
+                    wrongManualRecovery.standardError == "error=recovery_unavailable\n",
+                    "manual recovery accepted the journal target"
+                )
+                try expect(
+                    journalAfterWrongManualRecovery?.phase == .rollbackFailed,
+                    "rejected manual recovery removed the journal"
+                )
+                try expect(authAfterWrongManualRecovery == manualStoredB, "rejected manual recovery changed auth")
+                try expect(
+                    staleWorkspacePreserved,
+                    "rejected manual recovery removed the stale workspace"
+                )
+                try expect(
+                    blockedManualRecovery.standardError == "error=process_blocked\n",
+                    "manual recovery ignored an independent Codex process"
+                )
+                try expect(
+                    restoredManualRecovery.exitCode == 0,
+                    "manual recovery failed: \(restoredManualRecovery.standardError)"
+                )
+                try expect(
+                    restoredManualRecovery.standardOutput.contains("active=true label=A"),
+                    "manual recovery did not report A"
+                )
+                try expect(restoredManualRegistry.activeProfileID == profileA.id, "manual recovery did not restore registry A")
+                try expect(
+                    restoredManualAuth == manualStoredA,
+                    "manual recovery did not restore auth A"
+                )
+                try expect(manualRecoveryStatus.standardOutput == "recovery=none\n", "manual recovery left journal")
+                try expect(manualLaunchCount == 1, "manual recovery did not relaunch A")
+                try expect(
+                    !FileManager.default.fileExists(atPath: staleVerificationHome.path),
+                    "manual recovery left the stale workspace"
+                )
+                try expect(
+                    !FileManager.default.fileExists(atPath: staleCaptureVerificationHome.path),
+                    "manual recovery left the stale capture workspace"
+                )
+                try expect(recoveryEvidenceHomes.count == 2, "manual recovery lost verifier evidence")
+                try expect(staleEvidencePreserved, "manual recovery changed verifier evidence")
             }
         },
         TestCase("CLI sync-active validates and stores only the registered active profile") {
@@ -955,6 +1245,108 @@ func cliApplicationTests() -> [TestCase] {
                 try expect(journal?.phase == .rollbackFailed, "rollback failure journal was not preserved")
                 try expect(pendingCaptureID != nil, "capture evidence was removed")
                 try expect(recovery.standardOutput.contains("phase=rollbackFailed"), "recovery status hid failure")
+
+                guard let pendingCaptureID,
+                      let profileB = registry.profiles.first(where: { $0.id == pendingCaptureID }) else {
+                    throw TestFailure(description: "capture recovery fixture lost target B")
+                }
+                let storedB = try store.loadCredential(for: profileB.id)
+                let recoveryLaunches = await MainActor.run { AppLaunchRecorder() }
+                let recoveryApplication = CLIApplication(
+                    provider: LocalCLIDataProvider(
+                        storeURL: storeURL,
+                        activeAuthURL: authURL,
+                        processProvider: EmptyProcessSnapshotProvider(),
+                        locateApp: { descriptor },
+                        runningApplicationPIDs: { _ in recoveryLaunches.count > 0 ? [202] : [] },
+                        requestApplicationTermination: { _ in [] },
+                        normalTerminationGracePolls: 0,
+                        quiescenceSleep: { _ in },
+                        launchApplication: { _ in
+                            recoveryLaunches.record()
+                            return 202
+                        }
+                    )
+                )
+                let restored = await recoveryApplication.run(
+                    arguments: ["recovery", "restore", "--profile", "A"],
+                    mutationConfirmed: true
+                )
+                let restoredRegistry = try store.loadRegistry()
+                let restoredAuth = try CredentialBlob(validating: Data(contentsOf: authURL))
+                let restoredStatus = await recoveryApplication.run(arguments: ["recovery", "status"])
+                let restoredStoredA = try store.loadCredential(for: profileA.id)
+                let restoredStoredB = try store.loadCredential(for: profileB.id)
+                let restoredCaptureID = try store.loadCaptureProfileIDIfPresent()
+                let recoveryLaunchCount = await MainActor.run { recoveryLaunches.count }
+
+                try expect(restored.exitCode == 0, "capture manual recovery failed: \(restored.standardError)")
+                try expect(restoredRegistry.activeProfileID == profileA.id, "capture recovery did not activate A")
+                try expect(restoredRegistry.profiles.contains(profileB), "capture recovery removed B")
+                try expect(restoredAuth == restoredStoredA, "capture recovery did not restore verified A auth")
+                try expect(restoredStoredB == storedB, "capture recovery changed stored B")
+                try expect(restoredCaptureID == nil, "capture recovery left marker")
+                try expect(restoredStatus.standardOutput == "recovery=none\n", "capture recovery left journal")
+                try expect(recoveryLaunchCount == 1, "capture recovery did not relaunch A")
+
+                _ = try store.saveRegistry(
+                    ProfileRegistry(activeProfileID: profileA.id, profiles: [profileA])
+                )
+                _ = try store.removeCredential(for: profileB.id)
+                let precommitTargetID = try store.createCaptureProfileID()
+                _ = try store.saveCredential(storedB, for: precommitTargetID)
+                _ = try store.createJournalIfAbsent(
+                    SwitchJournalRecord(
+                        transactionID: UUID(),
+                        phase: .rollbackFailed,
+                        previousProfileID: profileA.id,
+                        targetProfileID: precommitTargetID,
+                        startedAt: Date(timeIntervalSince1970: 1_700_000_200),
+                        updatedAt: Date(timeIntervalSince1970: 1_700_000_200)
+                    )
+                )
+                let precommitLaunches = await MainActor.run { AppLaunchRecorder() }
+                let precommitApplication = CLIApplication(
+                    provider: LocalCLIDataProvider(
+                        storeURL: storeURL,
+                        activeAuthURL: authURL,
+                        processProvider: EmptyProcessSnapshotProvider(),
+                        locateApp: { descriptor },
+                        runningApplicationPIDs: { _ in precommitLaunches.count > 0 ? [204] : [] },
+                        requestApplicationTermination: { _ in [] },
+                        normalTerminationGracePolls: 0,
+                        quiescenceSleep: { _ in },
+                        launchApplication: { _ in
+                            precommitLaunches.record()
+                            return 204
+                        }
+                    )
+                )
+                let precommitRestored = await precommitApplication.run(
+                    arguments: ["recovery", "restore", "--profile", "A"],
+                    mutationConfirmed: true
+                )
+                let precommitRegistry = try store.loadRegistry()
+                let precommitAuth = try CredentialBlob(validating: Data(contentsOf: authURL))
+                let precommitStoredA = try store.loadCredential(for: profileA.id)
+                let precommitCredentialURL = storeURL
+                    .appendingPathComponent("credentials", isDirectory: true)
+                    .appendingPathComponent("\(precommitTargetID).json", isDirectory: false)
+                let precommitCaptureID = try store.loadCaptureProfileIDIfPresent()
+                let precommitJournal = try store.loadJournalIfPresent()
+                let precommitLaunchCount = await MainActor.run { precommitLaunches.count }
+
+                try expect(precommitRestored.exitCode == 0, "pre-commit capture recovery failed")
+                try expect(precommitRegistry.profiles == [profileA], "pre-commit recovery registered target")
+                try expect(precommitRegistry.activeProfileID == profileA.id, "pre-commit recovery did not activate A")
+                try expect(precommitAuth == precommitStoredA, "pre-commit recovery did not restore A auth")
+                try expect(
+                    !FileManager.default.fileExists(atPath: precommitCredentialURL.path),
+                    "pre-commit recovery left temporary target credential"
+                )
+                try expect(precommitCaptureID == nil, "pre-commit recovery left marker")
+                try expect(precommitJournal == nil, "pre-commit recovery left journal")
+                try expect(precommitLaunchCount == 1, "pre-commit recovery did not relaunch A")
             }
         },
         TestCase("CLI capture preserves an interrupted capture backup") {
@@ -1172,7 +1564,47 @@ func cliApplicationTests() -> [TestCase] {
             }
         },
     ]
+#if SPIKE_FAULT_INJECTION
+    tests.append(rollbackTestConfirmationTest())
+#endif
+    return tests
 }
+
+#if SPIKE_FAULT_INJECTION
+private func rollbackTestConfirmationTest() -> TestCase {
+    TestCase("CLIApplication rollback test requires explicit confirmation") {
+        let provider = StubCLIDataProvider(
+            profiles: [],
+            capturedProfile: ProfileListItem(
+                id: ProfileID(UUID()),
+                label: "A",
+                email: "rollback-secret@private.example",
+                active: true,
+                needsRelogin: false
+            )
+        )
+        let application = CLIApplication(provider: provider)
+        let arguments = ["switch", "--target", "B", "--test-post-launch-rollback"]
+
+        let denied = await application.run(arguments: arguments)
+        let tested = await application.run(arguments: arguments, mutationConfirmed: true)
+        let mistyped = await application.run(
+            arguments: ["switch", "--target", "B", "--test-post-launch-rollbac"],
+            mutationConfirmed: true
+        )
+        let targets = await provider.rollbackTestTargets
+
+        try expect(denied.exitCode == 77, "unconfirmed rollback test was not rejected")
+        try expect(denied.standardError == "error=confirmation_required\n", "rollback confirmation changed")
+        try expect(tested.exitCode == 0, "confirmed rollback test failed")
+        try expect(tested.standardOutput.contains("rollback_test=passed"), "rollback PASS output missing")
+        try expect(tested.standardOutput.contains("active=true label=A"), "restored source profile missing")
+        try expect(!tested.standardOutput.contains("rollback-secret"), "rollback source identity leaked")
+        try expect(mistyped.standardError == "error=invalid_command\n", "mistyped fault flag was accepted")
+        try expect(targets == ["B"], "rollback test was dispatched before confirmation")
+    }
+}
+#endif
 
 private struct EmptyProcessSnapshotProvider: ProcessSnapshotProviding {
     func snapshot() throws -> [ProcessRecord] { [] }
@@ -1212,6 +1644,18 @@ private final class TerminableProcessSnapshotProvider: ProcessSnapshotProviding,
     }
 }
 
+private final class TerminationConfirmationRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recordedCounts = [Int]()
+
+    var counts: [Int] { lock.withLock { recordedCounts } }
+
+    func confirm(_ count: Int) -> Bool {
+        lock.withLock { recordedCounts.append(count) }
+        return true
+    }
+}
+
 private final class MutatingProcessSnapshotProvider: ProcessSnapshotProviding, @unchecked Sendable {
     private let mutationCall: Int
     private let url: URL
@@ -1234,6 +1678,38 @@ private final class MutatingProcessSnapshotProvider: ProcessSnapshotProviding, @
             try contents.write(to: url)
         }
         return []
+    }
+}
+
+@MainActor
+private final class RootExitDuringSnapshotPIDs {
+    private let processes: TerminableProcessSnapshotProvider
+    private let roots: [ProcessRecord]
+    private var rootExitRequested = false
+    private var checksAfterRequest = 0
+
+    init(
+        processes: TerminableProcessSnapshotProvider,
+        roots: [ProcessRecord]
+    ) {
+        self.processes = processes
+        self.roots = roots
+    }
+
+    func requestRootExit() {
+        rootExitRequested = true
+        checksAfterRequest = 0
+    }
+
+    func current() -> [Int32] {
+        if rootExitRequested {
+            checksAfterRequest += 1
+            if checksAfterRequest == 2 {
+                processes.install([])
+                rootExitRequested = false
+            }
+        }
+        return roots.filter { processes.contains(pid: $0.identity.pid) }.map(\.identity.pid)
     }
 }
 
@@ -1355,6 +1831,9 @@ private actor StubCLIDataProvider: CLIDataProviding {
     let switchFailure: CodexAppLocatorFailure?
     private(set) var capturedLabels = [String]()
     private(set) var switchedTargets = [String]()
+#if SPIKE_FAULT_INJECTION
+    private(set) var rollbackTestTargets = [String]()
+#endif
 
     init(
         profiles: [ProfileListItem],
@@ -1414,6 +1893,17 @@ private actor StubCLIDataProvider: CLIDataProviding {
         }
         return capturedProfile
     }
+
+    func restoreRecoveryProfile(target: String) async throws -> ProfileListItem {
+        capturedProfile
+    }
+
+#if SPIKE_FAULT_INJECTION
+    func testPostLaunchRollback(target: String) async throws -> ProfileListItem {
+        rollbackTestTargets.append(target)
+        return capturedProfile
+    }
+#endif
 
     func recoveryStatus() async throws -> RecoveryCLIStatus {
         .none

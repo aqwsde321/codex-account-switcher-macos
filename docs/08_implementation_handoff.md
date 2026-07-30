@@ -1,9 +1,9 @@
 # 구현 인수인계
 
-- 상태: A/B capture·A 복귀·일반 switch 구현 완료; 실제 A↔B switch와 manual recovery 대기
+- 상태: A/B capture·일반 switch·manual recovery·B-011 자동 롤백 실검증 완료
 - 기준일: 2026-07-30
 - 코드: 저장소 루트 `.`
-- 중요: 외부 Terminal에서 실제 A/B capture와 A 저장본 동기화는 완료했다. 실제 A↔B switch는 아직 수행하지 않았다.
+- 중요: 외부 Terminal에서 A↔B 기능 왕복 3회, 수동 A 복구 2회, B-011 자동 롤백을 완료했다. B-010 형식 증거는 보존하지 않았다.
 
 ## 1. 새 task에서 시작하는 방법
 
@@ -44,17 +44,17 @@
 - 첫 계정 A capture의 TTY 확인, process gate, refresh 전 backup, isolated identity 검증, rollback 구현
 - 두 번째 계정 B capture, 중복 계정 차단, 동일 capture lock/journal의 실패 rollback·A 자동 복귀 구현
 - 저장 프로필 일반 switch의 정상 종료·격리 검증·원자 교체·재실행·검증·rollback adapter 구현
-- fake credential만 사용하는 77개 테스트 통과
+- fake credential만 사용하는 78개 debug 테스트 통과
 - 실제 read-only inspect에서 사용자 auth와 helper store 무변경 확인
+- `rollbackFailed` 수동 복구 CLI와 실환경 A 복구 2회 완료
+- debug 전용 B-011 실패 주입에서 source 자동 롤백과 최종 A 복귀 확인
 
 미완료:
 
-- concrete `RecoveryExecuting`과 manual recovery CLI
-- 실제 A↔B 반복 전환
-- 동일 task 왕복 검증
+- §8 형식의 동일 task 왕복 증거 보존
 - 메뉴바 앱
 
-허용 build는 `/Applications/ChatGPT.app` `26.721.41059`/`5848`, `26.721.81911`/`5973`이다. 현재 설치된 `26.721.81911`/`5973`은 OS signature 검증에 실패하므로 auth-changing 명령이 차단된다. 공식 앱 재설치·업데이트 후 `inspect`가 `application=ready`가 되기 전에는 실제 switch를 재시도하지 않는다.
+허용 build는 `/Applications/ChatGPT.app` `26.721.41059`/`5848`, `26.721.81911`/`5973`이다. 현재 설치된 `26.721.81911`/`5973`은 signature/build gate를 통과해 `application=ready`이며 auth-changing 명령 실검증을 완료했다.
 
 재개 명령과 구현 범위는 루트 `README.md`를 먼저 읽는다.
 
@@ -117,10 +117,10 @@ preparing → quitRequested → quiescent → refreshingCurrent → currentSaved
 
 ```text
 swift --version
-plutil -p /Applications/Codex.app/Contents/Info.plist
-codesign -dv --verbose=4 /Applications/Codex.app
-/Applications/Codex.app/Contents/Resources/codex --version
-/Applications/Codex.app/Contents/Resources/codex app-server --help
+plutil -p /Applications/ChatGPT.app/Contents/Info.plist
+codesign -dv --verbose=4 /Applications/ChatGPT.app
+/Applications/ChatGPT.app/Contents/Resources/codex --version
+/Applications/ChatGPT.app/Contents/Resources/codex app-server --help
 stat -f 'mode=%Sp size=%z modified=%Sm' ~/.codex/auth.json
 ```
 
@@ -218,7 +218,7 @@ cd codex-account-switcher-spike
 - 명시적 target auth 거부는 재로그인, network/server 실패는 retryable, credential-store write 실패는 저장소 오류로 분류하며 모두 active auth 불변·프로필 보존인지 테스트
 - timeout/네트워크 실패를 revoked로 오분류하지 않는 테스트
 - 사후 격리 `false` 검증이 공용 auth 이메일만 입증한다는 결과 타입 테스트
-- 실제 auth는 아직 사용하지 않음
+- 실제 A/B auth의 식별·refresh·사후 이메일 검증 완료
 
 ### Step 4. 앱·프로세스 adapter
 
@@ -227,7 +227,7 @@ cd codex-account-switcher-spike
 - bundle id 탐색
 - metadata/signature gate
 - `NSRunningApplication.terminate()`
-- 1초 유예 뒤 exact 앱 소유 잔존은 별도 승인 후에만 `SIGTERM` 1회
+- 1초 유예 뒤 종료 대기 중 확인한 exact 앱 소유 잔존은 별도 승인 후에만 `SIGTERM`
 - libproc process snapshot·ancestry·path 분류
 - independent CLI 차단
 - NSWorkspace launch/activate
@@ -288,7 +288,7 @@ cd codex-account-switcher-spike
 - 공식 로그인으로 계정 B 전환: 완료
 - 계정 B capture와 계정 A 자동 복귀: 외부 Terminal에서 완료
 
-일반 전환 명령 `switch --target <profile-id-or-label>`도 구현·fake fixture 검증을 마쳤다. 실제 실행은 다음 단계에서 한다.
+일반 전환 명령 `switch --target <profile-id-or-label>`은 구현·fake fixture·실계정 기능 왕복 검증을 마쳤다.
 
 각 auth-changing 명령 전에 현재 앱 종료와 정확한 영향을 사용자에게 보여준다.
 

@@ -7,7 +7,7 @@
 - 목적: 개인 계정 A와 회사 계정 B의 인증을 교체하면서 **동일한 Codex task를 양쪽 계정에서 실제로 이어갈 수 있는지** 검증
 - 실행 기준: 실제 CLI 명령은 `README.md`를 따른다. 이 문서의 `switcher ...` 표기는 설계 당시 예정 인터페이스이므로 실행하지 않는다.
 
-현재 구현된 명령은 `inspect`, `profiles list`, `profile capture`, `profile sync-active`, `switch`, `recovery status`다. manual recovery 명령과 메뉴바 앱은 구현 전이다.
+현재 구현된 명령은 `inspect`, `profiles list`, `profile capture`, `profile sync-active`, `switch`, `recovery status`, `recovery restore`다. debug build에는 B-011 실패 주입 명령도 포함된다. 메뉴바 앱은 구현 전이다.
 
 ## 1. 핵심 판정
 
@@ -79,7 +79,7 @@ Spike의 제품 가설은 다음 하나다.
 
 ### 환경
 
-- macOS 공식 Codex 앱이 `/Applications/Codex.app`에 설치되어 있다.
+- macOS 공식 ChatGPT 앱이 `/Applications/ChatGPT.app`에 설치되어 있다.
 - 예상 bundle identifier는 `com.openai.codex`다. 실제 값이 다르면 STOP한다.
 - 기본 인증 경로 `~/.codex/auth.json`만 사용한다.
 - `CODEX_HOME` 환경변수나 별도 프로필 경로를 사용하는 세션은 종료한다.
@@ -622,10 +622,11 @@ journal은 §9의 고정 7필드만 가진다: `schemaVersion`, `transactionId`,
 - 최종 `inspect`는 `application=ready`, `auth=private_regular_file`, 독립 Codex 0개, 분류 불명 관련 프로세스 0개였다.
 - 최종 `recovery status`는 `recovery=none`이었다.
 - 실행 중 앱 소유 프로세스 51개는 단일 ChatGPT 주 프로세스의 현재 task·도구 자식 트리였다. 두 번째 ChatGPT 주 프로세스는 없었다.
-- `./Scripts/dev.sh test`는 77개 테스트를 통과했다.
+- `rollbackFailed` 상태에서 `recovery restore --profile A`로 저장 A 복구를 2회 수행했고, 두 번 모두 A 재실행과 journal 삭제를 확인했다.
+- debug 전용 B-011 실패 주입의 최종 실행은 forward와 rollback 종료 확인을 각각 거쳐 `rollback_test=passed`를 출력하고 A로 복귀했다.
+- `./Scripts/dev.sh test`는 78개 테스트를 통과했다.
 
 ### 엄격한 GO 판정 전 남은 항목
 
 - cycle별 nonce와 객관적 task ID를 포함한 §15 형식의 증거를 보존하지 않아 B-010은 정식 PASS로 기록하지 않는다.
-- 안전한 fault injection을 통한 B-011 post-launch 검증 실패·자동 롤백 black-box 검증은 수행하지 않았다.
-- 위 두 항목 전까지 결과는 기능 가설 확인이며 §17의 엄격한 Spike GO는 보류한다.
+- B-011은 PASS했지만 위 B-010 증거가 없으므로 §17의 엄격한 Spike GO는 보류한다.
