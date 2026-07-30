@@ -66,7 +66,7 @@ STOP은 자동으로 제품 가설 FAIL을 뜻하지 않는다. 다만 안전 �
 |---|---|---|---|---|
 | Unit | fake bytes/fixtures | 메모리·임시 경로 | fake | 순수 로직과 state machine |
 | Integration | 가짜 auth JSON | 임시 `CODEX_HOME` | fake/stub App Server와 process adapter | 파일 transaction, rollback, orchestration |
-| Black-box | 실제 A/B | 실제 기본 `~/.codex` | 공식 Codex 앱 | 제품 가설과 실제 호환성 |
+| Black-box | 실제 A/B/C | 실제 기본 `~/.codex` | 공식 Codex 앱 | 제품 가설과 실제 호환성 |
 | Update | 가짜+필요 시 실제 | 먼저 임시, gated real run | 업데이트된 공식 앱 | 호환성 회귀 |
 
 Unit/Integration test는 실제 `~/.codex/auth.json`을 읽거나 쓰지 않는다. 실계정 Black-box만 명시적 승인과 runbook 절차 아래 기본 경로를 사용한다.
@@ -97,7 +97,7 @@ Unit/Integration test는 실제 `~/.codex/auth.json`을 읽거나 쓰지 않는�
 - 제품의 persistent 평문 active auth file은 `~/.codex/auth.json` 하나
 - 격리 verifier auth copy는 `0600` 임시 파일이며 verifier 종료 후 제거
 - 로그/journal에 token, cookie, JWT, 전체 auth, 실제 이메일, raw command line 없음
-- MVP 등록 가능 계정은 A/B 2개지만 내부 profile model은 배열 기반
+- MVP 등록 가능 계정은 최대 3개이며 내부 profile model은 배열 기반
 - 이미 활성인 계정 선택은 auth write와 restart를 발생시키지 않음
 
 ## 5. Unit 테스트 매트릭스
@@ -114,7 +114,7 @@ Unit/Integration test는 실제 `~/.codex/auth.json`을 읽거나 쓰지 않는�
 | U-008 | source 이메일 mismatch | source auth 저장 및 switch 차단 | 예 |
 | U-009 | 이미 활성인 target 선택 | activate-window action만 생성 | 예 |
 | U-010 | 앱이 닫힌 상태의 target 선택 | quit confirmation 없이 process gate→switch→launch 계획 | 예 |
-| U-011 | MVP에서 세 번째 등록 | UI/MVP policy로 거부하되 model 손상 없음 | 예 |
+| U-011 | profile model에 세 항목 등록 | 세 항목 허용, 순서와 active ID 보존 | 예 |
 | U-012 | profile array encode/decode | 순서와 opaque ID 보존, auth는 metadata에 없음 | 예 |
 | U-013 | journal serialization | 고정 7필드만 존재; build/email/secret/추가 필드 없음 | 예 |
 | U-014 | token/JWT/cookie/email 포함 error | 출력 전에 redaction, 실제 이메일 마스킹 | 예 |
@@ -132,6 +132,7 @@ Unit/Integration test는 실제 `~/.codex/auth.json`을 읽거나 쓰지 않는�
 | U-026 | helper/email/process 중간 실패 | FAIL/FIX-AND-RETEST; 수정 후 cycle 1부터 재실행 | 예 |
 | U-027 | rollback phase | `rollbackStarted`, 실패 시 `rollbackFailed`만 persisted | 예 |
 | U-028 | malformed/torn journal decode | 자동 삭제·추정 없이 STOP | 예 |
+| U-029 | 네 번째 profile 등록 | 상한 오류, 기존 model 손상 없음 | 예 |
 
 ## 6. Integration 테스트 매트릭스
 
@@ -183,10 +184,13 @@ Unit/Integration test는 실제 `~/.codex/auth.json`을 읽거나 쓰지 않는�
 | I-042 | `currentSaved` 뒤 target validation 실패 | active source 유지 확인→registry previous→journal durable cleanup | 예 |
 | I-043 | `SIGTERM` 뒤 앱 소유 process 잔존 또는 identity 변경 | switch 차단, active auth unchanged | 예 |
 | I-044 | 사용자가 잔존 앱 process `SIGTERM` 거부 | signal 0회, auth·registry 불변, journal 내구 삭제 | 예 |
+| I-045 | A/B 등록 상태에서 C capture | C 저장 후 등록 시작 전 active 복원, A/B/C credential 보존 | 예 |
+| I-046 | 세 프로필 상태에서 네 번째 capture | auth·credential·registry·journal mutation 0회 | 예 |
+| I-047 | 제3 프로필이 있는 `rollbackFailed` 복구 | previous 복구, 무관한 프로필과 credential 보존 | 예 |
 
 ## 7. 공식 앱 Black-box 매트릭스
 
-실행 전 실제 이메일은 test sheet에 쓰지 않고 `profile-a`, `profile-b`로만 표기한다. 화면 캡처는 이메일과 다른 sidebar 내용을 가린다.
+실행 전 실제 이메일은 test sheet에 쓰지 않고 `profile-a`, `profile-b`, `profile-c`로만 표기한다. 화면 캡처는 이메일과 다른 sidebar 내용을 가린다.
 
 | ID | 시나리오 | PASS 기준 | 실패 행동 |
 |---|---|---|---|
@@ -204,6 +208,19 @@ Unit/Integration test는 실제 `~/.codex/auth.json`을 읽거나 쓰지 않는�
 | B-012 | 최종 A 정리 | A 활성·재실행 유지, verifier/lock 없음 | STOP |
 | B-013 | target 사전 검증 실패 | active source 불변, profile 보존, 오류 정확 분류 | case FAIL |
 | B-014 | post-launch 검증 transport | active copy의 isolated Helper verifier false, private IPC 0회 | STOP |
+| B-015 | C 등록 후 기존 active 복귀 | C 저장, 등록 시작 전 active 이메일 복원, A/B/C 보존 | 자동 롤백 또는 STOP |
+| B-016 | 세 프로필 수동 전환 | A→B→C→A 각 단계 이메일·UI active 일치 | 자동 롤백/FAIL |
+
+### 7.1 B-015~B-016 실행 절차
+
+`04_spike_runbook.md`의 A/B 실행 기록은 수정하지 않는다. 별도 clean run에서 §4~§6의 안전 원칙·preflight·백업을 다시 적용하고 다음을 수행한다.
+
+1. A/B가 등록된 상태에서 B를 active로 검증하고 registry·credential 보존 여부의 기준선을 기록한다.
+2. 공식 로그인으로 C를 활성화한 뒤 C를 등록한다. 완료 후 B가 다시 active이고 journal·capture marker가 없는지 확인한다.
+3. A→B→C→A를 순서대로 전환한다. 각 단계에서 `account/read` 이메일과 UI active 카드가 같은 별칭을 가리키는지 확인한다.
+4. A/B/C profile ID·순서와 credential 보존 여부가 기준선 기대와 일치하는지 확인한다. 실제 이메일·인증 bytes·digest는 기록하지 않는다.
+
+실패 시 다음 단계로 진행하지 않는다. 자동 rollback이 검증되지 않으면 STOP하고 공식 앱을 다시 열지 않는다.
 
 ## 8. 동일 task 핵심 인수 시나리오
 
@@ -343,10 +360,11 @@ current refresh crash window에서는 refresh 실행 여부를 phase만으로 �
 | A-004 | B 등록 실패 | A 자동 롤백 또는 명시 STOP |
 | A-005 | 기존 profile ID 중복 | 덮어쓰기 전 명시 확인 또는 거부 |
 | A-006 | 외부 로그인으로 unknown email | 등록/폐기 선택 전 switch 차단 |
-| A-007 | 세 번째 계정 등록 | MVP UI에서 거부, 기존 A/B 불변 |
-| A-008 | 후속 3+ 확장용 model fixture | profile array가 세 항목을 안전하게 round-trip |
+| A-007 | C 등록 | C 저장 후 등록 시작 전 active 복귀, 기존 A/B 보존 |
+| A-008 | 네 번째 계정 등록 | 무변경 거부, 기존 A/B/C 불변 |
+| A-009 | 3계정 model fixture | profile array가 세 항목을 안전하게 round-trip |
 
-MVP는 정확히 2개 계정만 노출하지만 `personalAuth`, `workAuth` 같은 두 개 고정 secret field로 구현하지 않는다.
+MVP는 최대 3개 계정을 노출하며 `personalAuth`, `workAuth` 같은 고정 secret field로 구현하지 않는다.
 
 ## 14. 롤백 테스트
 
@@ -422,17 +440,14 @@ MVP는 정확히 2개 계정만 노출하지만 `personalAuth`, `workAuth` 같�
 
 아래가 모두 충족되어야 한다.
 
-- B-001~B-003 PASS
+- 공식 앱 Black-box B-001~B-016 PASS
 - process gate와 독립 CLI P-001~P-008 PASS 또는 P-008의 명시적 안전 조건 충족
-- Integration I-001~I-042 PASS
-- 의도적 검증 실패 B-011에서 자동 롤백 PASS
+- Integration I-001~I-047 PASS
 - 동일 task B-010: A→B→A 3회 연속 실제 메시지 PASS
-- target 검증·transport B-013~B-014 PASS
 - 모든 전환에서 이메일 검증 PASS
-- 최종 A 복구와 재실행 유지 B-012 PASS
 - secret exposure 0건
 
-현재 엄격한 GO에서 남은 항목은 B-010의 §16 형식 증거다. 개발 중 구조적 same-task 실패가 확인되면 아래 NO-GO를 즉시 적용한다. 현재 결과는 `04_spike_runbook.md` §18에 기록한다.
+기존 A/B CLI 실증에서 남은 형식 항목은 B-010의 §16 증거다. 3계정 MVP는 메뉴바 구현 뒤 B-015~B-016도 통과해야 한다. 개발 중 구조적 same-task 실패가 확인되면 아래 NO-GO를 즉시 적용한다. 현재 A/B 결과는 `04_spike_runbook.md` §18에 기록한다.
 
 ### NO-GO — 제품 구현 중단
 
@@ -478,7 +493,7 @@ MVP는 정확히 2개 계정만 노출하지만 `personalAuth`, `workAuth` 같�
 - 전체 Integration 필수 case PASS
 - 독립 CLI, crash/reboot, revoked token, rollback 필수 case PASS
 - 현재 Codex build의 update compatibility case PASS
-- A/B 2계정 등록과 수동 switch UX PASS
+- A/B/C 최대 3계정 등록과 수동 switch UX PASS
 - 이미 활성 계정 클릭 시 no-op+창 활성화 PASS
 - 앱 종료 확인 취소 시 mutation 0회
 - 제품 inactive profile auth가 Keychain에만 존재하고 persistent active auth file은 하나

@@ -63,12 +63,14 @@ public enum ProfileRegistryError: Error, Equatable, Sendable {
 }
 
 public struct ProfileRegistry: Equatable, Sendable {
+    public static let maximumProfileCount = 3
+
     public let schemaVersion: Int
     public let activeProfileID: ProfileID?
     public let profiles: [ProfileMetadata]
 
     public init(activeProfileID: ProfileID?, profiles: [ProfileMetadata]) throws {
-        guard profiles.count <= 2 else {
+        guard profiles.count <= Self.maximumProfileCount else {
             throw ProfileRegistryError.tooManyProfiles
         }
         guard !profiles.contains(where: { $0.label.isEmpty }) else {

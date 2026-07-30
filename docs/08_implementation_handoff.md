@@ -42,9 +42,9 @@ ADR-027과 기존 안전 결정을 유지한 채 Step 9 메뉴바 MVP를 구현�
 - switch/rollback/recovery 상태 머신 구현
 - 읽기 전용 CLI 세 명령 구현
 - 첫 계정 A capture의 TTY 확인, process gate, refresh 전 backup, isolated identity 검증, rollback 구현
-- 두 번째 계정 B capture, 중복 계정 차단, 동일 capture lock/journal의 실패 rollback·A 자동 복귀 구현
+- 추가 계정 capture, 중복 계정 차단, 동일 capture lock/journal의 실패 rollback·등록 전 active 복귀, 최대 3개 허용·네 번째 무변경 거부 구현
 - 저장 프로필 일반 switch의 정상 종료·격리 검증·원자 교체·재실행·검증·rollback adapter 구현
-- fake credential만 사용하는 78개 debug 테스트 통과
+- fake credential만 사용하는 79개 debug 테스트 통과
 - 실제 read-only inspect에서 사용자 auth와 helper store 무변경 확인
 - `rollbackFailed` 수동 복구 CLI와 실환경 A 복구 2회 완료
 - debug 전용 B-011 실패 주입에서 source 자동 롤백과 최종 A 복귀 확인
@@ -84,7 +84,7 @@ ADR-027과 기존 안전 결정을 유지한 채 Step 9 메뉴바 MVP를 구현�
 - 공용 기본 `~/.codex`; 인증만 계정별 분리
 - 보안 격리 제품이 아니라 편의 전환기
 - ChatGPT 이메일로 프로필 신원 검증
-- MVP 등록은 개인·회사 두 계정
+- MVP 등록은 최대 3개 계정
 - 내부 프로필 모델은 배열
 - 공식 앱은 정상 종료만 사용
 - 독립 CLI는 자동 종료하지 않고 전환 차단
@@ -316,7 +316,7 @@ ADR-027의 개발 승인에 따라 시작한다. B-010 정식 증거 공백은 �
 구현 순서:
 
 1. `CodexAccountMenuBar` executable target과 `MenuBarExtra` shell을 추가한다.
-2. fake provider로 두 프로필 카드와 활성 표시를 검증한다. 이미 활성인 카드는 auth write/restart 없이, 앱 실행 중이면 activate 1회, 닫혀 있으면 verify 후 launch한다.
+2. fake provider로 세 프로필 카드와 활성 표시를 검증한다. 이미 활성인 카드는 auth write/restart 없이, 앱 실행 중이면 activate 1회, 닫혀 있으면 verify 후 launch한다.
 3. Core의 credential backend 경계를 연결해 CLI는 기존 private file store, 제품은 Keychain을 사용하게 한다. plaintext fallback은 금지한다.
 4. view model은 문자열 CLI 출력이 아닌 typed Core API를 호출하고 quit 확인·단계·안전한 오류를 연결한다. UI에 전환 로직을 복제하지 않는다.
 5. 시작 시 journal recovery와 `needsRelogin` 표시를 연결한다.
@@ -324,7 +324,7 @@ ADR-027의 개발 승인에 따라 시작한다. B-010 정식 증거 공백은 �
 첫 구현 slice의 성공 기준:
 
 - `MenuBarExtra` target이 build된다.
-- fake 두 프로필에서 활성 카드와 비활성 카드가 구분된다.
+- fake 세 프로필에서 활성 카드 1개와 비활성 카드 2개가 구분된다.
 - 실행 중인 활성 카드 선택은 auth write/restart 0회, activate 1회다.
 - 닫힌 상태의 활성 카드 선택은 auth write 0회, verify 후 launch 1회다.
 - 비활성 카드 선택은 확인 전 mutation 0회다.

@@ -211,8 +211,8 @@ path만 같다고 공식 앱으로 신뢰하지 않는다. bundle id와 서명 �
 }
 ```
 
-- 내부 구조는 배열로 두어 3개 이상 확장이 가능하다.
-- MVP 정책에서 등록은 정확히 최대 2개로 제한한다.
+- 내부 구조는 배열이다.
+- MVP 정책에서 등록은 최대 3개로 제한한다.
 - profile ID는 UUID다. `personalAuth`/`workAuth` 같은 고정 필드를 만들지 않는다.
 - 이메일은 MVP 식별자다. 등록 때 App Server가 반환한 문자열을 보존한다.
 - 비교 시 임의 trim, case-fold, alias 정규화를 하지 않고 App Server 반환값의 완전 일치를 요구한다.
@@ -448,16 +448,16 @@ Spike에서 다음을 확인했다.
 - Spike store/Keychain 저장
 - registry 생성, active 지정
 
-### 두 번째 프로필
+### 추가 프로필
 
-- 기존 프로필 최신본 존재 확인
+- 등록 시작 전 활성 프로필 최신본 존재 확인
 - 사용자의 공식 로그인 후 미등록 이메일 감지
 - 자동 overwrite 금지
-- 명시적 등록 동작에서만 두 번째 저장
-- 두 번째를 잠시 active로 기록하되 capture의 동일 lock/journal을 유지한 채 `rollbackStarted`로 첫 프로필을 복구·검증
-- 첫 프로필 active registry와 journal 정리까지 끝난 뒤에만 lock 해제·앱 실행
+- 명시적 등록 동작에서만 새 프로필 저장
+- 새 프로필을 잠시 active로 기록하되 capture의 동일 lock/journal을 유지한 채 `rollbackStarted`로 등록 전 활성 프로필을 복구·검증
+- 등록 전 프로필의 active registry와 journal 정리까지 끝난 뒤에만 lock 해제·앱 실행
 
-등록 한도 초과는 data model이 아니라 MVP policy layer에서 거부한다.
+등록 한도 초과는 `ProfileRegistry`와 capture gate에서 모두 거부한다.
 
 ## 10. crash recovery 설계
 
@@ -494,7 +494,7 @@ previous rollback 중 어떤 단계든 실패하면 `rollbackFailed`를 durable�
 
 ## 11. CLI 인터페이스
 
-`inspect`, `profiles list`, 첫·두 번째 `profile capture`, 두 번째 등록 후 첫 프로필 자동 복귀, `profile sync-active`, 일반 `switch`, `recovery status`, `recovery restore`는 구현됐다. `verify`, `cleanup`은 예정 인터페이스다.
+`inspect`, `profiles list`, 최대 3개의 `profile capture`, 추가 등록 후 등록 전 활성 프로필 자동 복귀, `profile sync-active`, 일반 `switch`, `recovery status`, `recovery restore`는 구현됐다. `verify`, `cleanup`은 예정 인터페이스다.
 
 ```text
 codex-account-spike inspect
@@ -520,7 +520,7 @@ codex-account-spike cleanup
 ADR-027의 개발 승인에 따라 다음 최소 기능만 추가한다.
 
 - `MenuBarExtra`
-- 개인·회사 프로필 카드
+- 최대 3개 프로필 카드
 - 활성 이메일/레이블 표시
 - 비활성 카드 클릭 전환
 - 실행 중이면 항상 종료 확인
@@ -532,7 +532,7 @@ ADR-027의 개발 승인에 따라 다음 최소 기능만 추가한다.
 
 - `account/rateLimits/read` 기반 5시간·주간 사용량
 - 격리 App Server login을 통한 계정 추가
-- 3개 이상 계정 UI
+- 4개 이상 계정 UI
 - Developer ID 서명·공증·업데이트
 
 ## 13. 오류 분류

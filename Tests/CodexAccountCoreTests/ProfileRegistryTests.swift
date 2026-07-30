@@ -3,9 +3,9 @@ import CodexAccountCore
 
 func profileRegistryTests() -> [TestCase] {
     [
-        TestCase("ProfileRegistry rejects a third MVP profile") {
+        TestCase("ProfileRegistry accepts three profiles and rejects a fourth") {
             let now = Date(timeIntervalSince1970: 0)
-            let profiles = (0..<3).map { index in
+            let profiles = (0..<4).map { index in
                 ProfileMetadata(
                     id: ProfileID(UUID()),
                     label: "profile-\(index)",
@@ -16,12 +16,16 @@ func profileRegistryTests() -> [TestCase] {
                     updatedAt: now
                 )
             }
+            let firstThree = Array(profiles.prefix(3))
+            let registry = try ProfileRegistry(
+                activeProfileID: firstThree[2].id,
+                profiles: firstThree
+            )
 
-            do {
-                _ = try ProfileRegistry(activeProfileID: nil, profiles: profiles)
-                throw TestFailure(description: "third profile was accepted")
-            } catch ProfileRegistryError.tooManyProfiles {
-                return
+            try expect(registry.profiles == firstThree, "three profiles changed")
+            try expect(registry.activeProfileID == firstThree[2].id, "three-profile active ID changed")
+            try expectError(ProfileRegistryError.tooManyProfiles, "fourth profile was accepted") {
+                _ = try ProfileRegistry(activeProfileID: firstThree[2].id, profiles: profiles)
             }
         },
         TestCase("ProfileRegistry enforces unique IDs, labels, and exact emails") {

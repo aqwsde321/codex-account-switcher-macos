@@ -186,7 +186,7 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
     public func captureProfile(label: String) async throws -> ProfileListItem {
         let profile = try await ProfileCaptureCoordinator(driver: self).capture(label: label)
         let registry = try SpikeStore.openExisting(at: storeURL).loadRegistry()
-        if registry.profiles.count == 2, registry.activeProfileID != profile.id {
+        if registry.activeProfileID != profile.id {
             let descriptor = try await locateApp()
             _ = try await launchApplication(descriptor)
         }
@@ -336,8 +336,17 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
             throw LocalCLIDataProviderFailure.manualRecoveryUnavailable
         }
         let profileIDs = Set(registry.profiles.map(\.id))
-        guard profileIDs == Set([journal.previousProfileID])
-                || profileIDs == Set([journal.previousProfileID, journal.targetProfileID]) else {
+        guard profileIDs.contains(journal.previousProfileID) else {
+            throw LocalCLIDataProviderFailure.manualRecoveryUnavailable
+        }
+        if captureProfileID != nil {
+            let targetIsRegistered = profileIDs.contains(journal.targetProfileID)
+            guard targetIsRegistered
+                ? registry.profiles.last?.id == journal.targetProfileID
+                : registry.profiles.count < ProfileRegistry.maximumProfileCount else {
+                throw LocalCLIDataProviderFailure.manualRecoveryUnavailable
+            }
+        } else if !profileIDs.contains(journal.targetProfileID) {
             throw LocalCLIDataProviderFailure.manualRecoveryUnavailable
         }
         let requestedID = UUID(uuidString: value).map { ProfileID($0) }
@@ -543,7 +552,7 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
                 throw LocalCLIDataProviderFailure.pendingRecovery
             }
             let registry = try store.loadRegistryIfPresent()
-            guard registry?.profiles.count != 2 else {
+            guard (registry?.profiles.count ?? 0) < ProfileRegistry.maximumProfileCount else {
                 throw LocalCLIDataProviderFailure.profileAlreadyExists
             }
             guard try store.loadCaptureProfileIDIfPresent() == nil else {
@@ -556,17 +565,20 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
             guard try await processInventory(for: descriptor).authMutationAllowed else {
                 throw LocalCLIDataProviderFailure.processBlocked
             }
+            let previous: ProfileMetadata?
             if let registry {
-                guard registry.profiles.count == 1,
-                      registry.activeProfileID == registry.profiles[0].id else {
+                guard let activeProfileID = registry.activeProfileID,
+                      let activeProfile = registry.profiles.first(where: { $0.id == activeProfileID }) else {
                     throw LocalCLIDataProviderFailure.invalidCaptureState
                 }
-                let previous = registry.profiles[0]
+                previous = activeProfile
                 _ = try await validatedCredential(
-                    store.loadCredential(for: previous.id),
-                    expectedEmail: previous.email,
+                    store.loadCredential(for: activeProfile.id),
+                    expectedEmail: activeProfile.email,
                     descriptor: descriptor
                 )
+            } else {
+                previous = nil
             }
             let original = try readCurrentCredential()
             captureDescriptor = descriptor
@@ -579,12 +591,12 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
             guard try store.loadCredential(for: profileID) == original.credential else {
                 throw LocalCLIDataProviderFailure.credentialRoundTripFailed
             }
-            if let registry {
+            if let previous {
                 let now = Date(timeIntervalSince1970: Date().timeIntervalSince1970.rounded(.down))
                 let journal = SwitchJournalRecord(
                     transactionID: UUID(),
                     phase: .validatingTarget,
-                    previousProfileID: registry.profiles[0].id,
+                    previousProfileID: previous.id,
                     targetProfileID: profileID,
                     startedAt: now,
                     updatedAt: now
@@ -725,8 +737,8 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
                   journal.phase == .validatingTarget,
                   journal.previousProfileID == original.activeProfileID,
                   journal.targetProfileID == profile.id,
-                  let previous = original.profiles.first,
-                  previous.id == original.activeProfileID else {
+                  let previousProfileID = original.activeProfileID,
+                  original.profiles.contains(where: { $0.id == previousProfileID }) else {
                 throw LocalCLIDataProviderFailure.invalidCaptureState
             }
             try requireCapturedAuthUnchanged()
@@ -747,7 +759,7 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
             guard try store.loadRegistry() == registry else {
                 throw LocalCLIDataProviderFailure.registryRoundTripFailed
             }
-            try await restoreOriginalAfterSecondCapture(
+            try await restoreOriginalAfterCapture(
                 store: store,
                 captureProfileID: profile.id,
                 originalRegistry: original
@@ -782,7 +794,7 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
             throw LocalCLIDataProviderFailure.rollbackUnavailable
         }
         if let originalRegistry = captureOriginalRegistry {
-            try await restoreOriginalAfterSecondCapture(
+            try await restoreOriginalAfterCapture(
                 store: store,
                 captureProfileID: captureProfileID,
                 originalRegistry: originalRegistry
@@ -1566,7 +1578,7 @@ private extension LocalCLIDataProvider {
         ).run()
     }
 
-    func restoreOriginalAfterSecondCapture(
+    func restoreOriginalAfterCapture(
         store: SpikeStore,
         captureProfileID: ProfileID,
         originalRegistry: ProfileRegistry
@@ -1589,8 +1601,8 @@ private extension LocalCLIDataProvider {
 
         do {
             try await requireMutationGate(for: descriptor)
-            guard let previous = originalRegistry.profiles.first,
-                  originalRegistry.activeProfileID == previous.id else {
+            guard let previousProfileID = originalRegistry.activeProfileID,
+                  let previous = originalRegistry.profiles.first(where: { $0.id == previousProfileID }) else {
                 throw LocalCLIDataProviderFailure.rollbackUnavailable
             }
             let previousCredential = try store.loadCredential(for: previous.id)
@@ -1622,9 +1634,10 @@ private extension LocalCLIDataProvider {
 
             let currentRegistry = try store.loadRegistry()
             if currentRegistry != originalRegistry {
-                guard currentRegistry.profiles.count == 2,
-                      currentRegistry.profiles.contains(where: { $0.id == previous.id }),
-                      currentRegistry.profiles.contains(where: { $0.id == captureProfileID }) else {
+                guard currentRegistry.activeProfileID == captureProfileID,
+                      currentRegistry.profiles.count == originalRegistry.profiles.count + 1,
+                      Array(currentRegistry.profiles.dropLast()) == originalRegistry.profiles,
+                      currentRegistry.profiles.last?.id == captureProfileID else {
                     throw LocalCLIDataProviderFailure.rollbackUnavailable
                 }
                 let restored = try ProfileRegistry(

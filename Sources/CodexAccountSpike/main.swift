@@ -54,7 +54,7 @@ struct CodexAccountSpikeCLI {
         } else if arguments.count == 4,
                   arguments[0...2] == ["profile", "capture", "--label"],
                   isatty(STDIN_FILENO) == 1 {
-            let prompt = "현재 인증을 갱신해 Spike private store에 저장합니다. 두 번째 프로필이면 저장 후 첫 프로필로 복귀하고 ChatGPT 앱을 실행합니다. 계속하려면 CAPTURE 입력: "
+            let prompt = "현재 인증을 갱신해 Spike private store에 저장합니다. 추가 프로필이면 저장 후 등록 전 활성 프로필로 복귀하고 ChatGPT 앱을 실행합니다. 최대 3개까지 등록할 수 있습니다. 계속하려면 CAPTURE 입력: "
             if let data = prompt.data(using: .utf8) {
                 try? FileHandle.standardError.write(contentsOf: data)
             }

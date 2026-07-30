@@ -606,9 +606,22 @@ func cliApplicationTests() -> [TestCase] {
                 try expect(rollbackRegistryAfter == rollbackRegistryBefore, "rollback changed the active registry")
                 try expect(rollbackRecovery.standardOutput == "recovery=none\n", "successful rollback left recovery state")
 
+                let profileC = ProfileMetadata(
+                    id: ProfileID(UUID()),
+                    label: "C",
+                    email: "c@example.invalid",
+                    planType: "plus",
+                    needsRelogin: false,
+                    createdAt: Date(timeIntervalSince1970: 1_700_000_001),
+                    updatedAt: Date(timeIntervalSince1970: 1_700_000_001)
+                )
+                let credentialC = try CredentialBlob(validating: Data(
+                    #"{"auth_mode":"chatgpt","test_account":"c","tokens":{"id_token":"c-id","access_token":"c-access","refresh_token":"c-refresh"}}"#.utf8
+                ))
+                _ = try store.saveCredential(credentialC, for: profileC.id)
                 let manualRegistry = try ProfileRegistry(
                     activeProfileID: profileA.id,
-                    profiles: try store.loadRegistry().profiles
+                    profiles: try store.loadRegistry().profiles + [profileC]
                 )
                 _ = try store.saveRegistry(manualRegistry)
                 let manualCurrentAuth = try CredentialBlob(validating: Data(contentsOf: authURL))
@@ -720,6 +733,7 @@ func cliApplicationTests() -> [TestCase] {
                 let restoredManualRegistry = try store.loadRegistry()
                 let restoredManualAuth = try CredentialBlob(validating: Data(contentsOf: authURL))
                 let manualStoredA = try store.loadCredential(for: profileA.id)
+                let manualStoredC = try store.loadCredential(for: profileC.id)
                 let manualLaunchCount = await MainActor.run { manualLaunches.count }
                 let recoveryEvidenceURL = storeURL.appendingPathComponent(
                     "recovery-evidence",
@@ -763,10 +777,12 @@ func cliApplicationTests() -> [TestCase] {
                     "manual recovery did not report A"
                 )
                 try expect(restoredManualRegistry.activeProfileID == profileA.id, "manual recovery did not restore registry A")
+                try expect(restoredManualRegistry.profiles == manualRegistry.profiles, "manual recovery dropped profile C")
                 try expect(
                     restoredManualAuth == manualStoredA,
                     "manual recovery did not restore auth A"
                 )
+                try expect(manualStoredC == credentialC, "manual recovery changed profile C")
                 try expect(manualRecoveryStatus.standardOutput == "recovery=none\n", "manual recovery left journal")
                 try expect(manualLaunchCount == 1, "manual recovery did not relaunch A")
                 try expect(
@@ -779,6 +795,170 @@ func cliApplicationTests() -> [TestCase] {
                 )
                 try expect(recoveryEvidenceHomes.count == 2, "manual recovery lost verifier evidence")
                 try expect(staleEvidencePreserved, "manual recovery changed verifier evidence")
+            }
+        },
+        TestCase("CLI capture stores a third profile, restores the active profile, and rejects a fourth") {
+            try await withCaptureTemporaryDirectory { directory in
+                let codexHome = directory.appendingPathComponent(".codex", isDirectory: true)
+                try FileManager.default.createDirectory(at: codexHome, withIntermediateDirectories: false)
+                try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: codexHome.path)
+                let authURL = codexHome.appendingPathComponent("auth.json", isDirectory: false)
+                let activeC = Data(
+                    #"{"auth_mode":"chatgpt","test_account":"c","tokens":{"id_token":"c-id","access_token":"c-access","refresh_token":"c-refresh"}}"#.utf8
+                )
+                let credentialCBeforeCapture = try CredentialBlob(validating: activeC)
+                try activeC.write(to: authURL, options: .withoutOverwriting)
+                try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: authURL.path)
+
+                let storeURL = directory.appendingPathComponent("store", isDirectory: true)
+                let store = try SpikeStore.create(at: storeURL)
+                let createdAt = Date(timeIntervalSince1970: 1_700_000_000)
+                let profileA = ProfileMetadata(
+                    id: ProfileID(UUID()),
+                    label: "A",
+                    email: "person@example.invalid",
+                    planType: "plus",
+                    needsRelogin: false,
+                    createdAt: createdAt,
+                    updatedAt: createdAt
+                )
+                let profileB = ProfileMetadata(
+                    id: ProfileID(UUID()),
+                    label: "B",
+                    email: "b@example.invalid",
+                    planType: "plus",
+                    needsRelogin: false,
+                    createdAt: createdAt,
+                    updatedAt: createdAt
+                )
+                let credentialA = try CredentialBlob(validating: Data(
+                    #"{"auth_mode":"chatgpt","test_account":"a","tokens":{"id_token":"a-id","access_token":"a-access","refresh_token":"a-refresh"}}"#.utf8
+                ))
+                let credentialB = try CredentialBlob(validating: Data(
+                    #"{"auth_mode":"chatgpt","test_account":"b","tokens":{"id_token":"b-id","access_token":"b-access","refresh_token":"b-refresh"}}"#.utf8
+                ))
+                _ = try store.saveCredential(credentialA, for: profileA.id)
+                _ = try store.saveCredential(credentialB, for: profileB.id)
+                _ = try store.saveRegistry(
+                    ProfileRegistry(activeProfileID: profileB.id, profiles: [profileA, profileB])
+                )
+
+                let executable = try makeCaptureAppServer(
+                    in: directory,
+                    rotateToOtherAccount: false,
+                    requiredJournalURL: storeURL.appendingPathComponent("switch-journal.json")
+                )
+                let bundleURL = directory.appendingPathComponent("ChatGPT.app", isDirectory: true)
+                let descriptor = CodexAppDescriptor(
+                    bundleURL: bundleURL,
+                    mainExecutableURL: bundleURL.appendingPathComponent("Contents/MacOS/ChatGPT"),
+                    bundledCodexURL: executable,
+                    bundleIdentifier: "com.openai.codex",
+                    version: "26.721.41059",
+                    build: "5848",
+                    appSigningIdentifier: "com.openai.codex",
+                    bundledCodexSigningIdentifier: "codex",
+                    teamIdentifier: "2DC432GLL2"
+                )
+                let launches = await MainActor.run { AppLaunchRecorder() }
+                let application = CLIApplication(
+                    provider: LocalCLIDataProvider(
+                        storeURL: storeURL,
+                        activeAuthURL: authURL,
+                        processProvider: EmptyProcessSnapshotProvider(),
+                        locateApp: { descriptor },
+                        runningApplicationPIDs: { _ in [] },
+                        launchApplication: { _ in
+                            launches.record()
+                            return 42
+                        }
+                    )
+                )
+
+                let captured = await application.run(
+                    arguments: ["profile", "capture", "--label", "C"],
+                    mutationConfirmed: true
+                )
+                let registry = try store.loadRegistry()
+                guard let profileC = registry.profiles.first(where: { $0.label == "C" }) else {
+                    throw TestFailure(description: "third profile C missing")
+                }
+                let activeAfterCapture = try CredentialBlob(validating: Data(contentsOf: authURL))
+                let storedA = try store.loadCredential(for: profileA.id)
+                let storedB = try store.loadCredential(for: profileB.id)
+                let storedC = try store.loadCredential(for: profileC.id)
+                let recoveryAfterCapture = await application.run(arguments: ["recovery", "status"])
+                let launchCountAfterCapture = await MainActor.run { launches.count }
+
+                let switchLaunches = await MainActor.run { AppLaunchRecorder() }
+                let switchApplication = CLIApplication(
+                    provider: LocalCLIDataProvider(
+                        storeURL: storeURL,
+                        activeAuthURL: authURL,
+                        processProvider: EmptyProcessSnapshotProvider(),
+                        locateApp: { descriptor },
+                        runningApplicationPIDs: { _ in switchLaunches.count > 0 ? [42] : [] },
+                        requestApplicationTermination: { _ in [] },
+                        normalTerminationGracePolls: 0,
+                        quiescenceSleep: { _ in },
+                        launchApplication: { _ in
+                            switchLaunches.record()
+                            return 42
+                        }
+                    )
+                )
+                let switched = await switchApplication.run(
+                    arguments: ["switch", "--target", "C"],
+                    mutationConfirmed: true
+                )
+                let switchedRegistry = try store.loadRegistry()
+                let activeAfterSwitch = try CredentialBlob(validating: Data(contentsOf: authURL))
+                let storedAAfterSwitch = try store.loadCredential(for: profileA.id)
+                let storedBAfterSwitch = try store.loadCredential(for: profileB.id)
+                let storedCAfterSwitch = try store.loadCredential(for: profileC.id)
+                let switchLaunchCount = await MainActor.run { switchLaunches.count }
+
+                let externalD = Data(
+                    #"{"auth_mode":"chatgpt","test_account":"d","tokens":{"id_token":"d-id","access_token":"d-access","refresh_token":"d-refresh"}}"#.utf8
+                )
+                try externalD.write(to: authURL)
+                try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: authURL.path)
+                let authBeforeRejection = try CredentialBlob(validating: externalD)
+                let rejected = await application.run(
+                    arguments: ["profile", "capture", "--label", "D"],
+                    mutationConfirmed: true
+                )
+                let registryAfterRejection = try store.loadRegistry()
+                let authAfterRejection = try CredentialBlob(validating: Data(contentsOf: authURL))
+                let storedAAfterRejection = try store.loadCredential(for: profileA.id)
+                let storedBAfterRejection = try store.loadCredential(for: profileB.id)
+                let storedCAfterRejection = try store.loadCredential(for: profileC.id)
+                let recoveryAfterRejection = await application.run(arguments: ["recovery", "status"])
+                let launchCountAfterRejection = await MainActor.run { launches.count }
+
+                try expect(captured.exitCode == 0, "third capture failed: \(captured.standardError)")
+                try expect(captured.standardOutput.contains("active=false label=C"), "third profile remained active")
+                try expect(registry.profiles.map(\.label) == ["A", "B", "C"], "third profile order changed")
+                try expect(registry.activeProfileID == profileB.id, "previously active profile B was not restored")
+                try expect(activeAfterCapture == storedB, "active auth does not match restored profile B")
+                try expect(storedA == credentialA, "third capture changed profile A")
+                try expect(storedB == credentialB, "third capture changed profile B")
+                try expect(storedC != credentialCBeforeCapture, "third credential was not refreshed")
+                try expect(recoveryAfterCapture.standardOutput == "recovery=none\n", "third capture left recovery state")
+                try expect(launchCountAfterCapture == 1, "restored profile B was not launched once")
+                try expect(switched.exitCode == 0, "switch to third profile failed: \(switched.standardError)")
+                try expect(switchedRegistry.activeProfileID == profileC.id, "switch did not activate profile C")
+                try expect(switchedRegistry.profiles == registry.profiles, "switch changed the three profiles")
+                try expect(activeAfterSwitch == storedCAfterSwitch, "active auth does not match switched profile C")
+                try expect(switchLaunchCount == 1, "switch did not launch profile C once")
+                try expect(rejected.standardError == "error=profile_already_exists\n", "fourth profile was accepted")
+                try expect(registryAfterRejection == switchedRegistry, "fourth capture changed the registry")
+                try expect(authAfterRejection == authBeforeRejection, "fourth capture changed active auth")
+                try expect(storedAAfterRejection == storedAAfterSwitch, "fourth capture changed profile A")
+                try expect(storedBAfterRejection == storedBAfterSwitch, "fourth capture changed profile B")
+                try expect(storedCAfterRejection == storedCAfterSwitch, "fourth capture changed profile C")
+                try expect(recoveryAfterRejection.standardOutput == "recovery=none\n", "fourth capture left recovery state")
+                try expect(launchCountAfterRejection == launchCountAfterCapture, "fourth capture launched the app")
             }
         },
         TestCase("CLI sync-active validates and stores only the registered active profile") {
@@ -1091,16 +1271,16 @@ func cliApplicationTests() -> [TestCase] {
                 try expect(recovery.standardOutput == "recovery=none\n", "duplicate rejection left recovery")
             }
         },
-        TestCase("CLI second capture restores the first profile after refreshed identity mismatch") {
+        TestCase("CLI third capture restores the active profile after refreshed identity mismatch") {
             try await withCaptureTemporaryDirectory { directory in
                 let codexHome = directory.appendingPathComponent(".codex", isDirectory: true)
                 try FileManager.default.createDirectory(at: codexHome, withIntermediateDirectories: false)
                 try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: codexHome.path)
                 let authURL = codexHome.appendingPathComponent("auth.json", isDirectory: false)
-                let activeB = Data(
-                    #"{"auth_mode":"chatgpt","test_account":"b","tokens":{"id_token":"b-id","access_token":"b-access","refresh_token":"b-refresh"}}"#.utf8
+                let activeC = Data(
+                    #"{"auth_mode":"chatgpt","test_account":"c","tokens":{"id_token":"c-id","access_token":"c-access","refresh_token":"c-refresh"}}"#.utf8
                 )
-                try activeB.write(to: authURL, options: .withoutOverwriting)
+                try activeC.write(to: authURL, options: .withoutOverwriting)
                 try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: authURL.path)
 
                 let storeURL = directory.appendingPathComponent("store", isDirectory: true)
@@ -1114,15 +1294,28 @@ func cliApplicationTests() -> [TestCase] {
                     createdAt: Date(timeIntervalSince1970: 1_700_000_000),
                     updatedAt: Date(timeIntervalSince1970: 1_700_000_000)
                 )
-                _ = try store.saveCredential(
-                    CredentialBlob(validating: Data(
-                        #"{"auth_mode":"chatgpt","test_account":"a","tokens":{"id_token":"a-id","access_token":"a-access","refresh_token":"a-refresh"}}"#.utf8
-                    )),
-                    for: profileA.id
+                let profileB = ProfileMetadata(
+                    id: ProfileID(UUID()),
+                    label: "B",
+                    email: "b@example.invalid",
+                    planType: "plus",
+                    needsRelogin: false,
+                    createdAt: Date(timeIntervalSince1970: 1_700_000_001),
+                    updatedAt: Date(timeIntervalSince1970: 1_700_000_001)
                 )
-                _ = try store.saveRegistry(
-                    ProfileRegistry(activeProfileID: profileA.id, profiles: [profileA])
+                let credentialA = try CredentialBlob(validating: Data(
+                    #"{"auth_mode":"chatgpt","test_account":"a","tokens":{"id_token":"a-id","access_token":"a-access","refresh_token":"a-refresh"}}"#.utf8
+                ))
+                let credentialB = try CredentialBlob(validating: Data(
+                    #"{"auth_mode":"chatgpt","test_account":"b","tokens":{"id_token":"b-id","access_token":"b-access","refresh_token":"b-refresh"}}"#.utf8
+                ))
+                _ = try store.saveCredential(credentialA, for: profileA.id)
+                _ = try store.saveCredential(credentialB, for: profileB.id)
+                let originalRegistry = try ProfileRegistry(
+                    activeProfileID: profileB.id,
+                    profiles: [profileA, profileB]
                 )
+                _ = try store.saveRegistry(originalRegistry)
 
                 let executable = try makeCaptureAppServer(
                     in: directory,
@@ -1149,20 +1342,33 @@ func cliApplicationTests() -> [TestCase] {
                     runningApplicationPIDs: { _ in [] }
                 )
                 let application = CLIApplication(provider: provider)
+                let credentialDirectory = storeURL.appendingPathComponent("credentials", isDirectory: true)
+                let credentialFilesBeforeCapture = try FileManager.default
+                    .contentsOfDirectory(atPath: credentialDirectory.path)
+                    .sorted()
 
                 let captured = await application.run(
-                    arguments: ["profile", "capture", "--label", "B"],
+                    arguments: ["profile", "capture", "--label", "C"],
                     mutationConfirmed: true
                 )
                 let registry = try store.loadRegistry()
                 let recovery = await application.run(arguments: ["recovery", "status"])
                 let activeCredential = try CredentialBlob(validating: Data(contentsOf: authURL))
-                let storedCredential = try store.loadCredential(for: profileA.id)
+                let storedA = try store.loadCredential(for: profileA.id)
+                let storedB = try store.loadCredential(for: profileB.id)
+                let credentialFilesAfterCapture = try FileManager.default
+                    .contentsOfDirectory(atPath: credentialDirectory.path)
+                    .sorted()
 
                 try expect(captured.standardError == "error=identity_mismatch\n", "mismatch error changed")
-                try expect(registry.profiles == [profileA], "mismatched second profile was registered")
-                try expect(registry.activeProfileID == profileA.id, "first profile stopped being active")
-                try expect(activeCredential == storedCredential, "first credential was not restored")
+                try expect(registry == originalRegistry, "mismatched third profile changed the registry")
+                try expect(activeCredential == credentialB, "previously active profile B was not restored")
+                try expect(storedA == credentialA, "third capture failure changed profile A")
+                try expect(storedB == credentialB, "third capture failure changed profile B")
+                try expect(
+                    credentialFilesAfterCapture == credentialFilesBeforeCapture,
+                    "third capture failure left a temporary credential"
+                )
                 try expect(recovery.standardOutput == "recovery=none\n", "completed rollback left recovery")
             }
         },
@@ -1289,17 +1495,80 @@ func cliApplicationTests() -> [TestCase] {
                 try expect(restoredStatus.standardOutput == "recovery=none\n", "capture recovery left journal")
                 try expect(recoveryLaunchCount == 1, "capture recovery did not relaunch A")
 
-                _ = try store.saveRegistry(
-                    ProfileRegistry(activeProfileID: profileA.id, profiles: [profileA])
+                let profileC = ProfileMetadata(
+                    id: ProfileID(UUID()),
+                    label: "C",
+                    email: "c@example.invalid",
+                    planType: "plus",
+                    needsRelogin: false,
+                    createdAt: Date(timeIntervalSince1970: 1_700_000_100),
+                    updatedAt: Date(timeIntervalSince1970: 1_700_000_100)
                 )
-                _ = try store.removeCredential(for: profileB.id)
+                let storedC = try CredentialBlob(validating: Data(
+                    #"{"auth_mode":"chatgpt","test_account":"c","tokens":{"id_token":"c-id","access_token":"c-access","refresh_token":"c-refresh"}}"#.utf8
+                ))
+                _ = try store.saveCredential(storedC, for: profileC.id)
+                let impossibleRegistry = try ProfileRegistry(
+                    activeProfileID: profileA.id,
+                    profiles: [profileA, profileB, profileC]
+                )
+                _ = try store.saveRegistry(impossibleRegistry)
+                let impossibleTargetID = try store.createCaptureProfileID()
+                let impossibleTargetCredential = try CredentialBlob(validating: Data(
+                    #"{"auth_mode":"chatgpt","test_account":"d","tokens":{"id_token":"d-id","access_token":"d-access","refresh_token":"d-refresh"}}"#.utf8
+                ))
+                _ = try store.saveCredential(impossibleTargetCredential, for: impossibleTargetID)
+                let impossibleJournal = SwitchJournalRecord(
+                    transactionID: UUID(),
+                    phase: .rollbackFailed,
+                    previousProfileID: profileA.id,
+                    targetProfileID: impossibleTargetID,
+                    startedAt: Date(timeIntervalSince1970: 1_700_000_150),
+                    updatedAt: Date(timeIntervalSince1970: 1_700_000_150)
+                )
+                _ = try store.createJournalIfAbsent(impossibleJournal)
+                let authBeforeImpossibleRecovery = try CredentialBlob(validating: Data(contentsOf: authURL))
+
+                let impossibleRecovery = await recoveryApplication.run(
+                    arguments: ["recovery", "restore", "--profile", "A"],
+                    mutationConfirmed: true
+                )
+                let registryAfterImpossibleRecovery = try store.loadRegistry()
+                let authAfterImpossibleRecovery = try CredentialBlob(validating: Data(contentsOf: authURL))
+                let storedAAfterImpossibleRecovery = try store.loadCredential(for: profileA.id)
+                let storedBAfterImpossibleRecovery = try store.loadCredential(for: profileB.id)
+                let storedCAfterImpossibleRecovery = try store.loadCredential(for: profileC.id)
+                let targetAfterImpossibleRecovery = try store.loadCredential(for: impossibleTargetID)
+                let markerAfterImpossibleRecovery = try store.loadCaptureProfileIDIfPresent()
+                let journalAfterImpossibleRecovery = try store.loadJournalIfPresent()
+
+                try expect(
+                    impossibleRecovery.standardError == "error=recovery_unavailable\n",
+                    "full pre-commit registry was treated as recoverable"
+                )
+                try expect(registryAfterImpossibleRecovery == impossibleRegistry, "rejected recovery changed registry")
+                try expect(authAfterImpossibleRecovery == authBeforeImpossibleRecovery, "rejected recovery changed active auth")
+                try expect(storedAAfterImpossibleRecovery == restoredStoredA, "rejected recovery changed A")
+                try expect(storedBAfterImpossibleRecovery == storedB, "rejected recovery changed B")
+                try expect(storedCAfterImpossibleRecovery == storedC, "rejected recovery changed C")
+                try expect(targetAfterImpossibleRecovery == impossibleTargetCredential, "rejected recovery changed pending target")
+                try expect(markerAfterImpossibleRecovery == impossibleTargetID, "rejected recovery removed marker")
+                try expect(journalAfterImpossibleRecovery == impossibleJournal, "rejected recovery removed journal")
+
+                _ = try store.removeJournal()
+                _ = try store.removeCaptureProfileID()
+                _ = try store.removeCredential(for: impossibleTargetID)
+                _ = try store.removeCredential(for: profileC.id)
+                _ = try store.saveRegistry(
+                    ProfileRegistry(activeProfileID: profileB.id, profiles: [profileA, profileB])
+                )
                 let precommitTargetID = try store.createCaptureProfileID()
-                _ = try store.saveCredential(storedB, for: precommitTargetID)
+                _ = try store.saveCredential(storedC, for: precommitTargetID)
                 _ = try store.createJournalIfAbsent(
                     SwitchJournalRecord(
                         transactionID: UUID(),
                         phase: .rollbackFailed,
-                        previousProfileID: profileA.id,
+                        previousProfileID: profileB.id,
                         targetProfileID: precommitTargetID,
                         startedAt: Date(timeIntervalSince1970: 1_700_000_200),
                         updatedAt: Date(timeIntervalSince1970: 1_700_000_200)
@@ -1323,12 +1592,13 @@ func cliApplicationTests() -> [TestCase] {
                     )
                 )
                 let precommitRestored = await precommitApplication.run(
-                    arguments: ["recovery", "restore", "--profile", "A"],
+                    arguments: ["recovery", "restore", "--profile", "B"],
                     mutationConfirmed: true
                 )
                 let precommitRegistry = try store.loadRegistry()
                 let precommitAuth = try CredentialBlob(validating: Data(contentsOf: authURL))
                 let precommitStoredA = try store.loadCredential(for: profileA.id)
+                let precommitStoredB = try store.loadCredential(for: profileB.id)
                 let precommitCredentialURL = storeURL
                     .appendingPathComponent("credentials", isDirectory: true)
                     .appendingPathComponent("\(precommitTargetID).json", isDirectory: false)
@@ -1337,16 +1607,18 @@ func cliApplicationTests() -> [TestCase] {
                 let precommitLaunchCount = await MainActor.run { precommitLaunches.count }
 
                 try expect(precommitRestored.exitCode == 0, "pre-commit capture recovery failed")
-                try expect(precommitRegistry.profiles == [profileA], "pre-commit recovery registered target")
-                try expect(precommitRegistry.activeProfileID == profileA.id, "pre-commit recovery did not activate A")
-                try expect(precommitAuth == precommitStoredA, "pre-commit recovery did not restore A auth")
+                try expect(precommitRegistry.profiles == [profileA, profileB], "pre-commit recovery changed profiles")
+                try expect(precommitRegistry.activeProfileID == profileB.id, "pre-commit recovery did not activate B")
+                try expect(precommitAuth == precommitStoredB, "pre-commit recovery did not restore B auth")
+                try expect(precommitStoredA == restoredStoredA, "pre-commit recovery changed A")
+                try expect(precommitStoredB == storedB, "pre-commit recovery changed B")
                 try expect(
                     !FileManager.default.fileExists(atPath: precommitCredentialURL.path),
                     "pre-commit recovery left temporary target credential"
                 )
                 try expect(precommitCaptureID == nil, "pre-commit recovery left marker")
                 try expect(precommitJournal == nil, "pre-commit recovery left journal")
-                try expect(precommitLaunchCount == 1, "pre-commit recovery did not relaunch A")
+                try expect(precommitLaunchCount == 1, "pre-commit recovery did not relaunch B")
             }
         },
         TestCase("CLI capture preserves an interrupted capture backup") {
@@ -1783,7 +2055,9 @@ private func makeCaptureAppServer(
       [[ -f "\#(probeCountURL?.path ?? "")" ]] && IFS= read -r probe_count < "\#(probeCountURL?.path ?? "")"
       print -r -- $((probe_count + 1)) > "\#(probeCountURL?.path ?? "")"
     fi
-    if grep -q '"test_account":"b"' "$CODEX_HOME/auth.json"; then
+    if grep -q '"test_account":"c"' "$CODEX_HOME/auth.json"; then
+      account_email='c@example.invalid'
+    elif grep -q '"test_account":"b"' "$CODEX_HOME/auth.json"; then
       account_email='b@example.invalid'
     else
       account_email='person@example.invalid'
@@ -1805,6 +2079,8 @@ private func makeCaptureAppServer(
         else
           print -rn -- '{"auth_mode":"chatgpt","test_account":"b","tokens":{"id_token":"other-id","access_token":"other-access","refresh_token":"other-refresh"}}' > "$CODEX_HOME/auth.json"
         fi
+      elif [[ "$account_email" == "c@example.invalid" ]]; then
+        print -rn -- '{"auth_mode":"chatgpt","test_account":"c","tokens":{"id_token":"c-id-rotated","access_token":"c-access-rotated","refresh_token":"c-refresh-rotated"}}' > "$CODEX_HOME/auth.json"
       elif [[ "$account_email" == "b@example.invalid" ]]; then
         print -rn -- '{"auth_mode":"chatgpt","test_account":"b","tokens":{"id_token":"b-id-rotated","access_token":"b-access-rotated","refresh_token":"b-refresh-rotated"}}' > "$CODEX_HOME/auth.json"
       else

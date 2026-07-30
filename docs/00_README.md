@@ -1,7 +1,7 @@
 # Codex Account Switcher 문서 인덱스
 
 - 문서 상태: 기준안 완료
-- 구현 상태: A/B capture·동기화·일반 switch·rollbackFailed 수동 복구 CLI 완료
+- 구현 상태: 최대 3개 프로필 capture·동기화·일반 switch·rollbackFailed 수동 복구 CLI 완료
 - 실제 검증: A↔B 기능 왕복 3회, 수동 A 복구 2회, B-011 자동 롤백 PASS
 - 제품 단계: ADR-027에 따라 `MenuBarExtra` MVP 개발 승인
 - 마지막 조사일: 2026-07-30
@@ -77,7 +77,7 @@
 
 - 편의 전환기이며 보안 격리 제품이 아님
 - 공용 기본 `~/.codex`; `auth.json`만 전환
-- 서로 다른 이메일의 ChatGPT 로그인 두 개
+- 서로 다른 이메일의 ChatGPT 로그인 최대 3개
 - MVP identity는 App Server `account/read` 이메일 완전 일치
 - 사용량은 identity 검증 수단이 아님
 - Swift CLI Spike가 먼저, 메뉴바 앱은 나중
@@ -91,8 +91,8 @@
 - CLI Spike 비활성 인증은 repo 밖 `0700`/`0600` private file store, 제품 비활성 인증은 macOS Keychain; 제품의 평문 활성 인증 한 개만 `~/.codex/auth.json`에 materialize
 - 대상 실패 시 이전 계정 자동 롤백
 - 롤백 검증 실패 시 공식 앱을 실행하지 않음
-- MVP 등록은 개인·회사 두 개, 내부 모델은 배열
-- 두 번째 등록 후 원래 계정 자동 복귀
+- MVP 등록은 최대 3개, 내부 모델은 배열
+- 추가 프로필 등록 후 등록 전 활성 계정 자동 복귀
 - 이미 활성인 카드 클릭은 무변경 + 창 활성화
 - 앱이 닫혀 있으면 전환 후 실행
 - 외부 미등록 로그인은 자동 덮어쓰기 금지
@@ -167,9 +167,9 @@ Swift CLI Core의 비파괴 기반 구현은 저장소 루트에 있다. 빌드�
 
 1. 완료: SwiftPM Core/CLI/test harness
 2. 완료: credential/file/journal/lock, App Server, bundle/process, 상태 머신
-3. 완료: custom async harness의 fake fixture 78개 테스트와 `inspect`/`profiles list`/`profile capture`/`profile sync-active`/`switch`/`recovery status`/`recovery restore`
+3. 완료: custom async harness의 fake fixture 79개 테스트와 `inspect`/`profiles list`/`profile capture`/`profile sync-active`/`switch`/`recovery status`/`recovery restore`
 4. 완료: 공식 ChatGPT 앱의 OS signature와 고정 build 검증
-5. 완료: A/B registration coordinator, B 등록 후 A 자동 복귀, 외부 Terminal confirmation gate
+5. 완료: 최대 3개 registration coordinator, 추가 등록 후 기존 활성 프로필 자동 복귀, 외부 Terminal confirmation gate
 6. 개발 승인: 사용자 확인상 동일 task 기능 왕복 완료, `07_test_acceptance.md` §16 형식 증거는 릴리스 게이트로 유지
 7. 다음: 기존 Core를 재사용하는 `MenuBarExtra` MVP
 

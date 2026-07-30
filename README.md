@@ -11,7 +11,7 @@
 구현됨:
 
 - opaque `auth.json` 검증과 redacted secret 타입
-- 최대 2개 프로필 registry와 exact 7-field recovery journal
+- 최대 3개 프로필 registry와 exact 7-field recovery journal
 - `0600` 파일, `0700` store, `flock`, `fsync` + same-directory atomic rename
 - 공식 Codex App Server JSONL handshake와 `account/read`
 - 공식 앱 signature/Team ID 검사, 정상 종료·실행 adapter
@@ -19,7 +19,7 @@
 - switch/rollback/recovery 상태 머신
 - 진단 CLI: `inspect`, `profiles list`, `recovery status`
 - 첫 활성 계정 A capture: TTY 확인, process gate, refresh 전 private backup, 이메일 검증, rollback
-- 두 번째 계정 B capture, 중복 계정 차단, 실패 rollback, 첫 프로필 A 자동 복귀
+- 추가 계정 B/C capture, 중복·네 번째 계정 차단, 실패 rollback, 등록 전 활성 프로필 자동 복귀
 - 수동 재로그인 뒤 현재 활성 인증을 같은 이메일의 저장 프로필에 동기화
 - 저장 프로필 `switch --target`, 정상 종료, 격리 검증·refresh, 원자 교체, 재실행·검증, 실패 rollback
 - debug build의 post-launch 검증 실패 주입과 source 자동 롤백 실검증
@@ -29,7 +29,7 @@
 
 - 메뉴바 UI
 
-capture 명령은 앱을 자동 종료하지 않는다. 첫 capture는 현재 인증을 갱신·저장한다. 두 번째 capture는 B를 저장한 뒤 `~/.codex/auth.json`을 저장된 A로 원자 복구하고 ChatGPT 앱을 A로 다시 실행한다. 모든 auth 변경은 외부 Terminal의 대화형 확인과 process gate 뒤에만 수행한다.
+capture 명령은 앱을 자동 종료하지 않는다. 첫 capture는 현재 인증을 갱신·저장한다. 추가 capture는 새 계정을 저장한 뒤 `~/.codex/auth.json`을 등록 전 활성 프로필로 원자 복구하고 ChatGPT 앱을 해당 계정으로 다시 실행한다. 모든 auth 변경은 외부 Terminal의 대화형 확인과 process gate 뒤에만 수행한다.
 
 ## 빌드와 테스트
 
@@ -77,24 +77,25 @@ cd codex-account-switcher-spike
 ./Scripts/dev.sh run profile capture --label A
 ```
 
-### 두 번째 계정 B 저장 후 A 자동 복귀
+### 추가 계정 B/C 저장 후 기존 활성 계정 자동 복귀
 
-1. `profiles list`에서 A 하나가 `active=true`, `recovery status`가 `recovery=none`인지 확인한다.
-2. 공식 ChatGPT UI에서 서로 다른 계정 B로 로그인한다.
+1. `profiles list`에서 복귀할 기존 프로필이 `active=true`, `recovery status`가 `recovery=none`인지 확인한다.
+2. 공식 ChatGPT UI에서 아직 등록하지 않은 계정 B 또는 C로 로그인한다.
 3. ChatGPT 앱과 독립 Codex CLI를 정상 종료한다.
 4. `inspect`의 세 process count가 모두 `0`인지 확인한다.
-5. 외부 Terminal에서 B를 capture한다.
+5. 외부 Terminal에서 새 계정을 capture한다.
 
 ```sh
 ./Scripts/dev.sh run inspect
 ./Scripts/dev.sh run profile capture --label B
+# 세 번째 계정이면 --label C
 ./Scripts/dev.sh run profiles list
 ./Scripts/dev.sh run recovery status
 ```
 
-성공 결과는 A `active=true`, B `active=false`, `recovery=none`이다. ChatGPT 앱은 A로 다시 열린다.
+성공 결과는 등록 전 프로필 `active=true`, 새 프로필 `active=false`, `recovery=none`이다. ChatGPT 앱은 등록 전 활성 계정으로 다시 열린다.
 
-프롬프트에 `CAPTURE`를 입력해야 진행한다. 현재 검증된 ChatGPT 앱은 `26.721.41059`/`5848`, `26.721.81911`/`5973`이다. `application=incompatible`, `process_blocked`, 다른 build는 hard gate다. `account_already_registered`면 아직 A이므로 B 로그인부터 다시 한다. `rollback_failed`, `recovery=pending`, `recovery=blocked`면 재실행하지 말고 상태를 보존한다.
+프롬프트에 `CAPTURE`를 입력해야 진행한다. 현재 검증된 ChatGPT 앱은 `26.721.41059`/`5848`, `26.721.81911`/`5973`이다. `application=incompatible`, `process_blocked`, 다른 build는 hard gate다. `account_already_registered`면 미등록 계정 로그인부터 다시 한다. `profile_already_exists`면 3개 상한에 도달한 상태다. `rollback_failed`, `recovery=pending`, `recovery=blocked`면 재실행하지 말고 상태를 보존한다.
 
 ### 수동 A 재로그인 후 저장본 동기화
 
@@ -104,7 +105,7 @@ cd codex-account-switcher-spike
 ./Scripts/dev.sh run profile sync-active
 ```
 
-`SYNC`를 입력해야 진행한다. 현재 `auth.json`의 이메일이 registry 활성 프로필과 정확히 일치할 때만 해당 저장본을 교체한다. 현재 `auth.json`, B 저장본, registry는 변경하지 않는다. 저장 후 검사가 실패하면 기존 활성 저장본을 복구한다. verifier 종료를 확인하지 못하면 private store의 격리 workspace를 보존하고 `recovery=blocked`로 표시한다.
+`SYNC`를 입력해야 진행한다. 현재 `auth.json`의 이메일이 registry 활성 프로필과 정확히 일치할 때만 해당 저장본을 교체한다. 현재 `auth.json`, 다른 프로필 저장본, registry는 변경하지 않는다. 저장 후 검사가 실패하면 기존 활성 저장본을 복구한다. verifier 종료를 확인하지 못하면 private store의 격리 workspace를 보존하고 `recovery=blocked`로 표시한다.
 
 ### 저장된 계정으로 전환
 
