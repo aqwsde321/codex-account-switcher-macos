@@ -12,6 +12,7 @@ let package = Package(
     products: [
         .library(name: "CodexAccountCore", targets: ["CodexAccountCore"]),
         .executable(name: "codex-account-spike", targets: ["CodexAccountSpike"]),
+        .executable(name: "CodexAccountMenuBar", targets: ["CodexAccountMenuBar"]),
         .executable(name: "codex-account-core-tests", targets: ["CodexAccountCoreTests"]),
     ],
     targets: [
@@ -24,9 +25,17 @@ let package = Package(
             dependencies: ["CodexAccountCore"],
             swiftSettings: faultInjectionSettings
         ),
+        .target(
+            name: "CodexAccountMenuBarModel",
+            dependencies: ["CodexAccountCore"]
+        ),
+        .executableTarget(
+            name: "CodexAccountMenuBar",
+            dependencies: ["CodexAccountCore", "CodexAccountMenuBarModel"]
+        ),
         .executableTarget(
             name: "CodexAccountCoreTests",
-            dependencies: ["CodexAccountCore"],
+            dependencies: ["CodexAccountCore", "CodexAccountMenuBarModel"],
             path: "Tests/CodexAccountCoreTests",
             swiftSettings: faultInjectionSettings
         ),

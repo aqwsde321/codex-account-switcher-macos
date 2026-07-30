@@ -113,6 +113,25 @@ func switchCoordinatorTests() -> [TestCase] {
                 "same-profile path bypassed recovery gate"
             )
         },
+        TestCase("SwitchCoordinator verifies and launches a closed active profile without auth mutation") {
+            let driver = RecordingSwitchDriver()
+            let coordinator = SwitchCoordinator(driver: driver)
+            let request = switchRequest()
+            let sameProfile = SwitchRequest(
+                source: request.source,
+                target: request.source,
+                applicationWasRunning: false
+            )
+
+            let outcome = try await coordinator.switchAccount(sameProfile)
+            let events = await driver.events
+
+            try expect(outcome == .launchedExisting, "closed active profile was not launched")
+            try expect(
+                events == ["lock", "recoveryGate", "verifySource", "launchTarget", "unlock"],
+                "closed same-profile path mutated switch state"
+            )
+        },
         TestCase("SwitchCoordinator never restores auth when rollback quiescence fails") {
             let driver = RecordingSwitchDriver(
                 failAt: "verifyTarget",

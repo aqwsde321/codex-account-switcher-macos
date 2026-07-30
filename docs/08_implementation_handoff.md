@@ -44,14 +44,16 @@ ADR-027과 기존 안전 결정을 유지한 채 Step 9 메뉴바 MVP를 구현�
 - 첫 계정 A capture의 TTY 확인, process gate, refresh 전 backup, isolated identity 검증, rollback 구현
 - 추가 계정 capture, 중복 계정 차단, 동일 capture lock/journal의 실패 rollback·등록 전 active 복귀, 최대 3개 허용·네 번째 무변경 거부 구현
 - 저장 프로필 일반 switch의 정상 종료·격리 검증·원자 교체·재실행·검증·rollback adapter 구현
-- fake credential만 사용하는 79개 debug 테스트 통과
+- `CodexAccountMenuBar` target, fake 3계정 카드와 active/inactive 선택 모델 구현
+- fake credential만 사용하는 81개 debug 테스트 통과
 - 실제 read-only inspect에서 사용자 auth와 helper store 무변경 확인
 - `rollbackFailed` 수동 복구 CLI와 실환경 A 복구 2회 완료
 - debug 전용 B-011 실패 주입에서 source 자동 롤백과 최종 A 복귀 확인
 
 미완료:
 
-- 메뉴바 앱
+- 메뉴바 앱의 Keychain credential backend와 실제 Core provider 연결
+- 진행·복구·재로그인 상태 UI
 - MVP 완료·배포 전 `07_test_acceptance.md` §16 형식의 동일 task 왕복 증거 보존
 
 허용 build는 `/Applications/ChatGPT.app` `26.721.41059`/`5848`, `26.721.81911`/`5973`이다. 현재 설치된 `26.721.81911`/`5973`은 signature/build gate를 통과해 `application=ready`이며 auth-changing 명령 실검증을 완료했다.
@@ -312,6 +314,8 @@ cd codex-account-switcher-spike
 ### Step 9. 메뉴바 앱
 
 ADR-027의 개발 승인에 따라 시작한다. B-010 정식 증거 공백은 릴리스 게이트로 남긴다.
+
+현재 1~2와 첫 구현 slice는 완료됐다. 3의 Keychain credential backend 연결이 다음 작업이다.
 
 구현 순서:
 
