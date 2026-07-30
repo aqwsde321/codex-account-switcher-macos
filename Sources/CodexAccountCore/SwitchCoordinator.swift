@@ -26,6 +26,7 @@ public enum SwitchCoordinatorFailure: Error, Equatable, Sendable {
     case transactionInProgress
     case lockBusy
     case operationFailed
+    case processBlocked
     case recoveryRequired
     case rollbackFailed
 }
@@ -119,7 +120,7 @@ public actor SwitchCoordinator {
             } catch {
                 await driver.endExclusiveTransaction()
                 activeTransactionID = nil
-                throw SwitchCoordinatorFailure.operationFailed
+                throw operationFailure(from: error)
             }
         }
 
@@ -157,9 +158,7 @@ public actor SwitchCoordinator {
                 startedAt: startedAt
             )
             phase = .quitRequested
-            if request.applicationWasRunning {
-                try await driver.requestNormalQuit()
-            }
+            try await driver.requestNormalQuit()
             try await driver.waitForQuiescence()
 
             try await persist(
@@ -299,7 +298,7 @@ private extension SwitchCoordinator {
         case .preparing, .quitRequested:
             do {
                 try await driver.removeJournalDurably()
-                return .operationFailed
+                return operationFailure(from: cause)
             } catch {
                 return .recoveryRequired
             }
@@ -310,15 +309,16 @@ private extension SwitchCoordinator {
         case .currentSaved, .validatingTarget, .targetValidated:
             do {
                 try await driver.verifyPrevious(expectedEmail: request.source.email)
+                try await driver.revalidateCredentialMutationGate()
                 try await driver.commitActiveProfile(request.source.id)
                 try await driver.removeJournalDurably()
-                if request.applicationWasRunning {
-                    try await driver.launchPrevious()
-                }
-                return .operationFailed
             } catch {
                 return .recoveryRequired
             }
+            if request.applicationWasRunning {
+                try? await driver.launchPrevious()
+            }
+            return operationFailure(from: cause)
 
         case .targetVerified:
             return .recoveryRequired
@@ -345,6 +345,14 @@ private extension SwitchCoordinator {
         return false
     }
 
+    func operationFailure(from error: Error) -> SwitchCoordinatorFailure {
+        guard let failure = error as? SwitchCoordinatorFailure,
+              failure == .processBlocked else {
+            return .operationFailed
+        }
+        return .processBlocked
+    }
+
     func rollback(
         transactionID: UUID,
         request: SwitchRequest,
@@ -367,10 +375,9 @@ private extension SwitchCoordinator {
             try await driver.revalidateCredentialMutationGate()
             try await driver.restorePreviousCredential(request.source.id)
             try await driver.verifyPrevious(expectedEmail: request.source.email)
+            try await driver.revalidateCredentialMutationGate()
             try await driver.commitActiveProfile(request.source.id)
             try await driver.removeJournalDurably()
-            try await driver.launchPrevious()
-            return .operationFailed
         } catch {
             try? await persist(
                 .rollbackFailed,
@@ -380,5 +387,7 @@ private extension SwitchCoordinator {
             )
             return .rollbackFailed
         }
+        try? await driver.launchPrevious()
+        return .operationFailed
     }
 }

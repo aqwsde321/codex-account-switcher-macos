@@ -55,10 +55,29 @@ func switchCoordinatorTests() -> [TestCase] {
                 rollbackTail == [
                     "journal:rollbackStarted", "quit", "quiescent", "mutationGate",
                     "restorePrevious", "verifyPrevious",
-                    "commit", "removeJournal", "launchPrevious", "unlock",
+                    "mutationGate", "commit", "removeJournal", "launchPrevious", "unlock",
                 ],
                 "rollback order differs from restore→verify→commit→delete→launch"
             )
+        },
+        TestCase("SwitchCoordinator does not report rollback failure after durable recovery") {
+            let driver = RecordingSwitchDriver(
+                failAt: "verifyTarget",
+                failDuringRollbackAt: "launchPrevious"
+            )
+            let coordinator = SwitchCoordinator(driver: driver)
+
+            do {
+                _ = try await coordinator.switchAccount(switchRequest())
+                throw TestFailure(description: "failed target verification completed")
+            } catch let failure as SwitchCoordinatorFailure {
+                try expect(failure == .operationFailed, "post-recovery launch failure became rollback failure")
+            }
+
+            let events = await driver.events
+            try expect(events.contains("removeJournal"), "durable recovery did not remove the journal")
+            try expect(events.contains("launchPrevious"), "previous launch was not attempted")
+            try expect(!events.contains("journal:rollbackFailed"), "completed recovery was marked rollbackFailed")
         },
         TestCase("SwitchCoordinator preserves recovery evidence after quiescent source mismatch") {
             let driver = RecordingSwitchDriver(failAt: "verifySource")

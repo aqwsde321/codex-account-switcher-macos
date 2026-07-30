@@ -20,20 +20,28 @@ public struct AppServerProbeTimeouts: Sendable, Equatable {
     }
 }
 
+public enum AppServerProbeHomePolicy: Sendable, Equatable {
+    case privateDirectory
+    case ownerControlled
+}
+
 public struct AppServerProbeConfiguration: Sendable, Equatable {
     public let executableURL: URL
     public let codexHomeURL: URL
+    public let homePolicy: AppServerProbeHomePolicy
     public let refreshToken: Bool
     public let timeouts: AppServerProbeTimeouts
 
     public init(
         executableURL: URL,
         codexHomeURL: URL,
+        homePolicy: AppServerProbeHomePolicy = .privateDirectory,
         refreshToken: Bool,
         timeouts: AppServerProbeTimeouts
     ) {
         self.executableURL = executableURL
         self.codexHomeURL = codexHomeURL
+        self.homePolicy = homePolicy
         self.refreshToken = refreshToken
         self.timeouts = timeouts
     }
@@ -228,11 +236,17 @@ private extension AppServerProbeSession {
               executable.st_mode & mode_t(0o111) != 0,
               let home = pathInformation(configuration.codexHomeURL.path),
               home.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR),
-              home.st_uid == getuid(),
-              home.st_mode & mode_t(0o777) == mode_t(0o700) else {
+              home.st_uid == getuid() else {
             return false
         }
-        return true
+        let permissions = home.st_mode & mode_t(0o777)
+        switch configuration.homePolicy {
+        case .privateDirectory:
+            return permissions == mode_t(0o700)
+        case .ownerControlled:
+            return permissions & mode_t(0o022) == 0
+                && permissions & mode_t(0o700) == mode_t(0o700)
+        }
     }
 
     func receiveStandardOutput(_ data: Data) {

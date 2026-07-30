@@ -68,9 +68,12 @@ public enum RecoveryCLIStatus: Equatable, Sendable {
     case blocked
 }
 
-public protocol ReadOnlyCLIDataProviding: Sendable {
+public protocol CLIDataProviding: Sendable {
     func inspect() async throws -> InspectionReport
     func profiles() async throws -> [ProfileListItem]
+    func captureProfile(label: String) async throws -> ProfileListItem
+    func syncActiveProfile() async throws -> ProfileListItem
+    func switchProfile(target: String) async throws -> ProfileListItem
     func recoveryStatus() async throws -> RecoveryCLIStatus
 }
 
@@ -87,14 +90,58 @@ public struct CLIResult: Equatable, Sendable {
 }
 
 public struct CLIApplication: Sendable {
-    private let provider: any ReadOnlyCLIDataProviding
+    private let provider: any CLIDataProviding
 
-    public init(provider: any ReadOnlyCLIDataProviding) {
+    public init(provider: any CLIDataProviding) {
         self.provider = provider
     }
 
-    public func run(arguments: [String]) async -> CLIResult {
+    public func run(arguments: [String], mutationConfirmed: Bool = false) async -> CLIResult {
         do {
+            if arguments.count == 3,
+               arguments[0...1] == ["switch", "--target"] {
+                guard mutationConfirmed else {
+                    return CLIResult(
+                        exitCode: 77,
+                        standardOutput: "",
+                        standardError: "error=confirmation_required\n"
+                    )
+                }
+                return CLIResult(
+                    exitCode: 0,
+                    standardOutput: render([try await provider.switchProfile(target: arguments[2])]),
+                    standardError: ""
+                )
+            }
+            if arguments == ["profile", "sync-active"] {
+                guard mutationConfirmed else {
+                    return CLIResult(
+                        exitCode: 77,
+                        standardOutput: "",
+                        standardError: "error=confirmation_required\n"
+                    )
+                }
+                return CLIResult(
+                    exitCode: 0,
+                    standardOutput: render([try await provider.syncActiveProfile()]),
+                    standardError: ""
+                )
+            }
+            if arguments.count == 4,
+               arguments[0...2] == ["profile", "capture", "--label"] {
+                guard mutationConfirmed else {
+                    return CLIResult(
+                        exitCode: 77,
+                        standardOutput: "",
+                        standardError: "error=confirmation_required\n"
+                    )
+                }
+                return CLIResult(
+                    exitCode: 0,
+                    standardOutput: render([try await provider.captureProfile(label: arguments[3])]),
+                    standardError: ""
+                )
+            }
             switch arguments {
             case [], ["help"], ["--help"]:
                 return CLIResult(exitCode: 0, standardOutput: usage, standardError: "")
@@ -120,7 +167,11 @@ public struct CLIApplication: Sendable {
                 return CLIResult(exitCode: 64, standardOutput: "", standardError: "error=invalid_command\n")
             }
         } catch {
-            return CLIResult(exitCode: 1, standardOutput: "", standardError: "error=operation_failed\n")
+            return CLIResult(
+                exitCode: 1,
+                standardOutput: "",
+                standardError: "error=\(safeErrorCode(error))\n"
+            )
         }
     }
 }
@@ -131,6 +182,9 @@ private extension CLIApplication {
         codex-account-spike <command>
           inspect
           profiles list
+          profile capture --label <label>
+          profile sync-active
+          switch --target <profile-id-or-label>
           recovery status
         """ + "\n"
     }
@@ -178,5 +232,59 @@ private extension CLIApplication {
             CharacterSet.controlCharacters.contains(scalar) ? "?" : Character(String(scalar))
         }
         return String(scalars)
+    }
+
+    func safeErrorCode(_ error: Error) -> String {
+        switch error {
+        case ProfileCaptureFailure.invalidLabel:
+            "invalid_label"
+        case ProfileCaptureFailure.signedOut:
+            "signed_out"
+        case ProfileCaptureFailure.missingEmail:
+            "missing_email"
+        case ProfileCaptureFailure.invalidEmail:
+            "invalid_email"
+        case ProfileCaptureFailure.accountAlreadyRegistered:
+            "account_already_registered"
+        case ProfileCaptureFailure.identityMismatch:
+            "identity_mismatch"
+        case ProfileCaptureFailure.rollbackFailed:
+            "rollback_failed"
+        case LocalCLIDataProviderFailure.captureAlreadyRunning,
+             LocalCLIDataProviderFailure.lockBusy:
+            "capture_busy"
+        case LocalCLIDataProviderFailure.pendingRecovery:
+            "recovery_required"
+        case LocalCLIDataProviderFailure.profileAlreadyExists:
+            "profile_already_exists"
+        case LocalCLIDataProviderFailure.activeProfileUnavailable:
+            "active_profile_unavailable"
+        case LocalCLIDataProviderFailure.targetProfileUnavailable:
+            "target_profile_unavailable"
+        case LocalCLIDataProviderFailure.targetNeedsRelogin:
+            "target_needs_relogin"
+        case LocalCLIDataProviderFailure.switchAlreadyRunning,
+             SwitchCoordinatorFailure.transactionInProgress,
+             SwitchCoordinatorFailure.lockBusy:
+            "switch_busy"
+        case SwitchCoordinatorFailure.recoveryRequired:
+            "recovery_required"
+        case SwitchCoordinatorFailure.rollbackFailed:
+            "rollback_failed"
+        case LocalCLIDataProviderFailure.incompatibleApplication:
+            "incompatible_application"
+        case is CodexAppLocatorFailure:
+            "incompatible_application"
+        case LocalCLIDataProviderFailure.processBlocked,
+             LocalCLIDataProviderFailure.processSnapshotUnstable,
+             SwitchCoordinatorFailure.processBlocked:
+            "process_blocked"
+        case LocalCLIDataProviderFailure.activeAuthChanged:
+            "active_auth_changed"
+        case is AppServerProbeFailure:
+            "account_probe_failed"
+        default:
+            "operation_failed"
+        }
     }
 }

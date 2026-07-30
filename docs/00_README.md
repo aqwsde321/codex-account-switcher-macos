@@ -1,10 +1,10 @@
 # Codex Account Switcher 문서 인덱스
 
 - 문서 상태: 기준안 완료
-- 구현 상태: read-only CLI와 Core foundation 완료; 실제 전환 backend는 미구현
-- 실제 계정 변경: 수행하지 않음
-- 실제 `auth.json` 변경: 수행하지 않음
-- 마지막 조사일: 2026-07-28
+- 구현 상태: A/B capture·동기화·일반 switch CLI 완료; manual recovery는 미구현
+- 실제 등록: A/B capture와 A 저장본 동기화 완료
+- 실제 A↔B switch: 수행하지 않음
+- 마지막 조사일: 2026-07-30
 
 ## 1. 결론
 
@@ -82,7 +82,7 @@
 - 사용량은 identity 검증 수단이 아님
 - Swift CLI Spike가 먼저, 메뉴바 앱은 나중
 - 신규 소형 Swift 프로젝트; Mobius 전체 포크 안 함
-- 앱 정상 종료만 사용; force quit 없음
+- 앱 정상 종료 우선, 1초 뒤 exact 앱 소유 잔존은 별도 확인 후 `SIGTERM`; `SIGKILL` 없음
 - 독립 CLI/app-server 자동 종료 없음; 발견 시 차단
 - 앱 실행 중 전환은 매번 사용자 확인
 - 전환은 `flock` + secret-free journal + atomic rename
@@ -152,7 +152,7 @@
 
 1. 관련 process가 살아 있으면 auth를 쓰지 않는다.
 2. 독립 CLI를 자동 종료하지 않는다.
-3. 강제 종료하지 않는다.
+3. 종료 전 확인한 exact 앱 소유 잔존도 별도 사용자 확인 없이는 `SIGTERM`하지 않는다. `SIGKILL`은 금지한다.
 4. 현재 이메일이 등록 프로필과 다르면 해당 프로필 저장본을 갱신하지 않는다.
 5. 실제 auth/token/cookie/raw command line을 출력·로그·commit하지 않는다.
 6. 저널 단계는 다음 side effect 전에 원자적·내구성 있게 기록한다.
@@ -168,10 +168,10 @@ Swift CLI Core의 비파괴 기반 구현은 저장소 루트에 있다. 빌드�
 
 1. 완료: SwiftPM Core/CLI/test harness
 2. 완료: credential/file/journal/lock, App Server, bundle/process, 상태 머신
-3. 완료: custom async harness의 fake fixture 53개 테스트와 읽기 전용 `inspect`/`profiles list`/`recovery status`
-4. 대기: 공식 Codex 앱의 유효한 OS signature 확보
-5. 대기: concrete mutation adapter, registration coordinator, 외부 Terminal confirmation gate
-6. 대기: 실제 A/B 등록과 동일 task 3회 왕복 Spike
+3. 완료: custom async harness의 fake fixture 77개 테스트와 `inspect`/`profiles list`/`profile capture`/`profile sync-active`/`switch`/`recovery status`
+4. 완료: 공식 ChatGPT 앱의 OS signature와 고정 build 검증
+5. 완료: A/B registration coordinator, B 등록 후 A 자동 복귀, 외부 Terminal confirmation gate
+6. 대기: 실제 A↔B switch, manual recovery, 동일 task 3회 왕복 Spike
 7. Spike PASS인 경우에만 `MenuBarExtra` MVP
 
 구현 상세와 각 단계 검증은 `08_implementation_handoff.md`에 있다.

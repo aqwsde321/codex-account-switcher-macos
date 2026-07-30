@@ -119,6 +119,26 @@ func spikeStoreTests() -> [TestCase] {
                 try expect(removedJournal == nil, "journal remains after durable removal")
             }
         },
+        TestCase("SpikeStore creates and removes a pending capture profile ID") {
+            try withStoreTemporaryDirectory { parent in
+                let root = parent.appendingPathComponent("store", isDirectory: true)
+                let store = try SpikeStore.create(at: root)
+
+                let first = try store.createCaptureProfileID()
+                let loaded = try store.loadCaptureProfileIDIfPresent()
+                let markerURL = root.appendingPathComponent("capture-profile-id", isDirectory: false)
+                let markerMode = try storeMode(at: markerURL)
+
+                try expect(loaded == first, "capture marker changed the profile ID")
+                try expect(markerMode == 0o600, "capture marker mode is not 0600")
+
+                _ = try store.removeCaptureProfileID()
+                let removed = try store.loadCaptureProfileIDIfPresent()
+                let next = try store.createCaptureProfileID()
+                try expect(removed == nil, "capture marker remains")
+                try expect(next != first, "completed capture reused its removed profile ID")
+            }
+        },
     ]
 }
 

@@ -64,7 +64,7 @@
 | 대상이 현재 활성 프로필 | 인증을 다시 쓰거나 앱을 재시작하지 않고 Codex 창만 활성화 |
 | Codex 앱 실행 중 | 항상 사용자에게 정상 종료 확인을 표시 |
 | Codex 앱 이미 종료됨 | 종료 확인 없이 전환하고 성공 후 앱 실행 |
-| 정상 종료가 제한 시간 안에 끝나지 않음 | 강제 종료하지 않고 전환 중단 |
+| 정상 종료 후 앱 소유 process가 남음 | 1초 뒤 별도 확인; 승인 시 exact identity에만 `SIGTERM` 1회, 거부·잔존 시 중단 |
 | 독립 CLI/app-server가 존재함 | PID와 가능한 작업 경로를 보여주고 전환 차단 |
 | 현재 이메일이 활성 등록 프로필과 다름 | 외부 로그인 변경으로 간주하고 전환 차단 |
 | 현재 이메일이 미등록 이메일 | 명시적 등록 또는 변경 폐기 중 하나를 사용자가 선택해야 함 |
@@ -85,9 +85,14 @@ flowchart TD
     N --> E["호환성·현재 신원 검사"]
     E --> F{"Codex 앱 실행 중인가?"}
     F -- "예" --> G["정상 종료 확인"]
-    G --> H["정상 종료 요청·대기"]
-    F -- "아니오" --> I["잔존 프로세스 검사"]
-    H --> I
+    G --> H["정상 종료 요청·1초 대기"]
+    F -- "아니오" --> H2
+    H --> H2{"exact 앱 소유 잔존이 있는가?"}
+    H2 -- "아니오" --> I
+    H2 -- "예" --> H3{"TERMINATE 승인?"}
+    H3 -- "예" --> H4["SIGTERM 1회"]
+    H4 --> I
+    H3 -- "아니오" --> K
     I --> J{"독립 CLI 또는 잔존 앱 프로세스가 있는가?"}
     J -- "예" --> K["인증 무변경·전환 차단"]
     J -- "아니오" --> L["현재 토큰 갱신·현재 프로필 저장"]
@@ -145,17 +150,18 @@ flowchart TD
 6. 현재 활성 이메일이 registry의 활성 프로필 이메일과 일치하는지 확인한다.
 7. 앱이 실행 중이면 정상 종료 확인을 표시한다.
 8. journal을 `quitRequested`로 내구성 있게 갱신한 뒤 정상 종료를 요청한다.
-9. root 앱 PID, 기존 자식 PID, 독립 CLI/app-server를 포함한 전체 process gate가 깨끗하면 `quiescent`를 기록한다.
-10. 차단 프로세스가 있으면 인증을 건드리지 않고 journal을 내구성 있게 삭제한 뒤 중단한다.
-11. `refreshingCurrent`를 먼저 기록한 뒤 기본 `~/.codex`의 Helper 소유 App Server에서 `account/read(refreshToken: true)`를 호출한다.
-12. verifier 종료와 현재 이메일 일치를 확인하고 갱신된 active auth를 현재 configured credential-store 항목에 저장한 뒤 `currentSaved`를 기록한다.
-13. `validatingTarget`을 기록한 뒤 대상 저장본을 격리 홈에서 `refreshToken: false`로 신원 확인하고 이어서 `refreshToken: true`로 online refresh한다.
-14. 두 응답이 대상 이메일과 완전 일치하고 verifier 종료와 갱신본의 configured credential-store 저장까지 성공하면 `targetValidated`를 기록한다. 실패하면 active auth를 바꾸지 않는다. 명시적 인증 거부만 `재로그인 필요`, 네트워크·서버 오류는 재시도 가능한 검증 실패, credential-store write 실패는 저장소 오류로 표시한다.
-15. 이전 인증의 복구 가능성을 재확인하고, 같은 디렉터리의 임시 파일을 이용해 `~/.codex/auth.json`을 원자 교체한다.
-16. journal을 `authReplaced`로 갱신한다.
-17. 공식 앱을 bundle identifier로 다시 실행하고 journal을 `targetLaunched`로 갱신한다.
-18. `verifyingTarget`에서 현재 active auth를 격리 verifier로 읽어 대상 이메일을 검증하고 일치하면 `targetVerified`로 갱신한다.
-19. `activeProfileId`를 내구성 있게 대상 프로필로 커밋한 뒤 journal을 unlink하고 parent directory를 `fsync`한다.
+9. 1초 뒤에도 남은 종료 전 확인된 exact 앱 소유 프로세스가 있으면 별도 확인을 표시하고, `TERMINATE` 승인 시에만 `SIGTERM`을 한 번 보낸다.
+10. root 앱 PID, 기존 자식 PID, 독립 CLI/app-server를 포함한 전체 process gate가 깨끗하면 `quiescent`를 기록한다.
+11. 차단 프로세스가 있으면 인증을 건드리지 않고 journal을 내구성 있게 삭제한 뒤 중단한다.
+12. `refreshingCurrent`를 먼저 기록한 뒤 기본 `~/.codex`의 Helper 소유 App Server에서 `account/read(refreshToken: true)`를 호출한다.
+13. verifier 종료와 현재 이메일 일치를 확인하고 갱신된 active auth를 현재 configured credential-store 항목에 저장한 뒤 `currentSaved`를 기록한다.
+14. `validatingTarget`을 기록한 뒤 대상 저장본을 격리 홈에서 `refreshToken: false`로 신원 확인하고 이어서 `refreshToken: true`로 online refresh한다.
+15. 두 응답이 대상 이메일과 완전 일치하고 verifier 종료와 갱신본의 configured credential-store 저장까지 성공하면 `targetValidated`를 기록한다. 실패하면 active auth를 바꾸지 않는다. 명시적 인증 거부만 `재로그인 필요`, 네트워크·서버 오류는 재시도 가능한 검증 실패, credential-store write 실패는 저장소 오류로 표시한다.
+16. 이전 인증의 복구 가능성을 재확인하고, 같은 디렉터리의 임시 파일을 이용해 `~/.codex/auth.json`을 원자 교체한다.
+17. journal을 `authReplaced`로 갱신한다.
+18. 공식 앱을 bundle identifier로 다시 실행하고 journal을 `targetLaunched`로 갱신한다.
+19. `verifyingTarget`에서 현재 active auth를 격리 verifier로 읽어 대상 이메일을 검증하고 일치하면 `targetVerified`로 갱신한다.
+20. `activeProfileId`를 내구성 있게 대상 프로필로 커밋한 뒤 journal을 unlink하고 parent directory를 `fsync`한다.
 
 ### 3.4 전환 실패와 자동 롤백
 
@@ -194,8 +200,8 @@ stateDiagram-v2
     preparing --> checkingProcesses: 앱 종료 상태
     awaitingQuitConfirmation --> quitting: 사용자 승인
     awaitingQuitConfirmation --> idle: 사용자 취소
-    quitting --> checkingProcesses: 정상 종료 완료
-    quitting --> blocked: 종료 시간 초과
+    quitting --> checkingProcesses: 정상 종료 또는 승인된 SIGTERM 완료
+    quitting --> blocked: SIGTERM 거부 또는 종료 실패
     checkingProcesses --> blocked: 잔존/독립 프로세스 발견
     checkingProcesses --> refreshingCurrent: 차단 프로세스 없음
     refreshingCurrent --> validatingTarget

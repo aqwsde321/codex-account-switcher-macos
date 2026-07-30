@@ -122,6 +122,7 @@ path만 같다고 공식 앱으로 신뢰하지 않는다. bundle id와 서명 �
 - 공식 앱 instance 탐색
 - 사용자 승인 뒤 `NSRunningApplication.terminate()` 호출
 - 종료 전 process tree 스냅샷
+- 1초 유예 뒤 exact 앱 소유 잔존 PID를 별도 확인하고 승인 시에만 `SIGTERM` 1회
 - 종료 제한 시간 동안 root·자식 PID 소멸 확인
 - 독립 CLI/app-server 분류
 - 앱 재실행과 창 활성화
@@ -365,29 +366,30 @@ process argument나 environment는 읽거나 기록하지 않는다.
 6. `independentCodex`: basename `codex`이면서 앱 ancestry/helper-owned가 아님
 7. `unclassifiedRelevant`: Codex bundle path 또는 알려진 관련 이름이지만 안전 분류 불가
 
-blocker 집합은 `approvedNonAuthResident`를 제외한 `appRoot`, `appOwned`, `bundledAppServer`, `independentCodex`, `unclassifiedRelevant`다. Spike의 `approvedNonAuthResident` allow-list는 비어 있으므로 모든 crashpad 잔존도 기본 차단한다.
+blocker 집합은 `approvedNonAuthResident`를 제외한 `appRoot`, `appOwned`, `bundledAppServer`, `independentCodex`, `unclassifiedRelevant`다. 현재 두 허용 build의 exact path·name·signing identifier·Team ID가 일치하는 crashpad만 `approvedNonAuthResident`다.
 
 ### 종료 알고리즘
 
 1. root PID와 descendants를 종료 전에 snapshot한다.
 2. 각 `NSRunningApplication`에 `terminate()`를 보낸다.
-3. root PID 종료를 poll한다.
-4. 이전 descendant PID도 모두 종료됐는지 확인한다.
-5. PID 재사용을 피하려고 executable path/start time identity를 함께 비교한다.
-6. bundle path에 남은 reparent process를 확인한다.
-7. Helper-owned probe가 없는 상태에서 독립 Codex 후보를 검사한다.
+3. 1초 동안 root와 이전 descendant PID 종료를 poll한다.
+4. 남은 blocker가 모두 종료 전 snapshot의 exact 앱 소유 PID·start time·executable path와 같을 때 별도 사용자 확인을 받는다.
+5. 승인 시에만 `SIGTERM`을 한 번 보낸다. 거부·EOF면 auth mutation 없이 차단한다.
+6. 신호 직전 identity와 path를 다시 확인해 PID 재사용을 차단한다.
+7. bundle path에 남은 reparent process까지 종료됐는지 확인한다.
+8. 독립·분류 불명·새 process가 있거나 제한 시간 뒤 앱 소유 process가 남으면 auth mutation 없이 차단한다.
 
 ### crashpad 예외
 
 현재 설치본에서는 `browser_crashpad_handler`가 PPID 1로 재부모화될 수 있다. 이 프로세스가 auth writer라는 근거는 없지만, 이름만으로 무조건 허용하지 않는다.
 
-Spike에서 다음을 확인한 뒤 exact executable allow-list 여부를 결정한다.
+Spike에서 다음을 확인했다.
 
 - 앱 종료 후 지속 여부
 - auth 파일 open/write 여부
 - 앱 재실행과 무관한 crash reporter인지
 
-검증 전에는 경고·차단이 기본이다. 별도 실증을 통과한 뒤에만 exact signed bundle path와 executable name 조합을 `approvedNonAuthResident` allow-list에 추가한다. 이 분류는 blocker 집합 계산 전에 적용하며 다른 crashpad 경로, 서명 불일치, 다른 reparent process에는 적용하지 않는다.
+실증을 통과한 exact signed bundle path·executable name·signing identifier·Team ID 조합만 `approvedNonAuthResident` allow-list에 포함한다. 이 분류는 blocker 집합 계산 전에 적용하며 다른 crashpad 경로, 서명 불일치, 다른 reparent process에는 적용하지 않는다.
 
 ## 8. 전환 transaction
 
@@ -398,7 +400,7 @@ Spike에서 다음을 확인한 뒤 exact executable allow-list 여부를 결정
 | durable phase | 다음 동작 | 완료 조건과 다음 durable phase |
 |---|---|---|
 | `preparing` | lock 획득 상태에서 호환성, registry, 현재/대상 profile 참조 검사 | 정상 종료 요청 직전 `quitRequested` |
-| `quitRequested` | `NSRunningApplication.terminate()`로 정상 종료 요청 | root/descendant/독립 CLI blocker가 모두 없으면 `quiescent` |
+| `quitRequested` | `NSRunningApplication.terminate()` 요청, 1초 뒤 exact 앱 소유 잔존은 별도 승인 후 `SIGTERM` 1회 | root/descendant/독립 CLI blocker가 모두 없으면 `quiescent` |
 | `quiescent` | 현재 active source와 previous profile의 사전 일치 확인 | 기본 홈 helper를 시작하기 직전 `refreshingCurrent` |
 | `refreshingCurrent` | 기본 `~/.codex`에서 Helper-owned App Server `account/read(refreshToken: true)` 실행 | Helper PID 종료, previous 이메일 일치, refreshed source blob의 current credential store durable 저장 후 `currentSaved` |
 | `currentSaved` | source 최신본이 active auth와 secure store 양쪽에 존재함을 확인 | 대상 격리 probe 시작 직전 `validatingTarget` |
@@ -453,7 +455,8 @@ Spike에서 다음을 확인한 뒤 exact executable allow-list 여부를 결정
 - 사용자의 공식 로그인 후 미등록 이메일 감지
 - 자동 overwrite 금지
 - 명시적 등록 동작에서만 두 번째 저장
-- 두 번째를 잠시 active로 기록한 후 정상 switch transaction으로 첫 프로필 복귀
+- 두 번째를 잠시 active로 기록하되 capture의 동일 lock/journal을 유지한 채 `rollbackStarted`로 첫 프로필을 복구·검증
+- 첫 프로필 active registry와 journal 정리까지 끝난 뒤에만 lock 해제·앱 실행
 
 등록 한도 초과는 data model이 아니라 MVP policy layer에서 거부한다.
 
@@ -492,7 +495,7 @@ previous rollback 중 어떤 단계든 실패하면 `rollbackFailed`를 durable�
 
 ## 11. 예정 CLI 인터페이스
 
-아래 명령은 문서상 예정 인터페이스다. 아직 구현돼 있지 않다.
+`inspect`, `profiles list`, 첫·두 번째 `profile capture`, 두 번째 등록 후 첫 프로필 자동 복귀, `profile sync-active`, 일반 `switch`, `recovery status`는 구현됐다. manual recovery 등 나머지는 예정 인터페이스다.
 
 ```text
 codex-account-spike inspect
@@ -613,7 +616,8 @@ Core protocol로 다음 실패를 결정적으로 주입할 수 있어야 한다
 - Electron user-data 직접 수정
 - token 구조에 의존한 사용자 identity 판정
 - 사용량으로 계정 identity 추정
-- force quit
+- exact 앱 소유 잔존 외 force quit
+- `SIGKILL`
 - 독립 CLI 자동 kill
 - repo 내부 실제 auth 저장
 - Keychain 실패 시 plaintext fallback

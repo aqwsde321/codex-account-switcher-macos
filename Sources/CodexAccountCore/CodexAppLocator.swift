@@ -47,19 +47,18 @@ public enum CodexAppLocatorFailure: Error, Equatable, Sendable {
 
 @MainActor
 public struct CodexAppLocator {
-    public static let officialBundleIdentifier = "com.openai.codex"
-    public static let observedOfficialTeamIdentifier = "2DC432GLL2"
+    nonisolated public static let officialBundleIdentifier = "com.openai.codex"
+    nonisolated public static let observedOfficialTeamIdentifier = "2DC432GLL2"
 
     public init() {}
 
     public func locate() throws -> CodexAppDescriptor {
-        var candidates = NSWorkspace.shared.urlsForApplications(
-            withBundleIdentifier: Self.officialBundleIdentifier
+        let candidates = Self.candidateURLs(
+            discovered: NSWorkspace.shared.urlsForApplications(
+                withBundleIdentifier: Self.officialBundleIdentifier
+            ),
+            fileExists: FileManager.default.fileExists(atPath:)
         )
-        let fallback = URL(fileURLWithPath: "/Applications/Codex.app", isDirectory: true)
-        if FileManager.default.fileExists(atPath: fallback.path) {
-            candidates.append(fallback)
-        }
 
         let unique = Dictionary(grouping: candidates.map(canonicalURL), by: \.path)
             .compactMap(\.value.first)
@@ -75,6 +74,15 @@ public struct CodexAppLocator {
             throw CodexAppLocatorFailure.ambiguousInstallations
         }
         return descriptors[0]
+    }
+
+    nonisolated package static func candidateURLs(
+        discovered: [URL],
+        fileExists: (String) -> Bool
+    ) -> [URL] {
+        discovered + ["/Applications/ChatGPT.app", "/Applications/Codex.app"].compactMap { path in
+            fileExists(path) ? URL(fileURLWithPath: path, isDirectory: true) : nil
+        }
     }
 }
 

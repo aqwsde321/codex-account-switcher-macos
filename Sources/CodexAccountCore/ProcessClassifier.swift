@@ -54,6 +54,27 @@ public struct ApprovedResidentRule: Equatable, Sendable {
         self.signingIdentifier = signingIdentifier
         self.teamIdentifier = teamIdentifier
     }
+
+    package static func codexCrashpad(for descriptor: CodexAppDescriptor) -> ApprovedResidentRule? {
+        guard descriptor.bundleIdentifier == CodexAppLocator.officialBundleIdentifier,
+              (descriptor.version == "26.721.41059" && descriptor.build == "5848")
+                || (descriptor.version == "26.721.81911" && descriptor.build == "5973"),
+              descriptor.appSigningIdentifier == CodexAppLocator.officialBundleIdentifier,
+              descriptor.bundledCodexSigningIdentifier == "codex",
+              descriptor.teamIdentifier == CodexAppLocator.observedOfficialTeamIdentifier else {
+            return nil
+        }
+        return ApprovedResidentRule(
+            executablePath: descriptor.bundleURL
+                .appendingPathComponent(
+                    "Contents/Frameworks/Codex Framework.framework/Versions/150.0.7871.128/Helpers/browser_crashpad_handler"
+                )
+                .path,
+            name: "browser_crashpad_handler",
+            signingIdentifier: "browser_crashpad_handler",
+            teamIdentifier: descriptor.teamIdentifier
+        )
+    }
 }
 
 public struct ProcessClassificationContext: Sendable {
@@ -191,7 +212,11 @@ private extension ProcessClassifier {
             return .appOwnedBlocker
         }
 
-        if record.nameHint == "codex" || record.nameHint == "ChatGPT" || record.nameHint?.hasPrefix("ChatGPT Helper") == true {
+        if record.nameHint == "codex"
+            || record.nameHint == "ChatGPT"
+            || record.nameHint == "browser_crashpad_handler"
+            || record.nameHint?.hasPrefix("ChatGPT Helper") == true
+        {
             return .unclassifiedRelevant
         }
         return .irrelevant

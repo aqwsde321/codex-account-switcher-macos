@@ -5,7 +5,7 @@ let tests = credentialBlobTests() + profileRegistryTests() + registryCodecTests(
     + spikeStoreTests() + appServerProtocolTests() + processClassifierTests()
     + targetCredentialValidatorTests() + recoveryPlannerTests()
     + recoveryCoordinatorTests() + switchCoordinatorTests()
-    + cliApplicationTests() + safeRendererTests()
+    + profileCaptureCoordinatorTests() + cliApplicationTests() + safeRendererTests()
 var failureCount = 0
 
 for test in tests {

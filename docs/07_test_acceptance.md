@@ -89,7 +89,8 @@ Unit/Integration test는 실제 `~/.codex/auth.json`을 읽거나 쓰지 않는�
 - 성공 registry가 durable한 뒤 journal unlink→parent fsync
 - auth mutation 전 취소/차단은 journal unlink→parent fsync로 durable cleanup
 - 실패 후 롤백은 source auth 복원→source 이메일 검증→registry previous durable commit→journal durable delete→source 앱 재실행 순서
-- 강제 종료 없음
+- 종료 전 확인한 exact 앱 소유 잔존도 1초 유예와 별도 승인 뒤에만 `SIGTERM` 1회
+- `SIGKILL` 없음
 - 독립 CLI/task 자동 종료 없음
 - 전환된 기본 auth는 이후 새로 시작하는 기본 Codex CLI에도 적용됨
 - CLI Spike 비활성 auth는 repo 밖 `0700` private directory의 `0600` file; 제품 MVP 비활성 auth는 Keychain
@@ -147,7 +148,7 @@ Unit/Integration test는 실제 `~/.codex/auth.json`을 읽거나 쓰지 않는�
 | I-007 | target auth malformed/empty | active auth mutation 전 거부 | 예 |
 | I-008 | active auth가 symlink | STOP, target write 없음 | 예 |
 | I-009 | owner/mode 부적합 | STOP 또는 안전한 명시 복구; 묵시 진행 없음 | 예 |
-| I-010 | 정상 종료 timeout | switch 차단, active auth unchanged | 예 |
+| I-010 | 정상 종료 1초 뒤 exact 앱 소유 잔존 | 별도 확인 후 승인 시 해당 PID만 `SIGTERM` 1회 | 예 |
 | I-011 | 독립 CLI PID 존재 | PID/cwd 안내, 자동 kill 없음, write 없음 | 예 |
 | I-012 | helper 소유 verifier만 존재 | verifier 정상 종료 확인 후 gate 통과 | 예 |
 | I-013 | current refresh 시작 | `refreshingCurrent` durable 후에만 기본 홈 Helper App Server `refreshToken: true` 호출 | 예 |
@@ -180,6 +181,8 @@ Unit/Integration test는 실제 `~/.codex/auth.json`을 읽거나 쓰지 않는�
 | I-040 | credential backend 검사 | Spike는 private `0600` file store, 제품은 Keychain; backend 혼용 없음 | 예 |
 | I-041 | current true refresh 도중 실패 | `rollbackStarted` durable→마지막 검증 source 복원·이메일 확인 | 예 |
 | I-042 | `currentSaved` 뒤 target validation 실패 | active source 유지 확인→registry previous→journal durable cleanup | 예 |
+| I-043 | `SIGTERM` 뒤 앱 소유 process 잔존 또는 identity 변경 | switch 차단, active auth unchanged | 예 |
+| I-044 | 사용자가 잔존 앱 process `SIGTERM` 거부 | signal 0회, auth·registry 불변, journal 내구 삭제 | 예 |
 
 ## 7. 공식 앱 Black-box 매트릭스
 
@@ -191,7 +194,7 @@ Unit/Integration test는 실제 `~/.codex/auth.json`을 읽거나 쓰지 않는�
 | B-002 | A 등록 | A 이메일 확인, profile-a Spike private-store 저장·registry durability 확인 | STOP |
 | B-003 | B 등록 후 A 자동 복귀 | 서로 다른 이메일, profile-b Spike private-store 저장, 최종 A 검증 | 자동 A 롤백 또는 STOP |
 | B-004 | 실행 중 앱에서 switch 취소 | 앱·auth·active 계정 변화 없음, journal durable cleanup | case FAIL |
-| B-005 | 앱 정상 종료 switch | 강제 종료 없이 quiescent, target 설치·검증 | 자동 롤백 |
+| B-005 | 앱 정상 종료 switch | 필요 시 별도 승인 후 exact 앱 소유 잔존만 `SIGTERM`, quiescent 뒤 target 설치·검증 | 자동 롤백 |
 | B-006 | 이미 닫힌 앱에서 switch | 잔존 process 없음, target 실행·검증 | 자동 롤백 |
 | B-007 | 이미 활성인 계정 클릭 | 창 활성화만, restart/write 없음 | case FAIL |
 | B-008 | 외부 `codex login`으로 미등록 계정 감지 | switch 차단, 등록/폐기 결정 요구 | STOP |
@@ -263,9 +266,9 @@ ID를 신뢰성 있게 관측할 수 없으면 실행하지 않고 INCONCLUSIVE/
 | P-005 | helper가 띄운 verifier 종료 중 | 소유 PID만 정상 정리, 다른 process 불변 | 예 |
 | P-006 | 분류 불가능한 `codex` process | 안전 차단 | 예 |
 | P-007 | Codex와 무관한 유사 이름 process | false positive 없이 진행 | 예 |
-| P-008 | PPID 1의 bundle 내부 `browser_crashpad_handler`만 잔존 | 최초에는 STOP; auth 무관성이 별도 입증되고 exact signed-path allow-list가 승인된 경우에만 다른 앱 process 0건 조건으로 진행 | 예 |
+| P-008 | PPID 1의 bundle 내부 `browser_crashpad_handler`만 잔존 | 현재 허용 build의 exact path·name·signing identifier·Team ID가 모두 맞으면 진행, 아니면 STOP | 예 |
 
-어떤 case에서도 `kill -9` 또는 독립 process 자동 종료를 PASS 방법으로 사용하지 않는다.
+어떤 case에서도 `kill -9`, 독립 process, 분류 불명 process 자동 종료를 PASS 방법으로 사용하지 않는다.
 
 ## 10. Crash/reboot 테스트
 

@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import Security
 
 public protocol ProcessSnapshotProviding: Sendable {
     func snapshot() throws -> [ProcessRecord]
@@ -70,6 +71,10 @@ private extension LibprocSnapshotProvider {
             return nil
         }
 
+        let executablePath = processPath(pid: pid)
+        let name = processName(pid: pid)
+        let signature = name == "browser_crashpad_handler" ? processSignature(pid: pid) : nil
+
         return ProcessRecord(
             identity: ProcessIdentity(
                 pid: pid,
@@ -77,9 +82,31 @@ private extension LibprocSnapshotProvider {
                 startMicroseconds: information.pbi_start_tvusec
             ),
             parentPID: pid_t(bitPattern: information.pbi_ppid),
-            executablePath: processPath(pid: pid),
-            nameHint: processName(pid: pid)
+            executablePath: executablePath,
+            nameHint: name,
+            signingIdentifier: signature?.identifier,
+            teamIdentifier: signature?.teamIdentifier
         )
+    }
+
+    func processSignature(pid: pid_t) -> (identifier: String, teamIdentifier: String)? {
+        let attributes = [kSecGuestAttributePid as String: NSNumber(value: pid)] as CFDictionary
+        var code: SecCode?
+        var requirement: SecRequirement?
+        let requirementText = """
+        identifier "browser_crashpad_handler" and anchor apple generic and \
+        certificate 1[field.1.2.840.113635.100.6.2.6] exists and \
+        certificate leaf[field.1.2.840.113635.100.6.1.13] exists and \
+        certificate leaf[subject.OU] = "2DC432GLL2"
+        """
+        guard SecRequirementCreateWithString(requirementText as CFString, [], &requirement) == errSecSuccess,
+              let requirement,
+              SecCodeCopyGuestWithAttributes(nil, attributes, [], &code) == errSecSuccess,
+              let code,
+              SecCodeCheckValidity(code, [], requirement) == errSecSuccess else {
+            return nil
+        }
+        return ("browser_crashpad_handler", "2DC432GLL2")
     }
 
     func processPath(pid: pid_t) -> String? {

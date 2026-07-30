@@ -1,9 +1,9 @@
 # 구현 인수인계
 
-- 상태: read-only CLI와 Core foundation 완료; 실제 전환 backend 구현·실행 대기
-- 기준일: 2026-07-28
+- 상태: A/B capture·A 복귀·일반 switch 구현 완료; 실제 A↔B switch와 manual recovery 대기
+- 기준일: 2026-07-30
 - 코드: 저장소 루트 `.`
-- 중요: 실제 Codex 앱 종료와 `auth.json` 변경은 수행하지 않았다.
+- 중요: 외부 Terminal에서 실제 A/B capture와 A 저장본 동기화는 완료했다. 실제 A↔B switch는 아직 수행하지 않았다.
 
 ## 1. 새 task에서 시작하는 방법
 
@@ -41,19 +41,20 @@
 - App Server protocol/session, app signature gate, libproc process classifier 구현
 - switch/rollback/recovery 상태 머신 구현
 - 읽기 전용 CLI 세 명령 구현
-- fake credential만 사용한 53개 테스트 통과
+- 첫 계정 A capture의 TTY 확인, process gate, refresh 전 backup, isolated identity 검증, rollback 구현
+- 두 번째 계정 B capture, 중복 계정 차단, 동일 capture lock/journal의 실패 rollback·A 자동 복귀 구현
+- 저장 프로필 일반 switch의 정상 종료·격리 검증·원자 교체·재실행·검증·rollback adapter 구현
+- fake credential만 사용하는 77개 테스트 통과
 - 실제 read-only inspect에서 사용자 auth와 helper store 무변경 확인
 
 미완료:
 
-- concrete `SwitchTransactionDriving`, `RecoveryExecuting`, capture adapter
-- auth-changing CLI와 외부 Terminal interactive confirmation gate
-- 실제 계정 A/B 캡처
-- 실제 `auth.json` 교체
+- concrete `RecoveryExecuting`과 manual recovery CLI
+- 실제 A↔B 반복 전환
 - 동일 task 왕복 검증
 - 메뉴바 앱
 
-현재 `/Applications/Codex.app`은 OS signature 검증에서 `invalid signature (code or signature have been modified)`로 실패한다. 이 hard gate를 완화하지 않는다. 공식 앱 재설치 또는 업데이트 후 signature가 유효해지기 전에는 Step 7의 auth-changing adapter를 연결하거나 실행하지 않는다.
+허용 build는 `/Applications/ChatGPT.app` `26.721.41059`/`5848`, `26.721.81911`/`5973`이다. 현재 설치된 `26.721.81911`/`5973`은 OS signature 검증에 실패하므로 auth-changing 명령이 차단된다. 공식 앱 재설치·업데이트 후 `inspect`가 `application=ready`가 되기 전에는 실제 switch를 재시도하지 않는다.
 
 재개 명령과 구현 범위는 루트 `README.md`를 먼저 읽는다.
 
@@ -75,7 +76,7 @@
 - userId/workspaceAccountId 필수 식별
 - 사용량을 전환 성공 판정에 사용
 - custom `CODEX_HOME` MVP 지원
-- force quit 옵션
+- 사용자 선택 force quit/`SIGKILL` 옵션
 - 동일 task 실패 시 복제 우회
 
 ## 4. 고정된 제품 결정
@@ -226,6 +227,7 @@ cd codex-account-switcher-spike
 - bundle id 탐색
 - metadata/signature gate
 - `NSRunningApplication.terminate()`
+- 1초 유예 뒤 exact 앱 소유 잔존은 별도 승인 후에만 `SIGTERM` 1회
 - libproc process snapshot·ancestry·path 분류
 - independent CLI 차단
 - NSWorkspace launch/activate
@@ -234,7 +236,7 @@ cd codex-account-switcher-spike
 
 - process classification pure test
 - 실제 환경에서는 inspect-only 출력
-- force quit/kill 호출이 codebase에 없는지 검색
+- `SIGKILL`·독립 process kill 호출이 codebase에 없는지 검색
 
 ### Step 5. transaction과 recovery
 
@@ -265,7 +267,7 @@ cd codex-account-switcher-spike
 
 ### Step 6. 비파괴 CLI 검증
 
-구현 예정 명령:
+구현 명령:
 
 - `inspect`
 - `profiles list`
@@ -282,10 +284,11 @@ cd codex-account-switcher-spike
 
 이 단계부터 사용자의 명시적 상호작용이 필요하다.
 
-- 계정 A capture
-- 공식 로그인으로 계정 B 전환
-- 계정 B capture
-- 계정 A 자동 복귀
+- 계정 A capture: 외부 Terminal에서 완료
+- 공식 로그인으로 계정 B 전환: 완료
+- 계정 B capture와 계정 A 자동 복귀: 외부 Terminal에서 완료
+
+일반 전환 명령 `switch --target <profile-id-or-label>`도 구현·fake fixture 검증을 마쳤다. 실제 실행은 다음 단계에서 한다.
 
 각 auth-changing 명령 전에 현재 앱 종료와 정확한 영향을 사용자에게 보여준다.
 

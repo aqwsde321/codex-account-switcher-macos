@@ -43,7 +43,7 @@ Spike의 제품 가설은 다음 하나다.
 - App Store 배포
 - 사용량/리셋 시각 UI
 - 3개 이상 계정의 UI 제공
-- 앱 또는 CLI 강제 종료
+- 무차별 앱 종료, CLI 자동 종료, `SIGKILL`
 - 대화 복제/fork를 이용한 우회
 - 커스텀 `CODEX_HOME`
 
@@ -63,7 +63,7 @@ Spike의 제품 가설은 다음 하나다.
 ## 4. 안전 원칙
 
 1. **프로세스가 살아 있는 동안 `auth.json`을 교체하지 않는다.** Codex가 종료 과정에서 갱신 토큰을 다시 기록할 수 있기 때문이다.
-2. 공식 앱에는 정상 종료만 요청한다. `kill -9`, 강제 종료, 독립 CLI 자동 종료를 사용하지 않는다.
+2. 공식 앱에는 먼저 정상 종료를 요청한다. 1초 뒤 exact 앱 소유 잔존이 있으면 별도 승인을 받고 `SIGTERM`을 한 번 허용한다. `kill -9`와 독립 CLI 자동 종료는 사용하지 않는다.
 3. 잔존 Codex 프로세스가 하나라도 분류되지 않으면 교체를 차단한다.
 4. 전환 직전 source 이메일이 등록값과 일치할 때만 최신 active auth를 source 프로필에 다시 저장한다.
 5. target 설치는 같은 파일시스템에서 임시 파일 생성→권한 설정→flush→원자 rename 순으로 한다.
@@ -192,9 +192,11 @@ JWT를 디코딩하거나 token field를 로그에 출력해 신원을 추정하
 
 - 실행 중인 공식 앱에 bundle identifier 기반 정상 종료를 요청한다.
 - 사용자가 전환 확인을 취소하면 auth는 변경하지 않는다. 이미 `preparing` journal을 만들었다면 journal을 unlink하고 parent directory를 fsync해 취소를 durable하게 끝낸다.
-- 설정된 제한 시간까지 앱과 helper process 종료를 기다린다.
-- 제한 시간 초과 시 전환을 차단하고 사용자가 직접 종료하도록 안내한다.
-- 강제 종료 버튼은 MVP에 두지 않는다.
+- 1초 동안 앱과 helper process 종료를 기다린다.
+- 남은 프로세스가 종료 전에 확인한 exact 앱 소유 PID·시작 시각·실행 경로와 모두 같을 때 별도 확인을 표시한다.
+- 사용자가 `TERMINATE`를 입력한 경우에만 `SIGTERM`을 한 번 보낸다. 그 외 입력·EOF면 auth 무변경으로 차단한다.
+- 이후 제한 시간까지 종료되지 않거나 identity가 달라지면 전환을 차단한다.
+- `SIGKILL` 버튼은 MVP에 두지 않는다.
 
 ### 프로세스 분류
 
@@ -207,14 +209,14 @@ JWT를 디코딩하거나 token field를 로그에 출력해 신원을 추정하
 - working directory(사용자에게만 표시; 진단 로그에는 민감 경로를 남기지 않음)
 - helper가 직접 띄운 verifier PID
 
-Spike 기본 allow-list는 비어 있으므로, 최초에는 모든 앱 소유·bundle 내부 resident가 종료된 상태만 허용한다. `browser_crashpad_handler`는 별도 실증으로 auth 비관여가 확인되고 exact signed bundle path와 executable name 조합이 승인된 뒤에만 `approvedNonAuthResident`로 **blocker 집합 계산 전에** 제외할 수 있다. 경로·서명·이름 중 하나라도 다르면 차단한다. helper 소유의 단기 verifier가 있다면 명시적으로 닫고 PID 종료를 확인한다.
+현재 두 허용 build의 exact signed bundle path·executable name·signing identifier·Team ID가 모두 맞는 `browser_crashpad_handler`만 `approvedNonAuthResident`로 **blocker 집합 계산 전에** 제외한다. 하나라도 다르면 차단한다. helper 소유의 단기 verifier가 있다면 명시적으로 닫고 PID 종료를 확인한다.
 
 ### 독립 CLI/task
 
 공식 앱 종료 후에도 Codex CLI, app-server, 실행 중 task가 남아 있으면 다음처럼 처리한다.
 
 - PID와 working directory를 사용자에게 표시한다.
-- 자동 종료하지 않는다.
+- `SIGTERM`을 포함해 자동 종료하지 않는다.
 - auth 교체를 시작하지 않는다.
 - 사용자가 해당 작업을 정상 종료한 후 다시 검사한다.
 

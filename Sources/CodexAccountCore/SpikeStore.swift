@@ -56,6 +56,12 @@ public struct SpikeStore {
         return try CredentialBlob(validating: result.contents.data)
     }
 
+    public func removeCredential(for profileID: ProfileID) throws -> DurableRemoval {
+        let destination = credentialURL(for: profileID)
+        let expected = try files.snapshot(at: destination)
+        return try files.remove(at: destination, expecting: expected)
+    }
+
     public func saveRegistry(_ registry: ProfileRegistry) throws -> FileIdentity {
         let data = try RegistryCodec.encode(registry)
         return try replace(contents: SensitiveBytes(data), at: registryURL)
@@ -71,6 +77,38 @@ public struct SpikeStore {
             return nil
         }
         return try loadRegistry()
+    }
+
+    public func createCaptureProfileID() throws -> ProfileID {
+        let profileID = ProfileID(UUID())
+        _ = try files.replace(
+            contents: SensitiveBytes(Data("\(profileID)\n".utf8)),
+            at: captureProfileIDURL,
+            expecting: .absent
+        )
+        return profileID
+    }
+
+    public func loadCaptureProfileIDIfPresent() throws -> ProfileID? {
+        switch try files.snapshot(at: captureProfileIDURL) {
+        case .absent:
+            return nil
+        case .exact:
+            let result = try files.read(at: captureProfileIDURL, maximumBytes: 37)
+            guard let text = String(data: result.contents.data, encoding: .utf8),
+                  text.count == 37,
+                  text.last == "\n",
+                  let uuid = UUID(uuidString: String(text.dropLast())),
+                  text == "\(uuid.uuidString)\n" else {
+                throw SpikeStoreError.invalidCaptureProfileID
+            }
+            return ProfileID(uuid)
+        }
+    }
+
+    public func removeCaptureProfileID() throws -> DurableRemoval {
+        let expected = try files.snapshot(at: captureProfileIDURL)
+        return try files.remove(at: captureProfileIDURL, expecting: expected)
     }
 
     public func createJournalIfAbsent(_ journal: SwitchJournalRecord) throws -> FileIdentity? {
@@ -158,6 +196,10 @@ public struct SpikeStore {
         rootURL.appendingPathComponent("switch-journal.json", isDirectory: false)
     }
 
+    private var captureProfileIDURL: URL {
+        rootURL.appendingPathComponent("capture-profile-id", isDirectory: false)
+    }
+
     private func replace(contents: SensitiveBytes, at url: URL) throws -> FileIdentity {
         let expected = try files.snapshot(at: url)
         return try files.replace(contents: contents, at: url, expecting: expected)
@@ -168,9 +210,10 @@ public enum SpikeStoreError: Error, Equatable, Sendable {
     case concurrentMutation
     case missingJournal
     case invalidJournalUpdate
+    case invalidCaptureProfileID
 }
 
-private enum PrivateDirectory {
+enum PrivateDirectory {
     static func validate(at url: URL) throws {
         guard url.isFileURL, url.path.hasPrefix("/") else {
             throw PrivateDirectoryFailure(code: .invalidPath, errno: EINVAL)
@@ -191,7 +234,8 @@ private enum PrivateDirectory {
         }
     }
 
-    static func ensure(at url: URL) throws {
+    @discardableResult
+    static func ensure(at url: URL) throws -> Bool {
         guard url.isFileURL,
               url.path.hasPrefix("/"),
               !url.lastPathComponent.isEmpty,
@@ -254,6 +298,7 @@ private enum PrivateDirectory {
             try sync(directoryFD)
             try sync(parentFD)
         }
+        return created
     }
 
     private static func openDirectory(path: String, code: PrivateDirectoryFailureCode) throws -> Int32 {

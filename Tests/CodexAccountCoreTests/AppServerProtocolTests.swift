@@ -158,6 +158,39 @@ func appServerProtocolTests() -> [TestCase] {
                 }
             }
         },
+        TestCase("AppServerProbeSession permits an owner-controlled default Codex home") {
+            try await withProbeTemporaryDirectory { directory in
+                let executable = try makeFakeAppServer(in: directory)
+                let home = directory.appendingPathComponent("default-codex-home", isDirectory: true)
+                try FileManager.default.createDirectory(at: home, withIntermediateDirectories: false)
+                try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: home.path)
+                let session = AppServerProbeSession(
+                    configuration: AppServerProbeConfiguration(
+                        executableURL: executable,
+                        codexHomeURL: home,
+                        homePolicy: .ownerControlled,
+                        refreshToken: true,
+                        timeouts: AppServerProbeTimeouts(
+                            initializeResponse: .seconds(2),
+                            accountResponse: .seconds(2),
+                            normalExit: .seconds(2),
+                            terminateExit: .seconds(1)
+                        )
+                    )
+                )
+
+                let account = try await session.run()
+
+                try expect(
+                    account == .chatGPT(
+                        email: "probe@example.invalid",
+                        planType: "test",
+                        requiresOpenAIAuth: true
+                    ),
+                    "owner-controlled default home was rejected"
+                )
+            }
+        },
     ]
 }
 
