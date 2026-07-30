@@ -36,6 +36,7 @@ private enum InjectedSwitchFailure: Error {
 
 public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
     private let storeURL: URL
+    private let credentialStore: any CredentialStoring
     private let activeAuthURL: URL
     private let processProvider: any ProcessSnapshotProviding
     private let locateApp: @MainActor @Sendable () throws -> CodexAppDescriptor
@@ -76,10 +77,12 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
     public init(
         storeURL: URL,
         activeAuthURL: URL,
+        credentialStore: any CredentialStoring,
         processProvider: any ProcessSnapshotProviding = LibprocSnapshotProvider(),
         confirmAppOwnedTermination: @escaping @Sendable (Int) -> Bool = { _ in false }
     ) {
         self.storeURL = storeURL
+        self.credentialStore = credentialStore
         self.activeAuthURL = activeAuthURL
         self.processProvider = processProvider
         locateApp = { try CodexAppLocator().locate() }
@@ -104,6 +107,7 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
     package init(
         storeURL: URL,
         activeAuthURL: URL,
+        credentialStore: (any CredentialStoring)? = nil,
         processProvider: any ProcessSnapshotProviding,
         locateApp: @escaping @MainActor @Sendable () throws -> CodexAppDescriptor,
         runningApplicationPIDs: @escaping @MainActor @Sendable (CodexAppDescriptor) throws -> [Int32],
@@ -127,6 +131,7 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
         }
     ) {
         self.storeURL = storeURL
+        self.credentialStore = credentialStore ?? FileCredentialStore(rootURL: storeURL)
         self.activeAuthURL = activeAuthURL
         self.processProvider = processProvider
         self.locateApp = locateApp
@@ -291,7 +296,7 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
                 let restoredRegistry = try store.loadRegistry()
                 guard restoredRegistry == originalRegistry,
                       try store.loadJournalIfPresent() == nil,
-                      try readCurrentCredential().credential == store.loadCredential(for: source.id),
+                      try readCurrentCredential().credential == credentialStore.loadCredential(for: source.id),
                       !(try await runningApplicationPIDs(locateApp())).isEmpty else {
                     throw PostLaunchRollbackTestFailure.finalStateMismatch
                 }
@@ -374,7 +379,7 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
             throw LocalCLIDataProviderFailure.manualRecoveryUnavailable
         }
         if registry.profiles.contains(where: { $0.id == journal.targetProfileID }) {
-            _ = try store.loadCredential(for: journal.targetProfileID)
+            _ = try credentialStore.loadCredential(for: journal.targetProfileID)
         }
 
         try await requestNormalQuit()
@@ -391,7 +396,7 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
         try await revalidateCredentialMutationGate()
         try await commitActiveProfile(profile.id)
         if !registry.profiles.contains(where: { $0.id == journal.targetProfileID }) {
-            _ = try store.removeCredential(for: journal.targetProfileID)
+            try credentialStore.removeCredential(for: journal.targetProfileID)
         }
         if captureProfileID != nil {
             _ = try store.removeCaptureProfileID()
@@ -433,7 +438,7 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
               let profile = registry.profiles.first(where: { $0.id == activeProfileID }) else {
             throw LocalCLIDataProviderFailure.activeProfileUnavailable
         }
-        let previousCredential = try store.loadCredential(for: profile.id)
+        let previousCredential = try credentialStore.loadCredential(for: profile.id)
 
         let descriptor = try await locateApp()
         guard ApprovedResidentRule.codexCrashpad(for: descriptor) != nil else {
@@ -460,8 +465,8 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
         let backupProfileID = try store.createCaptureProfileID()
         var storedCredentialMayHaveChanged = false
         do {
-            _ = try store.saveCredential(previousCredential, for: backupProfileID)
-            guard try store.loadCredential(for: backupProfileID) == previousCredential else {
+            try credentialStore.saveCredential(previousCredential, for: backupProfileID)
+            guard try credentialStore.loadCredential(for: backupProfileID) == previousCredential else {
                 throw LocalCLIDataProviderFailure.credentialRoundTripFailed
             }
             guard try store.loadCaptureProfileIDIfPresent() == backupProfileID,
@@ -474,8 +479,8 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
             }
 
             storedCredentialMayHaveChanged = true
-            _ = try store.saveCredential(current.credential, for: profile.id)
-            guard try store.loadCredential(for: profile.id) == current.credential else {
+            try credentialStore.saveCredential(current.credential, for: profile.id)
+            guard try credentialStore.loadCredential(for: profile.id) == current.credential else {
                 throw LocalCLIDataProviderFailure.credentialRoundTripFailed
             }
             try await requireMutationGate(for: descriptor)
@@ -491,8 +496,8 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
         } catch {
             do {
                 if storedCredentialMayHaveChanged {
-                    _ = try store.saveCredential(previousCredential, for: profile.id)
-                    guard try store.loadCredential(for: profile.id) == previousCredential else {
+                    try credentialStore.saveCredential(previousCredential, for: profile.id)
+                    guard try credentialStore.loadCredential(for: profile.id) == previousCredential else {
                         throw LocalCLIDataProviderFailure.rollbackFailed
                     }
                 }
@@ -573,7 +578,7 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
                 }
                 previous = activeProfile
                 _ = try await validatedCredential(
-                    store.loadCredential(for: activeProfile.id),
+                    credentialStore.loadCredential(for: activeProfile.id),
                     expectedEmail: activeProfile.email,
                     descriptor: descriptor
                 )
@@ -587,8 +592,8 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
             captureOriginalRegistry = registry
             let profileID = try store.createCaptureProfileID()
             captureProfileID = profileID
-            _ = try store.saveCredential(original.credential, for: profileID)
-            guard try store.loadCredential(for: profileID) == original.credential else {
+            try credentialStore.saveCredential(original.credential, for: profileID)
+            guard try credentialStore.loadCredential(for: profileID) == original.credential else {
                 throw LocalCLIDataProviderFailure.credentialRoundTripFailed
             }
             if let previous {
@@ -725,8 +730,8 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
             throw LocalCLIDataProviderFailure.invalidCaptureState
         }
         try requireCapturedAuthUnchanged()
-        _ = try store.saveCredential(credential, for: profile.id)
-        guard try store.loadCredential(for: profile.id) == credential else {
+        try credentialStore.saveCredential(credential, for: profile.id)
+        guard try credentialStore.loadCredential(for: profile.id) == credential else {
             throw LocalCLIDataProviderFailure.credentialRoundTripFailed
         }
         try requireCapturedAuthUnchanged()
@@ -900,8 +905,8 @@ extension LocalCLIDataProvider: SwitchTransactionDriving {
               !target.needsRelogin else {
             throw LocalCLIDataProviderFailure.invalidSwitchState
         }
-        _ = try context.store.loadCredential(for: source.id)
-        _ = try context.store.loadCredential(for: target.id)
+        _ = try credentialStore.loadCredential(for: source.id)
+        _ = try credentialStore.loadCredential(for: target.id)
     }
 
     public func requestNormalQuit() async throws {
@@ -1003,8 +1008,8 @@ extension LocalCLIDataProvider: SwitchTransactionDriving {
                 throw ProfileCaptureFailure.identityMismatch
             }
             try await revalidateCredentialMutationGate()
-            _ = try context.store.saveCredential(refreshed.credential, for: profile.id)
-            guard try context.store.loadCredential(for: profile.id) == refreshed.credential,
+            try credentialStore.saveCredential(refreshed.credential, for: profile.id)
+            guard try credentialStore.loadCredential(for: profile.id) == refreshed.credential,
                   try files.snapshot(at: activeAuthURL) == .exact(refreshed.identity) else {
                 throw LocalCLIDataProviderFailure.credentialRoundTripFailed
             }
@@ -1029,7 +1034,7 @@ extension LocalCLIDataProvider: SwitchTransactionDriving {
               try files.snapshot(at: activeAuthURL) == expectedDestination else {
             throw LocalCLIDataProviderFailure.activeAuthChanged
         }
-        let credential = try context.store.loadCredential(for: profileID)
+        let credential = try credentialStore.loadCredential(for: profileID)
         let identity = try files.replace(
             contents: SensitiveBytes(CredentialBlob.persistenceData(for: credential)),
             at: activeAuthURL,
@@ -1135,7 +1140,7 @@ extension LocalCLIDataProvider: SwitchTransactionDriving {
             )
         }
         try await TargetCredentialValidator(driver: self).validate(profile: profile)
-        let credential = try context.store.loadCredential(for: profileID)
+        let credential = try credentialStore.loadCredential(for: profileID)
         try await revalidateCredentialMutationGate()
         guard let expectedDestination = switchActiveAuthDestination,
               try files.snapshot(at: activeAuthURL) == expectedDestination else {
@@ -1178,7 +1183,7 @@ extension LocalCLIDataProvider: TargetCredentialValidationDriving {
               context.registry.profiles.contains(where: { $0.id == profileID }) else {
             throw LocalCLIDataProviderFailure.invalidSwitchState
         }
-        let credential = try context.store.loadCredential(for: profileID)
+        let credential = try credentialStore.loadCredential(for: profileID)
         let homeURL = credentialVerificationHomeURL
         try createVerificationHome(homeURL)
         targetValidationProfileID = profileID
@@ -1221,12 +1226,12 @@ extension LocalCLIDataProvider: TargetCredentialValidationDriving {
         _ credential: CredentialBlob,
         for profileID: ProfileID
     ) async throws {
-        let context = try requireSwitchContext()
+        _ = try requireSwitchContext()
         guard targetValidationProfileID == profileID else {
             throw LocalCLIDataProviderFailure.invalidSwitchState
         }
-        _ = try context.store.saveCredential(credential, for: profileID)
-        guard try context.store.loadCredential(for: profileID) == credential else {
+        try credentialStore.saveCredential(credential, for: profileID)
+        guard try credentialStore.loadCredential(for: profileID) == credential else {
             throw LocalCLIDataProviderFailure.credentialRoundTripFailed
         }
     }
@@ -1495,7 +1500,7 @@ private extension LocalCLIDataProvider {
     }
 
     func removeCaptureArtifacts(store: SpikeStore, profileID: ProfileID) throws {
-        _ = try store.removeCredential(for: profileID)
+        try credentialStore.removeCredential(for: profileID)
         _ = try store.removeCaptureProfileID()
     }
 
@@ -1605,7 +1610,7 @@ private extension LocalCLIDataProvider {
                   let previous = originalRegistry.profiles.first(where: { $0.id == previousProfileID }) else {
                 throw LocalCLIDataProviderFailure.rollbackUnavailable
             }
-            let previousCredential = try store.loadCredential(for: previous.id)
+            let previousCredential = try credentialStore.loadCredential(for: previous.id)
             _ = try await validatedCredential(
                 previousCredential,
                 expectedEmail: previous.email,
@@ -1649,7 +1654,7 @@ private extension LocalCLIDataProvider {
                     throw LocalCLIDataProviderFailure.registryRoundTripFailed
                 }
             } else {
-                _ = try store.removeCredential(for: captureProfileID)
+                try credentialStore.removeCredential(for: captureProfileID)
             }
             _ = try store.removeCaptureProfileID()
             _ = try store.removeJournal()

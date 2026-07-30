@@ -45,14 +45,15 @@ ADR-027과 기존 안전 결정을 유지한 채 Step 9 메뉴바 MVP를 구현�
 - 추가 계정 capture, 중복 계정 차단, 동일 capture lock/journal의 실패 rollback·등록 전 active 복귀, 최대 3개 허용·네 번째 무변경 거부 구현
 - 저장 프로필 일반 switch의 정상 종료·격리 검증·원자 교체·재실행·검증·rollback adapter 구현
 - `CodexAccountMenuBar` target, fake 3계정 카드와 active/inactive 선택 모델 구현
-- fake credential만 사용하는 81개 debug 테스트 통과
+- credential backend 경계, CLI private file store 명시 연결, Keychain generic-password CRUD와 plaintext fallback 금지 구현
+- fake credential만 사용하는 88개 debug 테스트 통과
 - 실제 read-only inspect에서 사용자 auth와 helper store 무변경 확인
 - `rollbackFailed` 수동 복구 CLI와 실환경 A 복구 2회 완료
 - debug 전용 B-011 실패 주입에서 source 자동 롤백과 최종 A 복귀 확인
 
 미완료:
 
-- 메뉴바 앱의 Keychain credential backend와 실제 Core provider 연결
+- 메뉴바 앱의 실제 Core provider 연결
 - 진행·복구·재로그인 상태 UI
 - MVP 완료·배포 전 `07_test_acceptance.md` §16 형식의 동일 task 왕복 증거 보존
 
@@ -315,7 +316,7 @@ cd codex-account-switcher-spike
 
 ADR-027의 개발 승인에 따라 시작한다. B-010 정식 증거 공백은 릴리스 게이트로 남긴다.
 
-현재 1~2와 첫 구현 slice는 완료됐다. 3의 Keychain credential backend 연결이 다음 작업이다.
+현재 1~3은 완료됐다. 4의 실제 Core provider·상태 연결이 다음 작업이다.
 
 구현 순서:
 
@@ -333,6 +334,15 @@ ADR-027의 개발 승인에 따라 시작한다. B-010 정식 증거 공백은 �
 - 닫힌 상태의 활성 카드 선택은 auth write 0회, verify 후 launch 1회다.
 - 비활성 카드 선택은 확인 전 mutation 0회다.
 - 테스트에서 실제 `~/.codex/auth.json`, Keychain, 공식 앱을 건드리지 않는다.
+
+credential backend slice의 완료 기준:
+
+- CLI는 `FileCredentialStore`를 명시적으로 사용하고 기존 `0700`/`0600` 저장 계약을 유지한다.
+- 제품 backend는 profile UUID를 account key로 쓰는 Keychain generic-password item만 사용한다.
+- Keychain item은 동기화하지 않고 `WhenUnlockedThisDeviceOnly` 접근성을 사용한다.
+- Keychain 접근 실패는 안전한 typed error로 중단되며 plaintext fallback이 없다.
+- credential load 실패 시 active auth, registry, capture marker가 바뀌지 않는다.
+- 실제 Keychain item과 서명 identity 검증은 메뉴바 provider 연결·배포 검증에서 수행한다.
 
 ## 8. 실제 switch를 이 task 안에서 실행하면 안 되는 이유
 

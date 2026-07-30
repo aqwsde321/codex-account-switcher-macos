@@ -15,6 +15,7 @@ struct CodexAccountSpikeCLI {
         let provider = LocalCLIDataProvider(
             storeURL: storeURL,
             activeAuthURL: authURL,
+            credentialStore: FileCredentialStore(rootURL: storeURL),
             confirmAppOwnedTermination: { count in
                 guard isatty(STDIN_FILENO) == 1 else { return false }
                 let prompt = "정상 종료 후 ChatGPT 앱 소유 프로세스 \(count)개가 남았습니다. SIGTERM으로 종료하고 전환을 계속하려면 TERMINATE 입력: "

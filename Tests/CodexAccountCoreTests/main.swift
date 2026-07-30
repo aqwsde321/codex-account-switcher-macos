@@ -1,6 +1,7 @@
 import Darwin
 
 let tests = credentialBlobTests() + profileRegistryTests() + registryCodecTests()
+    + credentialStoreTests()
     + journalCodecTests() + switchStateMachineTests() + durableFileTests()
     + spikeStoreTests() + appServerProtocolTests() + processClassifierTests()
     + targetCredentialValidatorTests() + recoveryPlannerTests()

@@ -25,10 +25,11 @@
 - debug build의 post-launch 검증 실패 주입과 source 자동 롤백 실검증
 - `rollbackFailed` journal의 이전 프로필을 명시적으로 복구하는 `recovery restore`
 - fake 3계정 카드와 확인 흐름을 가진 `MenuBarExtra` UI 프로토타입
+- CLI private file store와 제품 Keychain을 분리한 credential backend 경계, generic-password CRUD와 plaintext fallback 금지
 
 아직 구현·노출하지 않음:
 
-- 메뉴바 UI의 실제 Core·Keychain 연결
+- 메뉴바 UI의 실제 Core provider 연결과 진행·복구·재로그인 상태
 - 5시간·주간 사용량 표시
 
 capture 명령은 앱을 자동 종료하지 않는다. 첫 capture는 현재 인증을 갱신·저장한다. 추가 capture는 새 계정을 저장한 뒤 `~/.codex/auth.json`을 등록 전 활성 프로필로 원자 복구하고 ChatGPT 앱을 해당 계정으로 다시 실행한다. 모든 auth 변경은 외부 Terminal의 대화형 확인과 process gate 뒤에만 수행한다.
