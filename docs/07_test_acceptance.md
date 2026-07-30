@@ -2,7 +2,7 @@
 
 ## 0. 문서 상태
 
-- 상태: Swift CLI Spike 구현 완료, 엄격한 Spike GO 판정 전
+- 상태: 메뉴바 MVP 개발 GO, 엄격한 MVP 완료·배포 GO 판정 전
 - 대상: Swift CLI core Spike와 후속 Swift 메뉴바 앱
 - 실제 계정, 실제 이메일, 인증값 포함 금지
 - 이 문서의 helper 명령 표기는 설계 당시 **예정 인터페이스**다. 실제 CLI 명령은 `README.md`, 현재 실행 결과는 `04_spike_runbook.md` §18을 따른다.
@@ -414,7 +414,11 @@ MVP는 정확히 2개 계정만 노출하지만 `personalAuth`, `workAuth` 같�
 
 ## 17. Spike Go/No-Go
 
-### GO — 메뉴바 앱 구현 진행
+### 개발 GO — 메뉴바 앱 구현 진행
+
+2026-07-30 사용자 확인상 동일 task의 A↔B 기능 왕복 3회와 메시지 응답이 완료됐고 B-011 자동 롤백을 확인했다. B-010의 cycle nonce와 단계별 task ID 증거는 보존하지 않아 정식 PASS로 기록하지 않는다. ADR-027에 따라 사용자가 증거 형식 공백을 수용하고 메뉴바 MVP 구현을 승인했다.
+
+### 엄격한 GO — MVP 완료·배포
 
 아래가 모두 충족되어야 한다.
 
@@ -428,7 +432,7 @@ MVP는 정확히 2개 계정만 노출하지만 `personalAuth`, `workAuth` 같�
 - 최종 A 복구와 재실행 유지 B-012 PASS
 - secret exposure 0건
 
-2026-07-30 B-011 black-box 자동 롤백은 PASS했다. B-010의 §16 형식 증거를 보존하지 않아 엄격한 GO는 보류한다. 현재 결과는 `04_spike_runbook.md` §18에 기록한다.
+현재 엄격한 GO에서 남은 항목은 B-010의 §16 형식 증거다. 개발 중 구조적 same-task 실패가 확인되면 아래 NO-GO를 즉시 적용한다. 현재 결과는 `04_spike_runbook.md` §18에 기록한다.
 
 ### NO-GO — 제품 구현 중단
 
@@ -468,7 +472,7 @@ MVP는 정확히 2개 계정만 노출하지만 `personalAuth`, `workAuth` 같�
 
 ## 18. MVP 릴리스 인수 기준
 
-Spike GO 후 메뉴바 앱은 다음까지 충족해야 릴리스 후보가 된다.
+메뉴바 앱이 릴리스 후보가 되려면 다음까지 충족해야 한다.
 
 - 전체 Unit 필수 case PASS
 - 전체 Integration 필수 case PASS

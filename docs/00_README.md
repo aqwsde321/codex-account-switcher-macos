@@ -3,6 +3,7 @@
 - 문서 상태: 기준안 완료
 - 구현 상태: A/B capture·동기화·일반 switch·rollbackFailed 수동 복구 CLI 완료
 - 실제 검증: A↔B 기능 왕복 3회, 수동 A 복구 2회, B-011 자동 롤백 PASS
+- 제품 단계: ADR-027에 따라 `MenuBarExtra` MVP 개발 승인
 - 마지막 조사일: 2026-07-30
 
 ## 1. 결론
@@ -11,7 +12,7 @@
 
 > 개인·회사 ChatGPT 로그인의 Codex 인증을 전환하는 별도 macOS 메뉴바 helper. 하나의 기본 `~/.codex`를 공유하고 계정별 인증 blob만 보관한다. 계정 선택 시 공식 Codex 앱 정상 종료 → 프로세스 안전 게이트 → `auth.json` 원자 교체 → 앱 재실행 → 이메일 검증을 수행한다.
 
-바로 메뉴바 UI를 만들지 않는다. 먼저 재사용 가능한 Swift CLI Core로 실제 전환 Spike를 수행한다.
+재사용 가능한 Swift CLI Core와 실제 전환·롤백 검증은 완료됐다. cycle nonce와 단계별 task ID 기록이 없어 B-010 정식 PASS는 보류하지만, ADR-027에 따라 이 증거 형식 공백을 수용하고 메뉴바 MVP 개발을 시작한다. B-010 정식 증거는 MVP 완료·배포 전 확보한다.
 
 공식 문서상 file 기반 `CODEX_HOME/auth.json` 복사·재사용과 자동 token refresh는 지원되는 패턴이다. 그러나 다음 제품 핵심은 문서만으로 보장되지 않는다.
 
@@ -169,19 +170,19 @@ Swift CLI Core의 비파괴 기반 구현은 저장소 루트에 있다. 빌드�
 3. 완료: custom async harness의 fake fixture 78개 테스트와 `inspect`/`profiles list`/`profile capture`/`profile sync-active`/`switch`/`recovery status`/`recovery restore`
 4. 완료: 공식 ChatGPT 앱의 OS signature와 고정 build 검증
 5. 완료: A/B registration coordinator, B 등록 후 A 자동 복귀, 외부 Terminal confirmation gate
-6. 대기: §8 형식의 동일 task 왕복 증거 보존
-7. Spike PASS인 경우에만 `MenuBarExtra` MVP
+6. 개발 승인: 사용자 확인상 동일 task 기능 왕복 완료, `07_test_acceptance.md` §16 형식 증거는 릴리스 게이트로 유지
+7. 다음: 기존 Core를 재사용하는 `MenuBarExtra` MVP
 
 구현 상세와 각 단계 검증은 `08_implementation_handoff.md`에 있다.
 
 ## 9. 새 task 시작 prompt
 
 ```text
-`docs/00_README.md`
-부터 연결된 문서를 읽어. `02_decision_record.md`의 결정을 변경하지 말고,
-`08_implementation_handoff.md` 순서대로 Swift CLI Spike만 구현해.
-실제 Codex 앱 종료와 auth.json 교체는 구현·비파괴 테스트가 끝난 뒤
-외부 Terminal 실행 게이트로 남겨둬. 메뉴바 UI는 Spike PASS 전 만들지 마.
+`docs/00_README.md`부터 연결된 문서를 읽어.
+`02_decision_record.md`의 ADR-027과 기존 안전 결정을 유지하고,
+`08_implementation_handoff.md` Step 9의 `CodexAccountMenuBar` MVP를 구현해.
+검증된 Core를 재사용하고 실제 Codex 앱 종료와 auth.json 교체는
+외부 Terminal 실행 게이트로 남겨둬. B-010 정식 증거는 릴리스 전 확보해.
 ```
 
 ## 10. 공식 근거

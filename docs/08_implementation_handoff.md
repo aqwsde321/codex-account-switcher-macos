@@ -1,9 +1,9 @@
 # 구현 인수인계
 
-- 상태: A/B capture·일반 switch·manual recovery·B-011 자동 롤백 실검증 완료
+- 상태: CLI Spike 검증 완료, ADR-027에 따라 메뉴바 MVP 개발 승인
 - 기준일: 2026-07-30
 - 코드: 저장소 루트 `.`
-- 중요: 외부 Terminal에서 A↔B 기능 왕복 3회, 수동 A 복구 2회, B-011 자동 롤백을 완료했다. B-010 형식 증거는 보존하지 않았다.
+- 중요: 외부 Terminal에서 A↔B 기능 왕복 3회, 수동 A 복구 2회, B-011 자동 롤백을 완료했다. B-010 형식 증거는 보존하지 않았으며 ADR-027에 따라 개발에는 수용하고 MVP 완료·배포 전 게이트로 유지한다.
 
 ## 1. 새 task에서 시작하는 방법
 
@@ -21,8 +21,8 @@
 
 ```text
 `docs/00_README.md`부터 문서 세트를 읽고,
-확정 결정을 변경하지 말고 Swift CLI Spike만 구현해줘.
-먼저 구현 계획과 테스트 성공 기준을 문서에 맞춰 대조한 뒤 시작해.
+ADR-027과 기존 안전 결정을 유지한 채 Step 9 메뉴바 MVP를 구현해줘.
+검증된 CodexAccountCore를 재사용하고 먼저 UI adapter 성공 기준을 대조해.
 실제 auth.json 교체와 Codex 앱 종료는 외부 Terminal 실행 게이트 전까지 하지 마.
 ```
 
@@ -51,8 +51,8 @@
 
 미완료:
 
-- §8 형식의 동일 task 왕복 증거 보존
 - 메뉴바 앱
+- MVP 완료·배포 전 `07_test_acceptance.md` §16 형식의 동일 task 왕복 증거 보존
 
 허용 build는 `/Applications/ChatGPT.app` `26.721.41059`/`5848`, `26.721.81911`/`5973`이다. 현재 설치된 `26.721.81911`/`5973`은 signature/build gate를 통과해 `application=ready`이며 auth-changing 명령 실검증을 완료했다.
 
@@ -294,7 +294,7 @@ cd codex-account-switcher-spike
 
 ### Step 8. black-box Spike
 
-외부 Terminal에서 수행한다. Codex 앱 내부에서 자기 자신을 종료하는 tool call로 실행하지 않는다.
+개발 전 CLI 재실행은 ADR-027에 따라 생략한다. 아래 절차는 MVP 완료·배포 전 B-010 정식 증거를 확보할 때 외부 Terminal에서 수행한다. Codex 앱 내부에서 자기 자신을 종료하는 tool call로 실행하지 않는다.
 
 1. 비민감 기준 task를 계정 A에서 정확히 한 번 만든다.
 2. 기준 task ID를 기록하고 A의 `cycle-0-a` 메시지와 응답을 완료한다.
@@ -311,15 +311,24 @@ cd codex-account-switcher-spike
 
 ### Step 9. 메뉴바 앱
 
-Step 8이 PASS일 때만 시작한다.
+ADR-027의 개발 승인에 따라 시작한다. B-010 정식 증거 공백은 릴리스 게이트로 남긴다.
 
-- Core 재사용
-- `MenuBarExtra`
-- 두 프로필 카드
-- 활성 이메일
-- 수동 전환
-- quit 확인과 단계 표시
-- rollback/relogin 오류 UX
+구현 순서:
+
+1. `CodexAccountMenuBar` executable target과 `MenuBarExtra` shell을 추가한다.
+2. fake provider로 두 프로필 카드와 활성 표시를 검증한다. 이미 활성인 카드는 auth write/restart 없이, 앱 실행 중이면 activate 1회, 닫혀 있으면 verify 후 launch한다.
+3. Core의 credential backend 경계를 연결해 CLI는 기존 private file store, 제품은 Keychain을 사용하게 한다. plaintext fallback은 금지한다.
+4. view model은 문자열 CLI 출력이 아닌 typed Core API를 호출하고 quit 확인·단계·안전한 오류를 연결한다. UI에 전환 로직을 복제하지 않는다.
+5. 시작 시 journal recovery와 `needsRelogin` 표시를 연결한다.
+
+첫 구현 slice의 성공 기준:
+
+- `MenuBarExtra` target이 build된다.
+- fake 두 프로필에서 활성 카드와 비활성 카드가 구분된다.
+- 실행 중인 활성 카드 선택은 auth write/restart 0회, activate 1회다.
+- 닫힌 상태의 활성 카드 선택은 auth write 0회, verify 후 launch 1회다.
+- 비활성 카드 선택은 확인 전 mutation 0회다.
+- 테스트에서 실제 `~/.codex/auth.json`, Keychain, 공식 앱을 건드리지 않는다.
 
 ## 8. 실제 switch를 이 task 안에서 실행하면 안 되는 이유
 
@@ -370,7 +379,7 @@ artifacts/
 - 보안 체크리스트 통과
 - recovery failure injection 통과
 
-### 실증 Spike PASS
+### 실증 Spike 엄격 PASS 기준
 
 - A/B 이메일 전환 검증
 - 앱 재실행 후 auth 지속
@@ -381,7 +390,7 @@ artifacts/
 
 ### 제품 진행 가능
 
-실증 Spike PASS일 때만 메뉴바 앱 구현 승인 상태가 된다. 같은 task ID 접근·실제 요청·단일 history가 구조적으로 FAIL이면 공용 `CODEX_HOME + auth.json 교체` 제품은 중단한다. Helper 결함은 수정 후 전체 Spike를 처음부터 재실행한다. 계정별 전체 환경 분리는 자동 대안으로 구현하지 않고 별도 제품 결정으로 돌린다.
+ADR-027에 따라 메뉴바 앱 구현은 승인됐다. B-010 정식 증거는 MVP 완료·배포 전에 필요하다. 개발 중 같은 task ID 접근·실제 요청·단일 history가 구조적으로 FAIL하면 공용 `CODEX_HOME + auth.json 교체` 제품은 중단한다. Helper 결함은 수정 후 검증한다. 계정별 전체 환경 분리는 자동 대안으로 구현하지 않고 별도 제품 결정으로 돌린다.
 
 ## 11. 구현 중 멈춰야 하는 조건
 

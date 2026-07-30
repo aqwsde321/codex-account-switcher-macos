@@ -1,8 +1,8 @@
 # 기술 설계
 
-- 상태: Swift CLI Spike 구현·실계정 기능 검증 완료, 메뉴바 앱 구현 전
-- 기준일: 2026-07-28
-- 구현 순서: Swift CLI Spike 통과 후 SwiftUI 메뉴바 앱
+- 상태: Swift CLI Spike 구현·실계정 기능 검증 완료, 메뉴바 MVP 개발 승인
+- 기준일: 2026-07-30
+- 구현 순서: 검증된 Core 재사용 → SwiftUI 메뉴바 앱 → 엄격한 릴리스 인수
 
 ## 1. 설계 목표
 
@@ -70,7 +70,7 @@ codex-account-switcher/
 │   │   ├── Transactions/
 │   │   └── Diagnostics/
 │   ├── CodexAccountSpike/
-│   └── CodexAccountMenuBar/       # Spike 통과 뒤 추가
+│   └── CodexAccountMenuBar/       # ADR-027 개발 승인 뒤 추가
 ├── Tests/
 │   ├── CodexAccountCoreTests/
 │   └── CodexAccountSpikeTests/
@@ -517,7 +517,7 @@ codex-account-spike cleanup
 
 ## 12. 메뉴바 앱 Phase 2
 
-Spike 통과 뒤 다음 최소 기능만 추가한다.
+ADR-027의 개발 승인에 따라 다음 최소 기능만 추가한다.
 
 - `MenuBarExtra`
 - 개인·회사 프로필 카드
@@ -621,16 +621,10 @@ Core protocol로 다음 실패를 결정적으로 주입할 수 있어야 한다
 - repo 내부 실제 auth 저장
 - Keychain 실패 시 plaintext fallback
 - 동일 task 실패 시 새 task 자동 복제
-- Spike 통과 전 메뉴바 UI 구현
+- 명시적 개발 승인 전 메뉴바 UI 구현
 
-## 17. 남은 실증 게이트
+## 17. 실증 결과와 남은 릴리스 게이트
 
-기술 설계가 완료돼도 다음은 실제 계정으로만 확정할 수 있다.
+실계정에서 앱 종료 후 auth 채택, background writer 비간섭, token refresh, crashpad allow-list와 B-011 자동 롤백을 확인했다. 동일 task의 A↔B 메시지 왕복 3회는 사용자 확인으로 완료됐다.
 
-1. 앱 종료 후 auth 교체가 UI와 실제 요청에 적용되는지
-2. Electron 또는 background process가 이전 auth를 다시 기록하는지
-3. 같은 task를 A와 B가 번갈아 실제로 이어갈 수 있는지
-4. 왕복 3회 동안 token refresh와 파일 hash가 안정적인지
-5. crashpad를 auth 무관 allow-list로 둘 수 있는지
-
-Spike 통과에는 1~4가 모두 필요하다. 다만 제품 **NO-GO** 판정은 올바른 인증 전환이 확인된 상태에서도 3의 동일 task가 계정 경계 때문에 구조적으로 재개 불가능하다고 입증될 때 내린다. process timing, App Server framing, journal 순서, 원자 교체, verifier 등 Helper 구현 결함으로 실패한 경우에는 구현을 수정하고 Spike를 다시 실행한다. 5가 불명확하면 crashpad 잔존 시 전환을 차단한다.
+cycle nonce와 단계별 task ID 기록은 보존하지 않아 B-010 정식 PASS로 표시하지 않는다. ADR-027은 이 공백을 개발 착수에만 수용한다. 메뉴바 MVP 완료·배포 전 같은 task ID와 nonce를 포함한 정식 인수 증거를 확보한다. 구조적 ownership 실패가 확인되면 즉시 제품 NO-GO다.

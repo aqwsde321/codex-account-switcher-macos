@@ -2,7 +2,7 @@
 
 ## 0. 문서 상태
 
-- 상태: Swift CLI Spike 구현 완료, 엄격한 Spike GO 판정 전
+- 상태: 기능 검증 완료, ADR-027 개발 GO; 엄격한 MVP 완료·배포 GO 전
 - 대상: macOS 공식 Codex 앱, 기본 `CODEX_HOME`인 `~/.codex`
 - 목적: 개인 계정 A와 회사 계정 B의 인증을 교체하면서 **동일한 Codex task를 양쪽 계정에서 실제로 이어갈 수 있는지** 검증
 - 실행 기준: 실제 CLI 명령은 `README.md`를 따른다. 이 문서의 `switcher ...` 표기는 설계 당시 예정 인터페이스이므로 실행하지 않는다.
@@ -626,7 +626,8 @@ journal은 §9의 고정 7필드만 가진다: `schemaVersion`, `transactionId`,
 - debug 전용 B-011 실패 주입의 최종 실행은 forward와 rollback 종료 확인을 각각 거쳐 `rollback_test=passed`를 출력하고 A로 복귀했다.
 - `./Scripts/dev.sh test`는 78개 테스트를 통과했다.
 
-### 엄격한 GO 판정 전 남은 항목
+### 개발 결정과 남은 릴리스 증거
 
 - cycle별 nonce와 객관적 task ID를 포함한 §15 형식의 증거를 보존하지 않아 B-010은 정식 PASS로 기록하지 않는다.
-- B-011은 PASS했지만 위 B-010 증거가 없으므로 §17의 엄격한 Spike GO는 보류한다.
+- 사용자가 이 증거 형식 공백을 수용해 ADR-027로 메뉴바 MVP 개발을 승인했다. CLI 재실행은 생략한다.
+- B-011은 PASS했다. B-010 정식 증거는 MVP 완료·배포 전 메뉴바 앱으로 확보한다.

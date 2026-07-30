@@ -1,7 +1,7 @@
 # Codex 계정 전환 기능 흐름
 
-- 상태: Swift CLI Spike 범위 구현 완료, 메뉴바 앱 구현 전
-- 기준일: 2026-07-28
+- 상태: Swift CLI Spike 완료, ADR-027에 따라 메뉴바 MVP 개발 승인
+- 기준일: 2026-07-30
 - 대상: macOS 공식 Codex 앱용 별도 메뉴바 helper
 - 선행 단계: Swift CLI Spike
 
@@ -334,6 +334,7 @@ preparing → quitRequested → quiescent → refreshingCurrent → currentSaved
 4. B에서 A로 돌아온 뒤 같은 task를 계속 사용했다.
 
 cycle nonce와 객관적 task ID 증거를 보존하지 않아 B-010 정식 PASS는 보류한다.
+ADR-027에 따라 이 공백은 개발 착수에만 수용하며 MVP 완료·배포 전 정식 증거를 확보한다.
 
 ## 7. 확인 필요한 핵심 엣지케이스
 
@@ -366,8 +367,6 @@ cycle nonce와 객관적 task ID 증거를 보존하지 않아 B-010 정식 PASS
 
 ## 8. 다음 단계
 
-이 문서의 flow에는 미확정 제품 선택이 없다. 남은 blocker는 실제 Spike 결과다.
+이 문서의 Core flow에는 미확정 제품 선택이 없다. ADR-027에 따라 다음 단계는 검증된 Core를 재사용하는 `MenuBarExtra` MVP다.
 
-다음 단계는 이 흐름을 기준으로 Swift CLI Spike를 구현하고, 실제 두 계정으로 black-box 검증하는 것이다. 메뉴바 앱 구현은 Spike가 통과한 뒤에만 시작한다.
-
-플로우 문서를 기준으로 다음 단계는 별도 API 상세 리뷰입니다. 다만 이 제품은 신규 서버 API를 설계하지 않고 공식 App Server를 소비하므로 API 상세 리뷰를 생략하고, `05_technical_design.md`의 로컬 프로세스·파일 트랜잭션 구현 설계 검증으로 이어간다.
+신규 서버 API는 없으므로 별도 API 상세 리뷰를 생략한다. 메뉴바 UI는 `05_technical_design.md`의 로컬 프로세스·파일 트랜잭션을 복제하지 않고 adapter로 호출한다.
