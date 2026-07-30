@@ -173,7 +173,8 @@ Swift CLI Core의 비파괴 기반 구현은 저장소 루트에 있다. 빌드�
 6. 개발 승인: 사용자 확인상 동일 task 기능 왕복 완료, `07_test_acceptance.md` §16 형식 증거는 릴리스 게이트로 유지
 7. 완료: `CodexAccountMenuBar` target, fake 3계정 카드, active 선택·inactive 확인 모델
 8. 완료: credential backend 경계, CLI private file store 명시 연결, Keychain generic-password CRUD와 plaintext fallback 금지
-9. 다음: 실제 Core provider와 진행·복구·재로그인 상태를 메뉴바 앱에 연결
+9. 완료: 메뉴바 앱에 실제 Core provider와 Keychain backend 주입, Spike metadata·credential 자동 migration 금지
+10. 다음: 메뉴바 프로필 등록과 진행·복구·재로그인 상태 연결
 
 구현 상세와 각 단계 검증은 `08_implementation_handoff.md`에 있다.
 
@@ -182,7 +183,7 @@ Swift CLI Core의 비파괴 기반 구현은 저장소 루트에 있다. 빌드�
 ```text
 `docs/00_README.md`부터 연결된 문서를 읽어.
 `02_decision_record.md`의 ADR-027과 기존 안전 결정을 유지하고,
-`08_implementation_handoff.md` Step 9의 실제 Core provider와 상태 UI 연결을 구현해.
+`08_implementation_handoff.md` Step 9의 프로필 등록과 상태 UI 연결을 구현해.
 검증된 Core를 재사용하고 실제 Codex 앱 종료와 auth.json 교체는
 외부 Terminal 실행 게이트로 남겨둬. B-010 정식 증거는 릴리스 전 확보해.
 ```

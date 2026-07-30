@@ -8,11 +8,34 @@ struct CodexAccountMenuBarApp: App {
     @StateObject private var model: MenuBarViewModel
 
     init() {
-        let provider = PreviewMenuBarProvider()
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let storeURL = home
+            .appendingPathComponent("Library/Application Support", isDirectory: true)
+            .appendingPathComponent("CodexAccountSwitcher", isDirectory: true)
+        let authURL = home
+            .appendingPathComponent(".codex", isDirectory: true)
+            .appendingPathComponent("auth.json", isDirectory: false)
+        let provider = try? LocalCLIDataProvider(
+            storeURL: storeURL,
+            activeAuthURL: authURL,
+            credentialStore: KeychainCredentialStore(
+                service: "CodexAccountSwitcher.credentials.v1"
+            )
+        )
         _model = StateObject(
             wrappedValue: MenuBarViewModel(
-                loadProfiles: { await provider.profiles() },
-                switchProfile: { try await provider.switchProfile(target: $0) }
+                loadProfiles: {
+                    guard let provider else {
+                        throw MenuBarStartupFailure.credentialStoreConfiguration
+                    }
+                    return try await provider.profiles()
+                },
+                switchProfile: {
+                    guard let provider else {
+                        throw MenuBarStartupFailure.credentialStoreConfiguration
+                    }
+                    return try await provider.switchProfile(target: $0)
+                }
             )
         )
     }
@@ -40,10 +63,6 @@ private struct AccountMenuView: View {
                         .accessibilityLabel("계정 작업 진행 중")
                 }
             }
-            Text("UI 프로토타입 · 실제 인증 미연결")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
             if model.profiles.isEmpty {
                 Text(model.isWorking ? "불러오는 중…" : "등록된 계정이 없습니다.")
                     .foregroundStyle(.secondary)
@@ -143,60 +162,6 @@ private struct ProfileCard: View {
     }
 }
 
-private actor PreviewMenuBarProvider {
-    private var storedProfiles: [ProfileListItem]
-
-    init() {
-        let ids = (0..<3).map { _ in ProfileID(UUID()) }
-        storedProfiles = [
-            ProfileListItem(
-                id: ids[0],
-                label: "개인",
-                email: "personal@example.invalid",
-                active: true,
-                needsRelogin: false
-            ),
-            ProfileListItem(
-                id: ids[1],
-                label: "회사",
-                email: "work@example.invalid",
-                active: false,
-                needsRelogin: false
-            ),
-            ProfileListItem(
-                id: ids[2],
-                label: "프로젝트",
-                email: "project@example.invalid",
-                active: false,
-                needsRelogin: false
-            ),
-        ]
-    }
-
-    func profiles() -> [ProfileListItem] {
-        storedProfiles
-    }
-
-    func switchProfile(target: String) throws -> ProfileListItem {
-        guard let selected = storedProfiles.first(where: { $0.id.description == target }) else {
-            throw PreviewMenuBarProviderFailure.missingProfile
-        }
-        storedProfiles = storedProfiles.map { profile in
-            ProfileListItem(
-                id: profile.id,
-                label: profile.label,
-                email: profile.email,
-                active: profile.id == selected.id,
-                needsRelogin: profile.needsRelogin
-            )
-        }
-        guard let updated = storedProfiles.first(where: { $0.id == selected.id }) else {
-            throw PreviewMenuBarProviderFailure.missingProfile
-        }
-        return updated
-    }
-}
-
-private enum PreviewMenuBarProviderFailure: Error {
-    case missingProfile
+private enum MenuBarStartupFailure: Error, Sendable {
+    case credentialStoreConfiguration
 }

@@ -80,7 +80,8 @@
 - 앱이 bundled Codex를 `app-server` 모드로 실행함
 - 기본 인증 파일: `~/.codex/auth.json`
 - 현재 인증 파일 권한: `0600`
-- 별도 앱 상태 위치: `~/Library/Application Support/Codex`
+- 공식 앱 별도 상태 위치: `~/Library/Application Support/Codex`
+- Helper 제품 metadata 위치: `~/Library/Application Support/CodexAccountSwitcher`
 - 공개 app-server의 `account/read`는 현재 계정 이메일과 plan을 반환함
 - 공개 app-server의 `account/rateLimits/read`가 있으나 MVP 완료 판정에는 사용하지 않음
 

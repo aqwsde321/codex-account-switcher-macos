@@ -1,6 +1,6 @@
 # 보안·복구 설계
 
-- 상태: Swift CLI Spike·manual recovery·Keychain backend 구현 완료, 메뉴바 연결·배포 보안 구현 전
+- 상태: Swift CLI Spike·manual recovery·Keychain backend·메뉴바 provider 주입 완료, 등록 UI·실 Keychain·배포 보안 검증 전
 - 기준일: 2026-07-30
 - 적용 대상: Swift CLI Spike와 후속 macOS 메뉴바 앱
 
@@ -172,7 +172,7 @@ flowchart LR
 ### 제품
 
 - 저장 프로필의 인증 blob, 특히 비활성 프로필 인증은 macOS Keychain generic password item으로만 저장한다.
-- Keychain item key는 비밀이 아닌 profile UUID를 사용한다.
+- Keychain service는 `CodexAccountSwitcher.credentials.v1`, item account key는 비밀이 아닌 profile UUID를 사용한다. service 변경은 기존 item migration 없이는 금지한다.
 - Keychain 접근 실패 시 fallback plaintext 저장을 만들지 않는다.
 - 평문 인증의 유일한 제품 예외는 현재 활성 계정 blob 하나를 materialize한 `~/.codex/auth.json`이다. 비활성 인증이나 추가 평문 백업을 만들지 않는다.
 - 현재 계정 갱신 전 journal을 `refreshingCurrent`로 내구 기록한다. 모든 관련 프로세스가 종료된 뒤 기본 `~/.codex`를 쓰는 Helper 소유 App Server에서 `account/read(refreshToken: true)`를 호출한다.
