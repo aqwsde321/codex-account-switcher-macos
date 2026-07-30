@@ -2,12 +2,12 @@
 
 ## 0. 문서 상태
 
-- 상태: 구현 전 실행 설계
+- 상태: Swift CLI Spike 구현 완료, 엄격한 Spike GO 판정 전
 - 대상: macOS 공식 Codex 앱, 기본 `CODEX_HOME`인 `~/.codex`
 - 목적: 개인 계정 A와 회사 계정 B의 인증을 교체하면서 **동일한 Codex task를 양쪽 계정에서 실제로 이어갈 수 있는지** 검증
-- 실행 금지: 이 문서는 절차와 안전 기준을 정의한다. 현재 존재하지 않는 helper/CLI가 구현되어 있다고 가정하지 않는다.
+- 실행 기준: 실제 CLI 명령은 `README.md`를 따른다. 이 문서의 `switcher ...` 표기는 설계 당시 예정 인터페이스이므로 실행하지 않는다.
 
-이 문서의 `switcher ...` 표기는 모두 **예정 인터페이스**다. 실제 명령, 옵션, App Server 연결 방식은 구현·검증 후 확정한다. 문서에 적힌 예시를 현재 셸에서 실행하지 않는다.
+현재 구현된 명령은 `inspect`, `profiles list`, `profile capture`, `profile sync-active`, `switch`, `recovery status`다. manual recovery 명령과 메뉴바 앱은 구현 전이다.
 
 ## 1. 핵심 판정
 
@@ -611,3 +611,21 @@ journal은 §9의 고정 7필드만 가진다: `schemaVersion`, `transactionId`,
 - [ ] A 재실행 유지 확인
 - [ ] secret-free evidence만 보존
 - [ ] 격리 verifier 임시 auth/home 잔존 0건
+
+## 18. 2026-07-30 실행 결과
+
+### 확인됨
+
+- ChatGPT `26.721.81911`/`5973`에서 A/B 프로필 등록과 A→B→A 3회 기능 왕복을 수행했다.
+- 각 전환 뒤 같은 task를 계속 사용했고 복사, fork, 새 task를 만들지 않았다.
+- 최종 상태는 A 활성, B 비활성, 두 프로필 모두 `needs_relogin=false`다.
+- 최종 `inspect`는 `application=ready`, `auth=private_regular_file`, 독립 Codex 0개, 분류 불명 관련 프로세스 0개였다.
+- 최종 `recovery status`는 `recovery=none`이었다.
+- 실행 중 앱 소유 프로세스 51개는 단일 ChatGPT 주 프로세스의 현재 task·도구 자식 트리였다. 두 번째 ChatGPT 주 프로세스는 없었다.
+- `./Scripts/dev.sh test`는 77개 테스트를 통과했다.
+
+### 엄격한 GO 판정 전 남은 항목
+
+- cycle별 nonce와 객관적 task ID를 포함한 §15 형식의 증거를 보존하지 않아 B-010은 정식 PASS로 기록하지 않는다.
+- 안전한 fault injection을 통한 B-011 post-launch 검증 실패·자동 롤백 black-box 검증은 수행하지 않았다.
+- 위 두 항목 전까지 결과는 기능 가설 확인이며 §17의 엄격한 Spike GO는 보류한다.

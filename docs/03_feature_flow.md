@@ -1,6 +1,6 @@
 # Codex 계정 전환 기능 흐름
 
-- 상태: 합의 완료, 구현 전
+- 상태: Swift CLI Spike 범위 구현 완료, 메뉴바 앱 구현 전
 - 기준일: 2026-07-28
 - 대상: macOS 공식 Codex 앱용 별도 메뉴바 helper
 - 선행 단계: Swift CLI Spike

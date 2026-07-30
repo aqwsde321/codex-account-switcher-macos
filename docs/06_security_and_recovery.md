@@ -1,6 +1,6 @@
 # 보안·복구 설계
 
-- 상태: 합의 완료, 구현 전
+- 상태: Swift CLI Spike 범위 구현 완료, manual recovery·제품 Keychain·배포 보안 구현 전
 - 기준일: 2026-07-28
 - 적용 대상: Swift CLI Spike와 후속 macOS 메뉴바 앱
 

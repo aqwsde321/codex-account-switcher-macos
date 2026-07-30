@@ -2,10 +2,10 @@
 
 ## 0. 문서 상태
 
-- 상태: 구현 전 테스트 계약
+- 상태: Swift CLI Spike 구현 완료, 엄격한 Spike GO 판정 전
 - 대상: Swift CLI core Spike와 후속 Swift 메뉴바 앱
 - 실제 계정, 실제 이메일, 인증값 포함 금지
-- 이 문서의 helper 명령 표기는 전부 **예정 인터페이스**이며 현재 실행 가능하다고 가정하지 않는다.
+- 이 문서의 helper 명령 표기는 설계 당시 **예정 인터페이스**다. 실제 CLI 명령은 `README.md`, 현재 실행 결과는 `04_spike_runbook.md` §18을 따른다.
 
 ## 1. 최상위 성공 조건
 
@@ -427,6 +427,8 @@ MVP는 정확히 2개 계정만 노출하지만 `personalAuth`, `workAuth` 같�
 - 모든 전환에서 이메일 검증 PASS
 - 최종 A 복구와 재실행 유지 B-012 PASS
 - secret exposure 0건
+
+2026-07-30 기능 왕복은 확인했지만 B-010의 §16 증거와 B-011 black-box 검증이 남아 있어 엄격한 GO는 보류한다. 현재 결과는 `04_spike_runbook.md` §18에 기록한다.
 
 ### NO-GO — 제품 구현 중단
 
