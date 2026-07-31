@@ -113,7 +113,6 @@ private struct AccountMenuView: View {
     @State private var isRegistering = false
     @State private var isSyncConfirmationPresented = false
     @State private var registrationLabel = ""
-    @State private var pendingRegistrationLabel: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -209,35 +208,21 @@ private struct AccountMenuView: View {
                         .disabled(model.isWorking)
                         Spacer()
                         Button("현재 로그인 등록") {
-                            pendingRegistrationLabel = registrationLabel
+                            let label = registrationLabel
+                            guard confirmRegistration() else { return }
+                            Task {
+                                if await model.register(label: label)
+                                    || model.recoveryRequired {
+                                    registrationLabel = ""
+                                    isRegistering = false
+                                }
+                            }
                         }
                         .disabled(
                             model.isWorking
                                 || model.recoveryRequired
                                 || !registrationLabelIsValid
                         )
-                        .confirmationDialog(
-                            "현재 로그인을 등록할까요?",
-                            isPresented: registrationConfirmationPresented,
-                            titleVisibility: .visible,
-                            presenting: pendingRegistrationLabel
-                        ) { label in
-                            Button("Codex 종료 후 등록") {
-                                pendingRegistrationLabel = nil
-                                Task {
-                                    if await model.register(label: label)
-                                        || model.recoveryRequired {
-                                        registrationLabel = ""
-                                        isRegistering = false
-                                    }
-                                }
-                            }
-                            Button("취소", role: .cancel) {
-                                pendingRegistrationLabel = nil
-                            }
-                        } message: { _ in
-                            Text("진행 중 작업을 먼저 확인하세요. 공식 Codex 앱을 정상 종료하고 현재 로그인을 저장한 뒤 다시 엽니다. 독립 Codex CLI와 IDE 작업은 먼저 직접 종료하세요.")
-                        }
                     }
                 }
             } else if !isSyncConfirmationPresented,
@@ -329,17 +314,6 @@ private struct AccountMenuView: View {
             set: { presented in
                 if !presented {
                     model.cancelRelogin()
-                }
-            }
-        )
-    }
-
-    private var registrationConfirmationPresented: Binding<Bool> {
-        Binding(
-            get: { pendingRegistrationLabel != nil },
-            set: { presented in
-                if !presented {
-                    pendingRegistrationLabel = nil
                 }
             }
         )
@@ -487,4 +461,16 @@ private func confirmAppOwnedTermination(count: Int) -> Bool {
     let terminate = alert.addButton(withTitle: "SIGTERM 전송")
     terminate.hasDestructiveAction = true
     return alert.runModal() == .alertSecondButtonReturn
+}
+
+@MainActor
+private func confirmRegistration() -> Bool {
+    let alert = NSAlert()
+    alert.alertStyle = .warning
+    alert.messageText = "현재 로그인을 등록할까요?"
+    alert.informativeText = "버튼을 누르면 공식 Codex 앱을 자동으로 정상 종료하고 현재 로그인을 저장한 뒤 다시 엽니다. 독립 Codex CLI와 IDE 작업은 먼저 직접 종료하세요."
+    alert.addButton(withTitle: "Codex 자동 종료하고 등록")
+    let cancel = alert.addButton(withTitle: "취소")
+    cancel.keyEquivalent = "\u{1b}"
+    return alert.runModal() == .alertFirstButtonReturn
 }
