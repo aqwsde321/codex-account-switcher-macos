@@ -113,6 +113,7 @@ private struct AccountMenuView: View {
     @State private var isRegistering = false
     @State private var isSyncConfirmationPresented = false
     @State private var registrationLabel = ""
+    @State private var pendingRegistrationLabel: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -208,19 +209,35 @@ private struct AccountMenuView: View {
                         .disabled(model.isWorking)
                         Spacer()
                         Button("현재 로그인 등록") {
-                            Task {
-                                if await model.register(label: registrationLabel)
-                                    || model.recoveryRequired {
-                                    registrationLabel = ""
-                                    isRegistering = false
-                                }
-                            }
+                            pendingRegistrationLabel = registrationLabel
                         }
                         .disabled(
                             model.isWorking
                                 || model.recoveryRequired
                                 || !registrationLabelIsValid
                         )
+                        .confirmationDialog(
+                            "현재 로그인을 등록할까요?",
+                            isPresented: registrationConfirmationPresented,
+                            titleVisibility: .visible,
+                            presenting: pendingRegistrationLabel
+                        ) { label in
+                            Button("Codex 종료 후 등록") {
+                                pendingRegistrationLabel = nil
+                                Task {
+                                    if await model.register(label: label)
+                                        || model.recoveryRequired {
+                                        registrationLabel = ""
+                                        isRegistering = false
+                                    }
+                                }
+                            }
+                            Button("취소", role: .cancel) {
+                                pendingRegistrationLabel = nil
+                            }
+                        } message: { _ in
+                            Text("진행 중 작업을 먼저 확인하세요. 공식 Codex 앱을 정상 종료하고 현재 로그인을 저장한 뒤 다시 엽니다. 독립 Codex CLI와 IDE 작업은 먼저 직접 종료하세요.")
+                        }
                     }
                 }
             } else if !isSyncConfirmationPresented,
@@ -317,6 +334,17 @@ private struct AccountMenuView: View {
         )
     }
 
+    private var registrationConfirmationPresented: Binding<Bool> {
+        Binding(
+            get: { pendingRegistrationLabel != nil },
+            set: { presented in
+                if !presented {
+                    pendingRegistrationLabel = nil
+                }
+            }
+        )
+    }
+
     private var registrationLabelIsValid: Bool {
         !registrationLabel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && registrationLabel.unicodeScalars.count <= 64
@@ -324,9 +352,9 @@ private struct AccountMenuView: View {
 
     private var registrationHelp: String {
         if model.profiles.isEmpty {
-            return "공식 앱과 독립 Codex 프로세스를 종료한 뒤 현재 로그인을 저장합니다."
+            return "등록하면 공식 Codex 앱을 정상 종료하고 현재 로그인을 저장한 뒤 다시 엽니다. 독립 Codex CLI와 IDE는 먼저 직접 종료하세요."
         }
-        return "현재 로그인을 저장한 뒤 기존 활성 계정으로 자동 복귀하고 앱을 다시 엽니다. 먼저 공식 앱과 독립 Codex 프로세스를 종료하세요."
+        return "등록하면 공식 Codex 앱을 정상 종료하고 현재 로그인을 저장한 뒤 기존 활성 계정으로 복귀해 다시 엽니다. 독립 Codex CLI와 IDE는 먼저 직접 종료하세요."
     }
 }
 

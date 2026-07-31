@@ -28,7 +28,7 @@
 - fake 3계정 카드와 확인 흐름을 가진 `MenuBarExtra` UI 프로토타입
 - CLI private file store와 제품 Keychain을 분리한 credential backend 경계, generic-password CRUD와 plaintext fallback 금지
 - `MenuBarExtra`의 실제 `LocalCLIDataProvider`·Keychain 주입과 Spike에서 분리된 제품 metadata store
-- 메뉴바의 명시적 현재 로그인 등록, 추가 등록 후 기존 active 유지, recovery 상태의 mutation 차단
+- 메뉴바의 종료 확인 뒤 현재 로그인 등록, 공식 앱 자동 정상 종료·재실행, 추가 등록 후 기존 active 유지, recovery 상태의 mutation 차단
 - 메뉴바의 명시적 현재 활성 인증 저장, 실행 전 수동 종료 확인, 성공·복구 차단 상태 표시
 - 메뉴바 recovery pending phase와 journal의 정확한 이전 프로필 표시, blocked 상태의 fail-closed 안내
 - 메뉴바 `rollbackFailed` transaction+이전 프로필에 묶인 수동 복구, 명시 확인, launch 미확인 재시도 금지, journal 불확실 STOP
@@ -44,7 +44,7 @@
 - 실계정 제품 flow의 Keychain 검증, ad-hoc 재빌드 ACL과 잠금·접근 거부 정책 검증
 - 5시간·주간 사용량 표시
 
-capture 명령은 앱을 자동 종료하지 않는다. 첫 capture는 현재 인증을 갱신·저장한다. 추가 capture는 새 계정을 저장한 뒤 `~/.codex/auth.json`을 등록 전 활성 프로필로 원자 복구하고 ChatGPT 앱을 해당 계정으로 다시 실행한다. 모든 auth 변경은 외부 Terminal의 대화형 확인과 process gate 뒤에만 수행한다.
+capture는 명시 확인 뒤 공식 앱에 정상 종료를 요청한다. 1초 뒤에도 종료 전 확인한 exact 앱 소유 프로세스가 남으면 별도 승인 뒤 `SIGTERM`을 한 번만 보내며, 독립 CLI·IDE와 새·분류 불명 프로세스는 종료하지 않고 차단한다. 첫 capture는 현재 인증을 갱신·저장하고 앱을 다시 연다. 추가 capture는 새 계정을 저장한 뒤 `~/.codex/auth.json`을 등록 전 활성 프로필로 원자 복구하고 해당 계정으로 앱을 다시 연다.
 
 ## 빌드와 테스트
 
@@ -90,7 +90,7 @@ cd codex-account-switcher-spike
 
 ### 첫 계정 A 저장
 
-앱과 독립 Codex CLI를 정상 종료한 뒤 외부 Terminal에서 실행한다.
+독립 Codex CLI·IDE 작업을 종료한 뒤 외부 Terminal에서 실행한다. `CAPTURE` 확인 후 실행 중인 공식 앱은 helper가 정상 종료한다.
 
 ```sh
 ./Scripts/dev.sh run profile capture --label A
@@ -100,9 +100,8 @@ cd codex-account-switcher-spike
 
 1. `profiles list`에서 복귀할 기존 프로필이 `active=true`, `recovery status`가 `recovery=none`인지 확인한다.
 2. 공식 ChatGPT UI에서 아직 등록하지 않은 계정 B 또는 C로 로그인한다.
-3. ChatGPT 앱과 독립 Codex CLI를 정상 종료한다.
-4. `inspect`의 세 process count가 모두 `0`인지 확인한다.
-5. 외부 Terminal에서 새 계정을 capture한다.
+3. 독립 Codex CLI·IDE 작업을 종료한다.
+4. 외부 Terminal에서 새 계정을 capture한다. `CAPTURE` 확인 후 실행 중인 공식 앱은 helper가 정상 종료한다.
 
 ```sh
 ./Scripts/dev.sh run inspect

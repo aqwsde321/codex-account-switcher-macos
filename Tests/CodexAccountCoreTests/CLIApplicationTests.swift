@@ -523,12 +523,36 @@ func cliApplicationTests() -> [TestCase] {
                     bundledCodexSigningIdentifier: "codex",
                     teamIdentifier: "2DC432GLL2"
                 )
+                let processes = TerminableProcessSnapshotProvider()
+                let appRoot = ProcessRecord(
+                    identity: ProcessIdentity(pid: 75, startSeconds: 98, startMicroseconds: 1),
+                    parentPID: 1,
+                    executablePath: descriptor.mainExecutableURL.path,
+                    nameHint: "ChatGPT"
+                )
+                processes.install(appRoot)
+                let confirmations = TerminationConfirmationRecorder()
+                let launches = await MainActor.run { AppLaunchRecorder() }
                 let provider = LocalCLIDataProvider(
                     storeURL: directory.appendingPathComponent("store", isDirectory: true),
                     activeAuthURL: authURL,
-                    processProvider: EmptyProcessSnapshotProvider(),
+                    processProvider: processes,
                     locateApp: { descriptor },
-                    runningApplicationPIDs: { _ in [] }
+                    runningApplicationPIDs: { _ in
+                        processes.contains(pid: appRoot.identity.pid) ? [appRoot.identity.pid] : []
+                    },
+                    requestApplicationTermination: { _ in
+                        processes.install([])
+                        return [appRoot.identity.pid]
+                    },
+                    confirmAppOwnedTermination: confirmations.confirm,
+                    requestProcessTermination: { processes.terminate($0) },
+                    normalTerminationGracePolls: 0,
+                    quiescenceSleep: { _ in },
+                    launchApplication: { _ in
+                        launches.record()
+                        return 42
+                    }
                 )
                 let application = CLIApplication(provider: provider)
 
@@ -544,6 +568,7 @@ func cliApplicationTests() -> [TestCase] {
                 let registry = try store.loadRegistry()
                 let storedCredential = try store.loadCredential(for: registry.profiles[0].id)
                 let activeCredential = try CredentialBlob(validating: authAfter)
+                let launchCount = await MainActor.run { launches.count }
 
                 try expect(captured.exitCode == 0, "local capture failed")
                 try expect(listed.exitCode == 0, "captured profile could not be listed")
@@ -553,6 +578,9 @@ func cliApplicationTests() -> [TestCase] {
                 try expect(!listed.standardOutput.contains("person@example.invalid"), "identity leaked")
                 try expect(authAfter != auth, "refresh did not update the active auth file")
                 try expect(storedCredential == activeCredential, "refreshed credential was not captured")
+                try expect(launchCount == 1, "first capture did not reopen the app")
+                try expect(confirmations.counts.isEmpty, "normal app quit requested SIGTERM approval")
+                try expect(processes.terminatedPIDs.isEmpty, "normal app quit sent SIGTERM")
             }
         },
         TestCase("CLI capture stores a second profile and restores the first") {
@@ -605,6 +633,7 @@ func cliApplicationTests() -> [TestCase] {
                 )
                 let launches = await MainActor.run { AppLaunchRecorder() }
                 let lingeringProcesses = TerminableProcessSnapshotProvider()
+                let lingeringConfirmations = TerminationConfirmationRecorder()
                 let appRootIdentity = ProcessIdentity(pid: 76, startSeconds: 99, startMicroseconds: 1)
                 let lingeringIdentity = ProcessIdentity(pid: 77, startSeconds: 100, startMicroseconds: 1)
                 let appRoot = ProcessRecord(
@@ -625,6 +654,7 @@ func cliApplicationTests() -> [TestCase] {
                     executablePath: appChild.executablePath,
                     nameHint: appChild.nameHint
                 )
+                lingeringProcesses.install([appRoot, appChild])
                 let provider = LocalCLIDataProvider(
                     storeURL: storeURL,
                     activeAuthURL: authURL,
@@ -640,7 +670,7 @@ func cliApplicationTests() -> [TestCase] {
                         lingeringProcesses.install(orphanedAppChild)
                         return [appRootIdentity.pid]
                     },
-                    confirmAppOwnedTermination: { _ in true },
+                    confirmAppOwnedTermination: lingeringConfirmations.confirm,
                     requestProcessTermination: { lingeringProcesses.terminate($0) },
                     normalTerminationGracePolls: 0,
                     quiescenceSleep: { _ in },
@@ -980,6 +1010,7 @@ func cliApplicationTests() -> [TestCase] {
                 try expect(listed.standardOutput.contains("active=false label=B"), "second profile is not inactive")
                 try expect(recovery.standardOutput == "recovery=none\n", "second capture left recovery state")
                 try expect(launchCount == 1, "restored first account was not launched once")
+                try expect(lingeringConfirmations.counts.first == 1, "capture survivor was not confirmed")
                 try expect(deniedSwitch.standardError == "error=confirmation_required\n", "switch ran without confirmation")
                 try expect(switched.exitCode == 0, "A to B switch failed: \(switched.standardError)")
                 try expect(switched.standardOutput.contains("active=true label=B"), "switch output did not activate B")
@@ -991,9 +1022,10 @@ func cliApplicationTests() -> [TestCase] {
                 try expect(switchedRecovery.standardOutput == "recovery=none\n", "switch left recovery state")
                 try expect(switchedLaunchCount == 2, "target app was not launched once")
                 try expect(
-                    lingeringProcesses.terminatedPIDs == [lingeringIdentity.pid],
-                    "confirmed switch did not SIGTERM the captured app-owned survivor"
+                    lingeringProcesses.terminatedPIDs == [lingeringIdentity.pid, lingeringIdentity.pid],
+                    "capture and switch did not SIGTERM only the captured app-owned survivor"
                 )
+                try expect(lingeringConfirmations.counts == [1, 1], "capture and switch confirmation counts changed")
                 try expect(blockedSwitch.standardError == "error=process_blocked\n", "independent Codex was not blocked")
                 try expect(independentConfirmations.counts.isEmpty, "independent Codex requested SIGTERM approval")
                 try expect(independentProcesses.terminatedPIDs.isEmpty, "independent Codex received SIGTERM")
@@ -2941,6 +2973,85 @@ func cliApplicationTests() -> [TestCase] {
             try expect(result.exitCode == 1, "blocked capture returned success")
             try expect(result.standardError == "error=process_blocked\n", "capture blocker was not allow-listed")
         },
+        TestCase("CLI capture rechecks processes before creating artifacts") {
+            try await withCaptureTemporaryDirectory { directory in
+                let probeCountURL = directory.appendingPathComponent("probe-count")
+                let fixture = try makeReloginFixture(
+                    in: directory,
+                    probeCountURL: probeCountURL
+                )
+                let independentCodex = ProcessRecord(
+                    identity: ProcessIdentity(pid: 301, startSeconds: 401, startMicroseconds: 1),
+                    parentPID: 1,
+                    executablePath: "/opt/homebrew/bin/codex",
+                    nameHint: "codex"
+                )
+                let processes = ProbeTriggeredProcessSnapshotProvider(
+                    triggerURL: probeCountURL,
+                    record: independentCodex
+                )
+                let confirmations = TerminationConfirmationRecorder()
+                let quitRequests = await MainActor.run { AppLaunchRecorder() }
+                let launches = await MainActor.run { AppLaunchRecorder() }
+                let store = try SpikeStore.openExisting(at: fixture.storeURL)
+                let registryBefore = try store.loadRegistry()
+                let authBefore = try Data(contentsOf: fixture.authURL)
+                let sourceCredentialBefore = try store.loadCredential(for: fixture.source.id)
+                let targetCredentialBefore = try store.loadCredential(for: fixture.target.id)
+                let credentialsURL = fixture.storeURL.appendingPathComponent("credentials", isDirectory: true)
+                let credentialFilesBefore = Set(
+                    try FileManager.default.contentsOfDirectory(atPath: credentialsURL.path)
+                )
+                let provider = LocalCLIDataProvider(
+                    storeURL: fixture.storeURL,
+                    activeAuthURL: fixture.authURL,
+                    processProvider: processes,
+                    locateApp: { fixture.descriptor },
+                    runningApplicationPIDs: { _ in [] },
+                    requestApplicationTermination: { _ in
+                        quitRequests.record()
+                        return []
+                    },
+                    confirmAppOwnedTermination: confirmations.confirm,
+                    requestProcessTermination: processes.terminate,
+                    normalTerminationGracePolls: 0,
+                    quiescenceSleep: { _ in },
+                    launchApplication: { _ in
+                        launches.record()
+                        return 42
+                    }
+                )
+
+                let result = await CLIApplication(provider: provider).run(
+                    arguments: ["profile", "capture", "--label", "C"],
+                    mutationConfirmed: true
+                )
+                let registryAfter = try store.loadRegistry()
+                let authAfter = try Data(contentsOf: fixture.authURL)
+                let sourceCredentialAfter = try store.loadCredential(for: fixture.source.id)
+                let targetCredentialAfter = try store.loadCredential(for: fixture.target.id)
+                let credentialFilesAfter = Set(
+                    try FileManager.default.contentsOfDirectory(atPath: credentialsURL.path)
+                )
+                let marker = try store.loadCaptureProfileIDIfPresent()
+                let journal = try store.loadJournalIfPresent()
+                let quitRequestCount = await MainActor.run { quitRequests.count }
+                let launchCount = await MainActor.run { launches.count }
+
+                try expect(result.standardError == "error=process_blocked\n", "late process was not blocked")
+                try expect(registryAfter == registryBefore, "late process changed registry")
+                try expect(authAfter == authBefore, "late process changed active auth")
+                try expect(sourceCredentialAfter == sourceCredentialBefore, "late process changed source credential")
+                try expect(targetCredentialAfter == targetCredentialBefore, "late process changed target credential")
+                try expect(credentialFilesAfter == credentialFilesBefore, "late process created a credential")
+                try expect(marker == nil, "late process left a capture marker")
+                try expect(journal == nil, "late process created a capture journal")
+                try expect(quitRequestCount == 0, "closed app received a quit request")
+                try expect(confirmations.counts.isEmpty, "independent process requested SIGTERM approval")
+                try expect(processes.terminatedPIDs.isEmpty, "independent process received SIGTERM")
+                try expect(launchCount == 0, "blocked capture launched the app")
+            }
+        },
         TestCase("CLI capture blocks an app launch during the process snapshot") {
             try await withCaptureTemporaryDirectory { directory in
                 let codexHome = directory.appendingPathComponent(".codex", isDirectory: true)
@@ -3014,7 +3125,7 @@ func cliApplicationTests() -> [TestCase] {
                     storeURL: directory.appendingPathComponent("store", isDirectory: true),
                     activeAuthURL: authURL,
                     processProvider: MutatingProcessSnapshotProvider(
-                        mutationCall: 4,
+                        mutationCall: 6,
                         url: authURL,
                         contents: replacement
                     ),
@@ -3113,6 +3224,30 @@ private final class TerminableProcessSnapshotProvider: ProcessSnapshotProviding,
             records.removeAll { $0.identity == record.identity }
             terminated.append(record.identity.pid)
         }
+    }
+}
+
+private final class ProbeTriggeredProcessSnapshotProvider: ProcessSnapshotProviding, @unchecked Sendable {
+    private let triggerURL: URL
+    private let record: ProcessRecord
+    private let lock = NSLock()
+    private var terminated = [Int32]()
+
+    init(triggerURL: URL, record: ProcessRecord) {
+        self.triggerURL = triggerURL
+        self.record = record
+    }
+
+    var terminatedPIDs: [Int32] {
+        lock.withLock { terminated }
+    }
+
+    func snapshot() throws -> [ProcessRecord] {
+        FileManager.default.fileExists(atPath: triggerURL.path) ? [record] : []
+    }
+
+    func terminate(_ process: ProcessRecord) {
+        lock.withLock { terminated.append(process.identity.pid) }
     }
 }
 
@@ -3279,7 +3414,8 @@ private struct ReloginFixture: Sendable {
 private func makeReloginFixture(
     in directory: URL,
     rotateActiveToOtherAccount: Bool = false,
-    holdVerifierPipesOpen: Bool = false
+    holdVerifierPipesOpen: Bool = false,
+    probeCountURL: URL? = nil
 ) throws -> ReloginFixture {
     let codexHome = directory.appendingPathComponent(".codex", isDirectory: true)
     try FileManager.default.createDirectory(at: codexHome, withIntermediateDirectories: false)
@@ -3325,6 +3461,7 @@ private func makeReloginFixture(
         in: directory,
         rotateToOtherAccount: rotateActiveToOtherAccount,
         rotateToOtherAccountHomeURL: rotateActiveToOtherAccount ? codexHome : nil,
+        probeCountURL: probeCountURL,
         requiredJournalURL: storeURL.appendingPathComponent("switch-journal.json"),
         holdPipesOpen: holdVerifierPipesOpen
     )

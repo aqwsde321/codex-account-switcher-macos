@@ -6,6 +6,10 @@ private enum ProcessTerminationFailure: Error {
     case signalFailed
 }
 
+private enum ApplicationQuiescenceFailure: Error {
+    case processBlocked
+}
+
 private func sendSIGTERM(to expected: ProcessRecord) throws {
     let matches = try LibprocSnapshotProvider().snapshot().filter {
         $0.identity.pid == expected.identity.pid
@@ -69,7 +73,6 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
     private var switchActiveAuthDestination: ExpectedDestination?
     private var switchLaunchedApplicationPID: Int32?
     private var switchAppOwnedTerminationCandidates = [ProcessIdentity: ProcessRecord]()
-    private var switchSentSIGTERM = false
     private var targetValidationProfileID: ProfileID?
 #if SPIKE_FAULT_INJECTION
     private var injectPostLaunchVerificationFailure = false
@@ -207,10 +210,8 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
     public func captureProfile(label: String) async throws -> ProfileListItem {
         let profile = try await ProfileCaptureCoordinator(driver: self).capture(label: label)
         let registry = try SpikeStore.openExisting(at: storeURL).loadRegistry()
-        if registry.activeProfileID != profile.id {
-            let descriptor = try await locateApp()
-            _ = try await launchApplication(descriptor)
-        }
+        let descriptor = try await locateApp()
+        _ = try await launchApplication(descriptor)
         return ProfileListItem(
             id: profile.id,
             label: profile.label,
@@ -786,7 +787,23 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
             guard ApprovedResidentRule.codexCrashpad(for: descriptor) != nil else {
                 throw LocalCLIDataProviderFailure.incompatibleApplication
             }
-            guard try await processInventory(for: descriptor).authMutationAllowed else {
+            let terminationCandidates: [ProcessIdentity: ProcessRecord]
+            do {
+                terminationCandidates = try appOwnedTerminationCandidates(
+                    in: try await processInventory(for: descriptor)
+                )
+            } catch ApplicationQuiescenceFailure.processBlocked {
+                throw LocalCLIDataProviderFailure.processBlocked
+            }
+            if !terminationCandidates.isEmpty {
+                _ = try await requestApplicationTermination(descriptor)
+            }
+            do {
+                try await waitForAppQuiescence(
+                    descriptor: descriptor,
+                    terminationCandidates: terminationCandidates
+                )
+            } catch ApplicationQuiescenceFailure.processBlocked {
                 throw LocalCLIDataProviderFailure.processBlocked
             }
             let previous: ProfileMetadata?
@@ -804,6 +821,7 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
             } else {
                 previous = nil
             }
+            try await requireMutationGate(for: descriptor)
             let original = try readCurrentCredential()
             captureDescriptor = descriptor
             originalCredential = original.credential
@@ -1142,21 +1160,33 @@ extension LocalCLIDataProvider: SwitchTransactionDriving {
 
     public func requestNormalQuit() async throws {
         let descriptor = try requireSwitchContext().descriptor
-        let blockers = try await switchProcessInventory(for: descriptor).processes.filter {
-            $0.disposition.blocksAuthMutation
-        }
-        guard blockers.allSatisfy({ $0.disposition == .appOwnedBlocker && $0.record.executablePath != nil }) else {
+        do {
+            switchAppOwnedTerminationCandidates = try appOwnedTerminationCandidates(
+                in: try await switchProcessInventory(for: descriptor)
+            )
+        } catch ApplicationQuiescenceFailure.processBlocked {
             throw SwitchCoordinatorFailure.processBlocked
         }
-        switchAppOwnedTerminationCandidates = Dictionary(
-            uniqueKeysWithValues: blockers.map { ($0.record.identity, $0.record) }
-        )
-        switchSentSIGTERM = false
         _ = try await requestApplicationTermination(descriptor)
     }
 
     public func waitForQuiescence() async throws {
         let descriptor = try requireSwitchContext().descriptor
+        do {
+            try await waitForAppQuiescence(
+                descriptor: descriptor,
+                terminationCandidates: switchAppOwnedTerminationCandidates
+            )
+        } catch ApplicationQuiescenceFailure.processBlocked {
+            throw SwitchCoordinatorFailure.processBlocked
+        }
+    }
+
+    private func waitForAppQuiescence(
+        descriptor: CodexAppDescriptor,
+        terminationCandidates: [ProcessIdentity: ProcessRecord]
+    ) async throws {
+        var sentSIGTERM = false
         for poll in 0..<120 {
             let inventory: ProcessInventory
             do {
@@ -1167,25 +1197,28 @@ extension LocalCLIDataProvider: SwitchTransactionDriving {
             }
             let newlyDiscovered = inventory.processes.filter {
                 $0.disposition.blocksAuthMutation
-                    && switchAppOwnedTerminationCandidates[$0.record.identity] == nil
+                    && terminationCandidates[$0.record.identity] == nil
             }
             guard newlyDiscovered.isEmpty else {
-                throw SwitchCoordinatorFailure.processBlocked
+                throw ApplicationQuiescenceFailure.processBlocked
             }
-            let survivors = try capturedAppOwnedSurvivors(in: inventory)
+            let survivors = try capturedAppOwnedSurvivors(
+                in: inventory,
+                terminationCandidates: terminationCandidates
+            )
             if survivors.isEmpty {
                 return
             }
-            if poll >= normalTerminationGracePolls, !switchSentSIGTERM {
+            if poll >= normalTerminationGracePolls, !sentSIGTERM {
                 guard await confirmAppOwnedTermination(survivors.count) else {
-                    throw SwitchCoordinatorFailure.processBlocked
+                    throw ApplicationQuiescenceFailure.processBlocked
                 }
                 try terminateCapturedAppOwnedProcesses(survivors)
-                switchSentSIGTERM = true
+                sentSIGTERM = true
             }
             try await quiescenceSleep(.milliseconds(250))
         }
-        throw SwitchCoordinatorFailure.processBlocked
+        throw ApplicationQuiescenceFailure.processBlocked
     }
 
     public func revalidateCredentialMutationGate() async throws {
@@ -1877,16 +1910,31 @@ private extension LocalCLIDataProvider {
         captureMutationUncertain = false
     }
 
-    func capturedAppOwnedSurvivors(in inventory: ProcessInventory) throws -> [ProcessRecord] {
+    func appOwnedTerminationCandidates(
+        in inventory: ProcessInventory
+    ) throws -> [ProcessIdentity: ProcessRecord] {
+        let blockers = inventory.processes.filter { $0.disposition.blocksAuthMutation }
+        guard blockers.allSatisfy({
+            $0.disposition == .appOwnedBlocker && $0.record.executablePath != nil
+        }) else {
+            throw ApplicationQuiescenceFailure.processBlocked
+        }
+        return Dictionary(uniqueKeysWithValues: blockers.map { ($0.record.identity, $0.record) })
+    }
+
+    func capturedAppOwnedSurvivors(
+        in inventory: ProcessInventory,
+        terminationCandidates: [ProcessIdentity: ProcessRecord]
+    ) throws -> [ProcessRecord] {
         var identities = Set<ProcessIdentity>()
         var survivors = [ProcessRecord]()
         for process in inventory.processes {
-            guard let captured = switchAppOwnedTerminationCandidates[process.record.identity] else {
+            guard let captured = terminationCandidates[process.record.identity] else {
                 continue
             }
             guard captured.executablePath == process.record.executablePath,
                   identities.insert(process.record.identity).inserted else {
-                throw SwitchCoordinatorFailure.processBlocked
+                throw ApplicationQuiescenceFailure.processBlocked
             }
             survivors.append(process.record)
         }
@@ -1895,14 +1943,14 @@ private extension LocalCLIDataProvider {
 
     func terminateCapturedAppOwnedProcesses(_ survivors: [ProcessRecord]) throws {
         guard !survivors.isEmpty else {
-            throw SwitchCoordinatorFailure.processBlocked
+            throw ApplicationQuiescenceFailure.processBlocked
         }
         do {
             for process in survivors {
                 try requestProcessTermination(process)
             }
         } catch {
-            throw SwitchCoordinatorFailure.processBlocked
+            throw ApplicationQuiescenceFailure.processBlocked
         }
     }
 
@@ -1915,7 +1963,6 @@ private extension LocalCLIDataProvider {
         switchActiveAuthDestination = nil
         switchLaunchedApplicationPID = nil
         switchAppOwnedTerminationCandidates = [:]
-        switchSentSIGTERM = false
         targetValidationProfileID = nil
     }
 

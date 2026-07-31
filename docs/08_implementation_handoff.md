@@ -58,7 +58,7 @@ ADR-027·ADR-029·ADR-030과 기존 안전 결정을 유지한 채 Step 9 메뉴
 - 메뉴바 native 비동기 잔존 앱 프로세스 2차 확인, 취소 기본, 종료 전 exact snapshot 대상의 `SIGTERM` 1회 제한 구현
 - Command Line Tools 기반 release `.app` build, strict ad-hoc 서명, 고정 bundle ID와 LaunchAgent install/update/uninstall 구현
 - 번들·설치 실행파일의 random synthetic Keychain create/read/update/read/delete/notFound와 cleanup 통과; 제품 service·실제 auth 접근 0회
-- fake credential만 사용하는 128개 debug 테스트 통과
+- fake credential만 사용하는 129개 debug 테스트 통과
 - 실제 read-only inspect에서 사용자 auth와 helper store 무변경 확인
 - `rollbackFailed` 수동 복구 CLI와 실환경 A 복구 2회 완료
 - debug 전용 B-011 실패 주입에서 source 자동 롤백과 최종 A 복귀 확인
@@ -388,9 +388,11 @@ menu bar residual process confirmation slice의 완료 기준:
 registration slice의 완료 기준:
 
 - 사용자가 라벨을 입력하고 `현재 로그인 등록`을 눌렀을 때만 Core capture를 호출한다.
+- Core 호출 전에 공식 앱 정상 종료·등록·재실행 확인을 표시한다.
 - label은 UI에서 정규화하지 않으며 blank·64자 초과는 버튼에서, control 문자·중복·네 번째 등록은 Core에서 거부한다.
 - 첫 등록은 새 프로필을 active로, 추가 등록은 등록 전 active를 유지한 상태로 목록을 다시 읽는다.
-- 등록 전 공식 앱과 독립 Codex 프로세스를 사용자가 종료해야 함을 표시한다. 자동 종료는 하지 않는다.
+- 등록은 capture artifact 생성 전에 공식 앱에 정상 종료를 요청하고 공용 잔존 프로세스 경계를 적용한다. 독립 CLI·IDE는 자동 종료하지 않고 차단한다.
+- 성공하면 첫 등록은 새 active, 추가 등록은 복원한 기존 active로 공식 앱을 다시 연다.
 - 시작 시와 mutation 실패 뒤 자동 복구→profile 조회→read-only recovery status 조회 순서를 지킨다. pending/blocked면 등록·전환을 중단하고 STOP 오류를 표시한다.
 - capture가 durable commit 뒤 실패해도 profile 목록을 다시 읽어 중복 재시도를 막는다.
 - 추가 등록 commit 뒤 앱 launch만 실패하고 recovery가 없으면 새 profile ID를 등록 완료로 판정하고 폼을 닫되 launch 실패를 알린다.

@@ -140,12 +140,13 @@ JWT를 디코딩하거나 token field를 로그에 출력해 신원을 추정하
 1. 공식 Codex 앱이 A로 로그인된 상태인지 확인한다.
 2. App Server `account/read`로 이메일을 읽는다.
 3. 반환값이 없거나 예상한 A가 아니면 등록하지 않는다.
-4. helper의 정상 종료 요청을 사용해 앱을 닫는다.
-5. 종료 제한 시간 동안 기다린다.
-6. 프로세스 게이트를 통과한 뒤 기본 `~/.codex`를 사용하는 Helper 소유 verifier에서 `account/read(refreshToken: true)`로 A 이메일을 다시 확인한다.
-7. verifier가 갱신한 최신 active auth를 Spike private store의 `profile-a` 파일에 durable하게 저장한다.
-8. JSON 가독성과 private-store round-trip 동일성을 확인한다.
-9. A의 기대 이메일과 등록 완료 상태를 registry에 원자적으로 기록하고 durability를 확인한다.
+4. 사용자가 `CAPTURE`로 등록과 공식 앱 정상 종료·재실행을 승인한다.
+5. helper의 정상 종료 요청을 사용해 앱을 닫는다.
+6. 1초 뒤 exact 앱 소유 잔존은 별도 승인 뒤 `SIGTERM` 한 번만 허용하고, 독립·새·분류 불명 프로세스는 자동 종료 없이 차단한다.
+7. 프로세스 게이트를 통과한 뒤 기본 `~/.codex`를 사용하는 Helper 소유 verifier에서 `account/read(refreshToken: true)`로 A 이메일을 다시 확인한다.
+8. verifier가 갱신한 최신 active auth를 Spike private store의 `profile-a` 파일에 durable하게 저장한다.
+9. JSON 가독성과 private-store round-trip 동일성을 확인한다.
+10. A의 기대 이메일과 등록 완료 상태를 registry에 원자적으로 기록하고 durability를 확인한 뒤 앱을 다시 연다.
 
 예정 인터페이스 예시:
 
@@ -158,16 +159,17 @@ JWT를 디코딩하거나 token field를 로그에 출력해 신원을 추정하
 초기 Spike에서는 별도 `CODEX_HOME` 기반 자동 로그인을 구현하지 않는다. A를 먼저 안전하게 보존한 후 공식 Codex 로그인 흐름으로 B를 로그인하고 캡처한다.
 
 1. `profile-a`가 완전하고 복구 가능함을 먼저 확인한다.
-2. Codex 앱과 독립 Codex 프로세스가 모두 종료된 상태를 확인한다.
-3. 사용자가 공식 interactive login 흐름으로 B에 로그인한다. 정확한 호출 방식은 당시 공식 앱/CLI 동작을 preflight한 뒤 사용한다.
-4. 로그인 프로세스가 완전히 종료된 후 기본 `~/.codex`를 사용하는 Helper 소유 verifier의 `account/read(refreshToken: true)`로 B 이메일을 확인한다.
-5. B 이메일이 A와 같으면 등록을 거부한다.
-6. active auth를 Spike private store의 `profile-b` 파일에 durable하게 저장하고 JSON 가독성·round-trip 동일성을 확인한다.
-7. 즉시 A 인증을 원자적으로 복구한다.
-8. 복구된 active auth를 격리 임시 홈에 복사하고 Helper 소유 verifier의 `account/read(refreshToken: false)`로 A 이메일인지 확인한다.
-9. registry의 active profile A를 durable하게 확인·기록하고 등록 journal을 durable delete한다.
-10. 위 정리가 끝난 후에만 공식 앱을 A로 재실행한다.
-11. A 복구까지 성공해야 B 등록을 완료로 기록한다.
+2. 독립 Codex CLI·IDE 작업을 종료한다.
+3. 사용자가 공식 앱의 interactive login 흐름으로 B에 로그인한다.
+4. 사용자가 `CAPTURE`로 등록과 공식 앱 정상 종료·A 복귀를 승인한다. helper는 A 등록과 같은 잔존 프로세스 경계를 적용한다.
+5. 기본 `~/.codex`를 사용하는 Helper 소유 verifier의 `account/read(refreshToken: true)`로 B 이메일을 확인한다.
+6. B 이메일이 A와 같으면 등록을 거부한다.
+7. active auth를 Spike private store의 `profile-b` 파일에 durable하게 저장하고 JSON 가독성·round-trip 동일성을 확인한다.
+8. 즉시 A 인증을 원자적으로 복구한다.
+9. 복구된 active auth를 격리 임시 홈에 복사하고 Helper 소유 verifier의 `account/read(refreshToken: false)`로 A 이메일인지 확인한다.
+10. registry의 active profile A를 durable하게 확인·기록하고 등록 journal을 durable delete한다.
+11. 위 정리가 끝난 후에만 공식 앱을 A로 재실행한다.
+12. A 복구까지 성공해야 B 등록을 완료로 기록한다.
 
 예정 인터페이스 예시:
 

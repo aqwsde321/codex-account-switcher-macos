@@ -83,6 +83,7 @@
 - Swift CLI Spike가 먼저, 메뉴바 앱은 나중
 - 신규 소형 Swift 프로젝트; Mobius 전체 포크 안 함
 - 앱 정상 종료 우선, 1초 뒤 exact 앱 소유 잔존은 별도 확인 후 `SIGTERM`; `SIGKILL` 없음
+- 현재 로그인 등록도 명시 확인 뒤 같은 종료 경계를 적용하고 성공 시 앱 재실행
 - 독립 CLI/app-server 자동 종료 없음; 발견 시 차단
 - 앱 실행 중 전환은 매번 사용자 확인
 - 전환은 `flock` + secret-free journal + atomic rename
@@ -167,7 +168,7 @@ Swift CLI Core의 비파괴 기반 구현은 저장소 루트에 있다. 빌드�
 
 1. 완료: SwiftPM Core/CLI/test harness
 2. 완료: credential/file/journal/lock, App Server, bundle/process, 상태 머신
-3. 완료: custom async harness의 fake fixture 128개 테스트와 `inspect`/`profiles list`/`profile capture`/`profile sync-active`/`switch`/`recovery status`/`recovery restore`
+3. 완료: custom async harness의 fake fixture 129개 테스트와 `inspect`/`profiles list`/`profile capture`/`profile sync-active`/`switch`/`recovery status`/`recovery restore`
 4. 완료: 공식 ChatGPT 앱의 OS signature와 고정 build 검증
 5. 완료: 최대 3개 registration coordinator, 추가 등록 후 기존 활성 프로필 자동 복귀, 외부 Terminal confirmation gate
 6. 개발 승인: 사용자 확인상 동일 task 기능 왕복 완료, `07_test_acceptance.md` §16 형식 증거는 릴리스 게이트로 유지

@@ -458,15 +458,18 @@ Spike에서 다음을 확인했다.
 
 ### 첫 프로필
 
+- 명시 확인 뒤 capture marker·credential·journal 생성 전에 공용 정상 종료·quiescence 경계 적용
+- 독립·새·분류 불명 프로세스는 signal 없이 차단
 - 현재 활성 auth를 격리 probe로 검증·refresh
 - 이메일 존재와 ChatGPT type 확인
 - Spike store/Keychain 저장
-- registry 생성, active 지정
+- registry 생성, active 지정, 공식 앱 재실행
 
 ### 추가 프로필
 
 - 등록 시작 전 활성 프로필 최신본 존재 확인
 - 사용자의 공식 로그인 후 미등록 이메일 감지
+- 명시 확인 뒤 capture marker·credential·journal 생성 전에 공용 정상 종료·quiescence 경계 적용
 - 자동 overwrite 금지
 - 명시적 등록 동작에서만 새 프로필 저장
 - 새 프로필을 잠시 active로 기록하되 capture의 동일 lock/journal을 유지한 채 `rollbackStarted`로 등록 전 활성 프로필을 복구·검증
@@ -540,6 +543,7 @@ ADR-027의 개발 승인에 따라 다음 최소 기능만 추가한다.
 - 비활성 카드 클릭 전환
 - 실행 중이면 항상 종료 확인
 - 정상 종료 뒤 exact 앱 소유 잔존은 native 비동기 2차 확인 뒤에만 `SIGTERM` 1회
+- 현재 로그인 등록은 별도 확인 뒤 같은 정상 종료 경계를 거쳐 성공 시 앱 재실행
 - 단계별 상태와 안전한 오류 표시
 - 이미 활성 카드 클릭 시 Codex 창 활성화
 - 재로그인 필요 표시

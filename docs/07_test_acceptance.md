@@ -169,7 +169,7 @@ Unit/Integration test는 실제 `~/.codex/auth.json`을 읽거나 쓰지 않는�
 | I-007 | target auth malformed/empty | active auth mutation 전 거부 | 예 |
 | I-008 | active auth가 symlink | STOP, target write 없음 | 예 |
 | I-009 | owner/mode 부적합 | STOP 또는 안전한 명시 복구; 묵시 진행 없음 | 예 |
-| I-010 | 정상 종료 1초 뒤 exact 앱 소유 잔존 | 별도 확인 후 승인 시 해당 PID만 `SIGTERM` 1회 | 예 |
+| I-010 | 전환·등록 정상 종료 1초 뒤 exact 앱 소유 잔존 | 별도 확인 후 승인 시 해당 PID만 `SIGTERM` 1회 | 예 |
 | I-011 | 독립 CLI PID 존재 | PID/cwd 안내, 자동 kill 없음, write 없음 | 예 |
 | I-012 | helper 소유 verifier만 존재 | verifier 정상 종료 확인 후 gate 통과 | 예 |
 | I-013 | current refresh 시작 | `refreshingCurrent` durable 후에만 기본 홈 Helper App Server `refreshToken: true` 호출 | 예 |
@@ -195,7 +195,7 @@ Unit/Integration test는 실제 `~/.codex/auth.json`을 읽거나 쓰지 않는�
 | I-033 | 성공 후 journal unlink 실패 | journal 보존, 다음 시작에서 `targetVerified` 재판정 | 예 |
 | I-034 | journal unlink 후 parent fsync 실패 | 완료로 단정하지 않고 recovery에서 registry/active 재검증 | 예 |
 | I-035 | 사용자가 종료 확인 취소 | auth mutation 0회, journal unlink+parent fsync 완료 | 예 |
-| I-036 | process gate 차단 | auth mutation 0회, journal durable delete, 독립 process 불변 | 예 |
+| I-036 | process gate 차단 | switch는 auth mutation 0회+journal durable delete; capture는 비동기 기존 credential 검증 뒤에도 재검사해 새 credential·marker·journal 0개, 독립 process 불변 | 예 |
 | I-037 | malformed/torn/unknown journal | 자동 삭제·복구 없이 STOP | 예 |
 | I-038 | 두 process가 같은 transaction 재개 | 단일 lock, 중복 rename/launch 없음 | 예 |
 | I-039 | 진단 error에 auth blob 포함 | persisted log에 민감값 0건 | 예 |
@@ -223,7 +223,7 @@ Unit/Integration test는 실제 `~/.codex/auth.json`을 읽거나 쓰지 않는�
 | I-061 | `refreshingCurrent` 복구 실패 | `rollbackStarted→rollbackFailed` 내구 기록, 다음 자동 복구는 terminal STOP | 예 |
 | I-062 | 번들 Keychain host smoke | exact ad-hoc bundled executable이 random service/profile의 synthetic blob을 create→read→update→read→delete→notFound; cleanup 성공, 제품 service·실제 auth 접근 0회 | 예 |
 
-I-062는 custom debug harness 128개와 별도의 host integration smoke다. 현재 build bundle과 `~/Applications` 설치본에서 각각 통과했지만, ad-hoc 재빌드 뒤 기존 item ACL·잠금·접근 거부·실계정 제품 flow는 입증하지 않는다.
+I-062는 custom debug harness 129개와 별도의 host integration smoke다. 현재 build bundle과 `~/Applications` 설치본에서 각각 통과했지만, ad-hoc 재빌드 뒤 기존 item ACL·잠금·접근 거부·실계정 제품 flow는 입증하지 않는다.
 
 ## 7. 공식 앱 Black-box 매트릭스
 
@@ -407,8 +407,8 @@ current refresh crash window에서는 refresh 실행 여부를 phase만으로 �
 
 | ID | 시나리오 | PASS 기준 |
 |---|---|---|
-| A-001 | 최초 A 등록 | 기본 홈 true refresh·이메일 검증 후 Spike private-store capture와 registry durable write |
-| A-002 | B 등록 | B가 A와 다름, Spike private-store capture 후 A 자동 복귀 |
+| A-001 | 실행 중 최초 A 등록 | 명시 확인→정상 종료→기본 홈 true refresh·이메일 검증→durable capture→A로 앱 재실행 |
+| A-002 | 실행 중 B 등록 | 명시 확인→정상 종료→exact 잔존 승인·`SIGTERM` 1회→B capture→A 자동 복귀·재실행 |
 | A-003 | B 등록 취소 | A profile/active auth 유지 |
 | A-004 | B 등록 실패 | A 자동 롤백 또는 명시 STOP |
 | A-005 | 기존 profile ID 중복 | 덮어쓰기 전 명시 확인 또는 거부 |

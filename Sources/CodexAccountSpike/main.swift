@@ -18,7 +18,7 @@ struct CodexAccountSpikeCLI {
             credentialStore: FileCredentialStore(rootURL: storeURL),
             confirmAppOwnedTermination: { count in
                 guard isatty(STDIN_FILENO) == 1 else { return false }
-                let prompt = "정상 종료 후 ChatGPT 앱 소유 프로세스 \(count)개가 남았습니다. SIGTERM으로 종료하고 전환을 계속하려면 TERMINATE 입력: "
+                let prompt = "정상 종료 후 ChatGPT 앱 소유 프로세스 \(count)개가 남았습니다. SIGTERM으로 종료하고 인증 작업을 계속하려면 TERMINATE 입력: "
                 if let data = prompt.data(using: .utf8) {
                     try? FileHandle.standardError.write(contentsOf: data)
                 }
@@ -55,7 +55,7 @@ struct CodexAccountSpikeCLI {
         } else if arguments.count == 4,
                   arguments[0...2] == ["profile", "capture", "--label"],
                   isatty(STDIN_FILENO) == 1 {
-            let prompt = "현재 인증을 갱신해 Spike private store에 저장합니다. 추가 프로필이면 저장 후 등록 전 활성 프로필로 복귀하고 ChatGPT 앱을 실행합니다. 최대 3개까지 등록할 수 있습니다. 계속하려면 CAPTURE 입력: "
+            let prompt = "ChatGPT 앱을 정상 종료한 뒤 현재 인증을 갱신해 Spike private store에 저장하고 앱을 다시 엽니다. 독립 Codex 프로세스는 자동 종료하지 않습니다. 추가 프로필이면 등록 전 활성 프로필로 복귀합니다. 최대 3개까지 등록할 수 있습니다. 계속하려면 CAPTURE 입력: "
             if let data = prompt.data(using: .utf8) {
                 try? FileHandle.standardError.write(contentsOf: data)
             }
