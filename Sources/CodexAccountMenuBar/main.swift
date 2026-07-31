@@ -8,6 +8,7 @@ private let productCredentialService = "CodexAccountSwitcher.credentials.v1"
 
 @main
 struct CodexAccountMenuBarApp: App {
+    @NSApplicationDelegateAdaptor(MenuBarAppDelegate.self) private var appDelegate
     @StateObject private var model: MenuBarViewModel
 
     init() {
@@ -98,6 +99,12 @@ struct CodexAccountMenuBarApp: App {
             AccountMenuView(model: model)
         }
         .menuBarExtraStyle(.window)
+    }
+}
+
+private final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        NSApp.setActivationPolicy(.accessory)
     }
 }
 
