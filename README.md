@@ -35,10 +35,11 @@
 - 메뉴바 전환의 durable journal phase 기반 실시간 진행 문구와 완료·실패 후 상태 정리
 - 메뉴바 `needsRelogin` 비활성 카드의 exact-ID 확인, 검증된 저장본 갱신, 대상 즉시 활성화, 불확실 상태 재시도 차단
 - 메뉴바 상태 조회 전 미완료 journal 자동 복구, 불확실 상태 STOP, 복구 중 앱 자동 실행 금지
+- 메뉴바의 native 비동기 잔존 앱 프로세스 2차 확인, 취소 기본, 종료 전 exact snapshot 대상에만 `SIGTERM` 1회
 
 아직 구현·노출하지 않음:
 
-- 잔존 앱 프로세스 2차 종료 확인과 서명된 앱의 실제 Keychain 검증
+- 서명된 앱의 실제 Keychain CRUD·접근 정책 검증
 - 5시간·주간 사용량 표시
 
 capture 명령은 앱을 자동 종료하지 않는다. 첫 capture는 현재 인증을 갱신·저장한다. 추가 capture는 새 계정을 저장한 뒤 `~/.codex/auth.json`을 등록 전 활성 프로필로 원자 복구하고 ChatGPT 앱을 해당 계정으로 다시 실행한다. 모든 auth 변경은 외부 Terminal의 대화형 확인과 process gate 뒤에만 수행한다.

@@ -1,6 +1,6 @@
 # 기술 설계
 
-- 상태: Swift CLI Spike 구현·실계정 기능 검증 완료, 메뉴바 재로그인·시작 자동 복구 slice 완료
+- 상태: Swift CLI Spike 구현·실계정 기능 검증 완료, 메뉴바 재로그인·시작 자동 복구·잔존 프로세스 2차 확인 slice 완료
 - 기준일: 2026-07-31
 - 구현 순서: 검증된 Core 재사용 → SwiftUI 메뉴바 앱 → 엄격한 릴리스 인수
 
@@ -530,6 +530,7 @@ ADR-027의 개발 승인에 따라 다음 최소 기능만 추가한다.
 - 활성 이메일/레이블 표시
 - 비활성 카드 클릭 전환
 - 실행 중이면 항상 종료 확인
+- 정상 종료 뒤 exact 앱 소유 잔존은 native 비동기 2차 확인 뒤에만 `SIGTERM` 1회
 - 단계별 상태와 안전한 오류 표시
 - 이미 활성 카드 클릭 시 Codex 창 활성화
 - 재로그인 필요 표시
@@ -542,6 +543,8 @@ ADR-027의 개발 승인에 따라 다음 최소 기능만 추가한다.
 재로그인은 일반 switch와 다른 최소 경로다. 사용자가 공식 앱에서 inactive B 로그인을 끝내고 모든 관련 프로세스를 종료한 상태에서만 시작한다. Core는 첫 verifier 전에 `validatingTarget`을 기록하고 공용 auth의 exact B identity와 refresh 결과의 동일 blob을 검증한 뒤 B Keychain item을 교체한다. registry는 A active를 유지한 채 B marker를 먼저 해제하고, 내부에서만 허용한 `validatingTarget → targetVerified` 전이 뒤 active ID를 B로 커밋한다. 이 순서는 `targetVerified` 이후 기존 forward recovery가 marker 없는 B를 완료할 수 있게 한다. 성공 뒤 앱 launch는 수행하지 않는다.
 
 메뉴바는 재로그인 확인을 일반 전환 pending과 분리하고 `presenting` snapshot의 opaque ID를 Core에 한 번만 전달한다. 호출 직전과 반환·throw 뒤 profile/recovery를 다시 읽는다. `recovery=none`, B 단일 active, B `needsRelogin=false`일 때만 성공이다. 안전 rollback 뒤 Core throw는 수동 재시도를 허용하지만 pending·blocked, wrong-ID outcome, 반환 뒤 상태 불일치는 STOP이다.
+
+잔존 프로세스 2차 확인은 기존 Core confirmation 경계를 async로 연결한다. 취소가 기본 동작이며, 승인해도 정상 종료 요청 전에 캡처한 PID·시작 시각·실행 경로가 signal 직전까지 모두 같은 앱 소유 대상에만 `SIGTERM`을 한 번 보낸다. 새 process, identity가 바뀐 process, 독립 CLI, 분류 불명 process는 확인 후보로 넓히지 않고 STOP한다.
 
 후속 범위:
 
@@ -583,6 +586,7 @@ Core protocol로 다음 실패를 결정적으로 주입할 수 있어야 한다
 
 - 앱 종료 거부/timeout
 - 잔존 process
+- 메뉴바 잔존 process 2차 확인의 비동기 대기·거부와 새 process 무신호 차단
 - 독립 CLI 발견
 - 대상 refresh 실패
 - 대상 `false` identity 성공 뒤 `true` refresh의 이메일 변경

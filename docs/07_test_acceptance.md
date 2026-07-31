@@ -152,6 +152,7 @@ Unit/Integration test는 실제 `~/.codex/auth.json`을 읽거나 쓰지 않는�
 | U-046 | 재로그인 Core throw | durable B commit은 성공 재확인, A 안전 rollback은 수동 재시도, pending은 STOP·재호출 0회 | 예 |
 | U-047 | transient 조회 실패와 wrong-ID outcome | catch 재조회 뒤에도 payload exact ID 검증, 불일치 blocked·성공 표시 없음 | 예 |
 | U-048 | 메뉴바 시작 자동 복구 순서 | recovery 시도→profile 조회→read-only status 조회, stopped/throw도 상태 조회 뒤 fail-closed, 앱 launch 0회 | 예 |
+| U-049 | 메뉴바 잔존 프로세스 2차 확인 | native async 응답을 기다리고 취소는 signal 0회; 종료 전 exact 후보만 승인하며 새·독립 process는 확인 callback·signal 0회 | 예 |
 
 ## 6. Integration 테스트 매트릭스
 

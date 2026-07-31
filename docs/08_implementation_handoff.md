@@ -1,6 +1,6 @@
 # 구현 인수인계
 
-- 상태: CLI Spike 검증 완료, 메뉴바 재로그인·시작 자동 복구 slice 완료
+- 상태: CLI Spike 검증 완료, 메뉴바 재로그인·시작 자동 복구·잔존 프로세스 2차 확인 slice 완료
 - 기준일: 2026-07-31
 - 코드: 저장소 루트 `.`
 - 중요: 외부 Terminal에서 A↔B 기능 왕복 3회, 수동 A 복구 2회, B-011 자동 롤백을 완료했다. B-010 형식 증거는 보존하지 않았으며 ADR-027에 따라 개발에는 수용하고 MVP 완료·배포 전 게이트로 유지한다.
@@ -21,8 +21,8 @@
 
 ```text
 `docs/00_README.md`부터 문서 세트를 읽고,
-ADR-027·ADR-029와 기존 안전 결정을 유지한 채 Step 9 메뉴바 MVP의 남은 2차 종료 확인 UI를 구현해줘.
-검증된 CodexAccountCore를 재사용하고 먼저 UI adapter 성공 기준을 대조해.
+ADR-027·ADR-029와 기존 안전 결정을 유지한 채 Step 9 메뉴바 MVP의 서명된 앱 실제 Keychain 검증과 잔존 프로세스 2차 확인 Black-box 검증을 진행해줘.
+검증된 CodexAccountCore를 재사용하고 먼저 배포 검증 성공 기준을 대조해.
 실제 auth.json 교체와 Codex 앱 종료는 외부 Terminal 실행 게이트 전까지 하지 마.
 ```
 
@@ -55,6 +55,7 @@ ADR-027·ADR-029와 기존 안전 결정을 유지한 채 Step 9 메뉴바 MVP�
 - durable journal 성공 직후 `SwitchPhase` callback과 메뉴바 실시간 전환 진행 문구 구현
 - inactive `needsRelogin` exact-ID 확인, B credential 갱신·marker 해제·B 활성화, 불확실 결과 재조정, 앱 수동 실행 안내 구현
 - 메뉴바 상태 조회 전 production startup recovery, STOP/terminal guard, 앱 자동 실행 금지 구현
+- 메뉴바 native 비동기 잔존 앱 프로세스 2차 확인, 취소 기본, 종료 전 exact snapshot 대상의 `SIGTERM` 1회 제한 구현
 - fake credential만 사용하는 128개 debug 테스트 통과
 - 실제 read-only inspect에서 사용자 auth와 helper store 무변경 확인
 - `rollbackFailed` 수동 복구 CLI와 실환경 A 복구 2회 완료
@@ -63,7 +64,8 @@ ADR-027·ADR-029와 기존 안전 결정을 유지한 채 Step 9 메뉴바 MVP�
 미완료:
 
 - 실제 재부팅 뒤 production startup recovery Black-box 검증
-- 잔존 앱 프로세스 2차 종료 확인과 서명된 앱의 실제 Keychain CRUD·접근 정책 검증
+- 실제 잔존 앱 프로세스 2차 확인 Black-box 검증
+- 서명된 앱의 실제 Keychain CRUD·접근 정책 검증
 - B-015~B-017 세 프로필 전환·재로그인 실계정 Black-box 검증
 - MVP 완료·배포 전 `07_test_acceptance.md` §16 형식의 동일 task 왕복 증거 보존
 
@@ -326,7 +328,7 @@ cd codex-account-switcher-spike
 
 ADR-027의 개발 승인에 따라 시작한다. B-010 정식 증거 공백은 릴리스 게이트로 남긴다.
 
-현재 1~3, 4의 실제 provider 주입·등록·활성 인증 동기화·durable phase 진행 표시·inactive target 재로그인, 5의 recovery mutation gate·시작 자동 복구·상세 표시·exact transaction/previous-profile 수동 복구까지 완료됐다. 잔존 앱 프로세스 2차 종료 확인 UI와 실제 서명·Keychain 검증이 다음 작업이다.
+현재 1~6과 실제 provider 주입·등록·활성 인증 동기화·durable phase 진행 표시·inactive target 재로그인, recovery mutation gate·시작 자동 복구·상세 표시·exact transaction/previous-profile 수동 복구까지 완료됐다. 실제 서명·Keychain 검증과 잔존 프로세스 2차 확인 Black-box 검증이 다음 작업이다.
 
 구현 순서:
 
@@ -335,7 +337,7 @@ ADR-027의 개발 승인에 따라 시작한다. B-010 정식 증거 공백은 �
 3. Core의 credential backend 경계를 연결해 CLI는 기존 private file store, 제품은 Keychain을 사용하게 한다. plaintext fallback은 금지한다.
 4. view model은 문자열 CLI 출력이 아닌 typed Core API를 호출하고 quit 확인·단계·안전한 오류를 연결한다. UI에 전환 로직을 복제하지 않는다.
 5. 완료: 상태 조회 전 journal 자동 복구와 `needsRelogin` 표시를 연결한다.
-6. 다음: 잔존 앱 프로세스 2차 종료 확인 UI를 연결한다.
+6. 완료: 잔존 앱 프로세스 native 비동기 2차 확인 UI를 연결한다.
 
 첫 구현 slice의 성공 기준:
 
@@ -361,9 +363,18 @@ provider wiring slice의 완료 기준:
 - 제품 metadata는 `~/Library/Application Support/CodexAccountSwitcher`, Keychain service는 `CodexAccountSwitcher.credentials.v1`을 사용한다.
 - Spike private store의 registry·평문 credential을 자동 migration하거나 읽지 않는다.
 - Keychain 구성 실패는 file fallback 없이 계정 로드 실패로 닫힌다.
-- 잔존 앱 프로세스의 `SIGTERM`은 2차 확인 UI 전까지 승인하지 않고 안전 차단한다.
+- 잔존 앱 프로세스의 `SIGTERM`은 native 2차 확인 승인 전까지 보내지 않는다.
 - 새 제품 store는 처음에 빈 목록이며 명시적 등록 UI로만 채운다.
 - 테스트는 실제 홈·Keychain·공식 앱을 건드리지 않으며 executable build로 wiring을 검증한다.
+
+menu bar residual process confirmation slice의 완료 기준:
+
+- Core transaction은 native async 확인 응답을 기다리며 취소·dismiss는 `false`다.
+- 확인 UI는 취소를 기본 동작으로 두고 파괴적 `SIGTERM 전송` action을 분리한다.
+- 승인 대상은 정상 종료 요청 전 캡처한 PID·시작 시각·실행 경로가 signal 직전에도 모두 같은 앱 소유 process뿐이다.
+- 새 process, identity가 바뀐 process, 독립 CLI, 분류 불명 process는 확인 후보로 넓히지 않고 signal 없이 STOP한다.
+- 자동 `SIGKILL`과 force termination은 없다.
+- fake process fixture와 executable build만 검증했으며 실제 잔존 ChatGPT process와 native dialog 조작은 Black-box에 남긴다.
 
 registration slice의 완료 기준:
 

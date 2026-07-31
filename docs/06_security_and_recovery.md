@@ -1,6 +1,6 @@
 # 보안·복구 설계
 
-- 상태: Swift CLI Spike·manual recovery typed outcome·durable finalization gate·Keychain backend·메뉴바 provider/등록/활성 인증 sync/수동 복구/전환 진행/재로그인 완료, 실 Keychain·배포 보안 검증 전
+- 상태: Swift CLI Spike·manual recovery typed outcome·durable finalization gate·Keychain backend·메뉴바 provider/등록/활성 인증 sync/수동 복구/전환 진행/재로그인/잔존 프로세스 2차 확인 완료, 실 Keychain·배포 보안 검증 전
 - 기준일: 2026-07-31
 - 적용 대상: Swift CLI Spike와 후속 macOS 메뉴바 앱
 
@@ -271,7 +271,7 @@ preparing
 1. 원래 오류를 안전한 오류 코드로 보존한다.
 2. 다음 rollback side effect 전에 journal을 `rollbackStarted`로 내구 기록한다.
 3. 대상 앱을 실행했다면 정상 종료한다.
-4. 종료 대기 중 새로 확인한 exact 앱 소유 프로세스는 별도 승인 후 `SIGTERM` 후보에 포함한다. 독립·분류 불명 프로세스나 종료 실패가 있으면 `rollbackFailed`를 내구 기록하고 파일을 쓰지 않은 채 정지한다.
+4. 정상 종료 요청 전 snapshot에 없던 새 process나 identity가 바뀐 process는 앱 소유로 보여도 `SIGTERM` 후보에 추가하지 않는다. 독립·분류 불명 process와 함께 승인·signal 없이 `rollbackFailed`를 내구 기록하고 파일을 쓰지 않은 채 정지한다.
 5. 이전 프로필의 최신 configured credential-store 저장본을 가져온다.
 6. 이전 blob 자체를 격리 홈의 App Server로 검증한다.
 7. 이메일 일치 시 공용 `auth.json`에 내구 원자 복구한다.
