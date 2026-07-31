@@ -47,15 +47,16 @@ ADR-027과 기존 안전 결정을 유지한 채 Step 9 메뉴바 MVP를 구현�
 - `CodexAccountMenuBar` target, fake 3계정 카드와 active/inactive 선택 모델 구현
 - credential backend 경계, CLI private file store 명시 연결, Keychain generic-password CRUD와 plaintext fallback 금지 구현
 - 메뉴바 앱의 fake provider 제거, 실제 `LocalCLIDataProvider`·Keychain 주입, Spike와 분리된 제품 metadata 경로 연결
-- fake credential만 사용하는 88개 debug 테스트 통과
+- 메뉴바 현재 로그인 등록, 추가 등록 상태 재조회, startup/실패 recovery gate 구현
+- fake credential만 사용하는 89개 debug 테스트 통과
 - 실제 read-only inspect에서 사용자 auth와 helper store 무변경 확인
 - `rollbackFailed` 수동 복구 CLI와 실환경 A 복구 2회 완료
 - debug 전용 B-011 실패 주입에서 source 자동 롤백과 최종 A 복귀 확인
 
 미완료:
 
-- 메뉴바 프로필 등록·동기화
-- 진행·복구·재로그인 상태 UI
+- 메뉴바 활성 인증 동기화
+- 상세 진행 단계·수동 복구·재로그인 동작 UI
 - 잔존 앱 프로세스 2차 종료 확인과 서명된 앱의 실제 Keychain CRUD·접근 정책 검증
 - MVP 완료·배포 전 `07_test_acceptance.md` §16 형식의 동일 task 왕복 증거 보존
 
@@ -318,7 +319,7 @@ cd codex-account-switcher-spike
 
 ADR-027의 개발 승인에 따라 시작한다. B-010 정식 증거 공백은 릴리스 게이트로 남긴다.
 
-현재 1~3과 4의 실제 provider 주입까지 완료됐다. 제품 store는 처음에는 비어 있으므로 프로필 등록, 4의 확인·단계·안전 오류, 5의 복구 상태 연결이 다음 작업이다.
+현재 1~3, 4의 실제 provider 주입과 등록, 5의 recovery mutation gate까지 완료됐다. 4의 상세 확인·단계·안전 오류와 5의 수동 복구·재로그인 동작 연결이 다음 작업이다.
 
 구현 순서:
 
@@ -353,8 +354,19 @@ provider wiring slice의 완료 기준:
 - Spike private store의 registry·평문 credential을 자동 migration하거나 읽지 않는다.
 - Keychain 구성 실패는 file fallback 없이 계정 로드 실패로 닫힌다.
 - 잔존 앱 프로세스의 `SIGTERM`은 2차 확인 UI 전까지 승인하지 않고 안전 차단한다.
-- 새 제품 store에는 아직 프로필이 없으므로 최초 등록 UI가 연결되기 전 화면은 빈 목록이다.
+- 새 제품 store는 처음에 빈 목록이며 명시적 등록 UI로만 채운다.
 - 테스트는 실제 홈·Keychain·공식 앱을 건드리지 않으며 executable build로 wiring을 검증한다.
+
+registration slice의 완료 기준:
+
+- 사용자가 라벨을 입력하고 `현재 로그인 등록`을 눌렀을 때만 Core capture를 호출한다.
+- label은 UI에서 정규화하지 않으며 blank·64자 초과는 버튼에서, control 문자·중복·네 번째 등록은 Core에서 거부한다.
+- 첫 등록은 새 프로필을 active로, 추가 등록은 등록 전 active를 유지한 상태로 목록을 다시 읽는다.
+- 등록 전 공식 앱과 독립 Codex 프로세스를 사용자가 종료해야 함을 표시한다. 자동 종료는 하지 않는다.
+- 시작 시와 mutation 실패 뒤 recovery status를 조회한다. pending/blocked면 등록·전환을 중단하고 STOP 오류를 표시한다.
+- capture가 durable commit 뒤 실패해도 profile 목록을 다시 읽어 중복 재시도를 막는다.
+- 추가 등록 commit 뒤 앱 launch만 실패하고 recovery가 없으면 새 profile ID를 등록 완료로 판정하고 폼을 닫되 launch 실패를 알린다.
+- 테스트는 fake provider만 사용하며 실제 홈·Keychain·공식 앱을 건드리지 않는다.
 
 ## 8. 실제 switch를 이 task 안에서 실행하면 안 되는 이유
 

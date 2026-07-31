@@ -133,6 +133,9 @@ Unit/Integration test는 실제 `~/.codex/auth.json`을 읽거나 쓰지 않는�
 | U-027 | rollback phase | `rollbackStarted`, 실패 시 `rollbackFailed`만 persisted | 예 |
 | U-028 | malformed/torn journal decode | 자동 삭제·추정 없이 STOP | 예 |
 | U-029 | 네 번째 profile 등록 | 상한 오류, 기존 model 손상 없음 | 예 |
+| U-030 | 메뉴바 현재 로그인 등록 | label 원문으로 Core capture 1회, 완료 뒤 profile·active 상태 재조회 | 예 |
+| U-031 | 메뉴바 등록 partial failure와 pending recovery | durable profile 재조회, 등록·전환 추가 mutation 0회 | 예 |
+| U-032 | 추가 등록 commit 뒤 앱 launch 실패, recovery 없음 | 새 profile 재조회, 등록 완료·launch 실패 안내, 등록 폼 닫힘 | 예 |
 
 ## 6. Integration 테스트 매트릭스
 

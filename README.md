@@ -27,10 +27,11 @@
 - fake 3계정 카드와 확인 흐름을 가진 `MenuBarExtra` UI 프로토타입
 - CLI private file store와 제품 Keychain을 분리한 credential backend 경계, generic-password CRUD와 plaintext fallback 금지
 - `MenuBarExtra`의 실제 `LocalCLIDataProvider`·Keychain 주입과 Spike에서 분리된 제품 metadata store
+- 메뉴바의 명시적 현재 로그인 등록, 추가 등록 후 기존 active 유지, recovery 상태의 mutation 차단
 
 아직 구현·노출하지 않음:
 
-- 메뉴바 프로필 등록·동기화와 진행·복구·재로그인 상태
+- 메뉴바 활성 인증 동기화와 상세 단계·수동 복구·재로그인 동작
 - 잔존 앱 프로세스 2차 종료 확인과 서명된 앱의 실제 Keychain 검증
 - 5시간·주간 사용량 표시
 

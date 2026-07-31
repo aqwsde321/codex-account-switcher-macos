@@ -30,6 +30,18 @@ struct CodexAccountMenuBarApp: App {
                     }
                     return try await provider.profiles()
                 },
+                loadRecoveryStatus: {
+                    guard let provider else {
+                        throw MenuBarStartupFailure.credentialStoreConfiguration
+                    }
+                    return try await provider.recoveryStatus()
+                },
+                captureProfile: {
+                    guard let provider else {
+                        throw MenuBarStartupFailure.credentialStoreConfiguration
+                    }
+                    return try await provider.captureProfile(label: $0)
+                },
                 switchProfile: {
                     guard let provider else {
                         throw MenuBarStartupFailure.credentialStoreConfiguration
@@ -50,6 +62,8 @@ struct CodexAccountMenuBarApp: App {
 
 private struct AccountMenuView: View {
     @ObservedObject var model: MenuBarViewModel
+    @State private var isRegistering = false
+    @State private var registrationLabel = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -74,8 +88,49 @@ private struct AccountMenuView: View {
                         ProfileCard(profile: profile)
                     }
                     .buttonStyle(.plain)
-                    .disabled(model.isWorking || (profile.needsRelogin && !profile.active))
+                    .disabled(
+                        model.isWorking
+                            || model.recoveryRequired
+                            || (profile.needsRelogin && !profile.active)
+                    )
                 }
+            }
+
+            if isRegistering {
+                VStack(alignment: .leading, spacing: 8) {
+                    TextField("계정 이름", text: $registrationLabel)
+                    Text(registrationHelp)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    HStack {
+                        Button("취소") {
+                            registrationLabel = ""
+                            isRegistering = false
+                        }
+                        .disabled(model.isWorking)
+                        Spacer()
+                        Button("현재 로그인 등록") {
+                            Task {
+                                if await model.register(label: registrationLabel)
+                                    || model.recoveryRequired {
+                                    registrationLabel = ""
+                                    isRegistering = false
+                                }
+                            }
+                        }
+                        .disabled(
+                            model.isWorking
+                                || model.recoveryRequired
+                                || !registrationLabelIsValid
+                        )
+                    }
+                }
+            } else if !model.recoveryRequired,
+                      model.profiles.count < ProfileRegistry.maximumProfileCount {
+                Button("계정 등록") {
+                    isRegistering = true
+                }
+                .disabled(model.isWorking)
             }
 
             if let errorMessage = model.errorMessage {
@@ -119,6 +174,18 @@ private struct AccountMenuView: View {
                 }
             }
         )
+    }
+
+    private var registrationLabelIsValid: Bool {
+        !registrationLabel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && registrationLabel.unicodeScalars.count <= 64
+    }
+
+    private var registrationHelp: String {
+        if model.profiles.isEmpty {
+            return "공식 앱과 독립 Codex 프로세스를 종료한 뒤 현재 로그인을 저장합니다."
+        }
+        return "현재 로그인을 저장한 뒤 기존 활성 계정으로 자동 복귀하고 앱을 다시 엽니다. 먼저 공식 앱과 독립 Codex 프로세스를 종료하세요."
     }
 }
 

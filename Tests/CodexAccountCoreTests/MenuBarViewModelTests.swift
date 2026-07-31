@@ -9,6 +9,8 @@ func menuBarViewModelTests() -> [TestCase] {
             let model = await MainActor.run {
                 MenuBarViewModel(
                     loadProfiles: { await provider.profiles() },
+                    loadRecoveryStatus: { await provider.recoveryStatus() },
+                    captureProfile: { try await provider.captureProfile(label: $0) },
                     switchProfile: { try await provider.switchProfile(target: $0) }
                 )
             }
@@ -59,6 +61,8 @@ func menuBarViewModelTests() -> [TestCase] {
             let closedModel = await MainActor.run {
                 MenuBarViewModel(
                     loadProfiles: { await closedProvider.profiles() },
+                    loadRecoveryStatus: { await closedProvider.recoveryStatus() },
+                    captureProfile: { try await closedProvider.captureProfile(label: $0) },
                     switchProfile: { try await closedProvider.switchProfile(target: $0) }
                 )
             }
@@ -72,23 +76,160 @@ func menuBarViewModelTests() -> [TestCase] {
             try expect(closedEvents == ["verify", "launch"], "closed active selection did not verify then launch")
             try expect(closedMutations == 0, "closed active selection mutated account state")
         },
+        TestCase("MenuBarViewModel registers the current login and reloads profiles") {
+            let provider = MenuBarProviderSpy(profiles: [])
+            let model = await MainActor.run {
+                MenuBarViewModel(
+                    loadProfiles: { await provider.profiles() },
+                    loadRecoveryStatus: { await provider.recoveryStatus() },
+                    captureProfile: { try await provider.captureProfile(label: $0) },
+                    switchProfile: { try await provider.switchProfile(target: $0) }
+                )
+            }
+
+            await model.load()
+            let registered = await model.register(label: "개인")
+            let labels = await provider.capturedLabels
+            let profiles = await MainActor.run { model.profiles }
+            let isWorking = await MainActor.run { model.isWorking }
+            let errorMessage = await MainActor.run { model.errorMessage }
+
+            try expect(registered, "menu bar registration reported failure")
+            try expect(labels == ["개인"], "menu bar changed the registration label")
+            try expect(profiles.count == 1 && profiles[0].active, "registered profile was not reloaded as active")
+            try expect(!isWorking, "menu bar remained busy after registration")
+            try expect(errorMessage == nil, "successful registration left an error")
+
+            let additionalRegistered = await model.register(label: "회사")
+            let profilesAfterAdditional = await MainActor.run { model.profiles }
+            let labelsAfterAdditional = await provider.capturedLabels
+            try expect(additionalRegistered, "additional menu bar registration reported failure")
+            try expect(labelsAfterAdditional == ["개인", "회사"], "additional registration label changed")
+            try expect(
+                profilesAfterAdditional.count == 2
+                    && profilesAfterAdditional[0].active
+                    && !profilesAfterAdditional[1].active,
+                "additional registration changed the existing active profile"
+            )
+
+            let launchFailureProvider = MenuBarProviderSpy(
+                profiles: [menuBarProfiles()[0]],
+                captureFailureAfterMutation: true,
+                captureRecoveryStatusAfterFailure: .none
+            )
+            let launchFailureModel = await MainActor.run {
+                MenuBarViewModel(
+                    loadProfiles: { await launchFailureProvider.profiles() },
+                    loadRecoveryStatus: { await launchFailureProvider.recoveryStatus() },
+                    captureProfile: { try await launchFailureProvider.captureProfile(label: $0) },
+                    switchProfile: { try await launchFailureProvider.switchProfile(target: $0) }
+                )
+            }
+            await launchFailureModel.load()
+            let committedDespiteLaunchFailure = await launchFailureModel.register(label: "회사")
+            let launchFailureProfiles = await MainActor.run { launchFailureModel.profiles }
+            let launchFailureMessage = await MainActor.run { launchFailureModel.errorMessage }
+            try expect(committedDespiteLaunchFailure, "durably committed registration allowed a duplicate retry")
+            try expect(launchFailureProfiles.count == 2, "committed profile was not reloaded after launch failure")
+            try expect(
+                launchFailureMessage == "계정은 등록했지만 Codex 앱을 다시 열지 못했습니다.",
+                "post-commit launch failure was not distinguished from registration failure"
+            )
+
+            let partialFailureProvider = MenuBarProviderSpy(
+                profiles: [],
+                captureFailureAfterMutation: true
+            )
+            let failureModel = await MainActor.run {
+                MenuBarViewModel(
+                    loadProfiles: { await partialFailureProvider.profiles() },
+                    loadRecoveryStatus: { await partialFailureProvider.recoveryStatus() },
+                    captureProfile: { try await partialFailureProvider.captureProfile(label: $0) },
+                    switchProfile: { try await partialFailureProvider.switchProfile(target: $0) }
+                )
+            }
+            await failureModel.load()
+            let failed = await failureModel.register(label: "회사")
+            let failureMessage = await MainActor.run { failureModel.errorMessage }
+            let profilesAfterFailure = await MainActor.run { failureModel.profiles }
+            let isWorkingAfterFailure = await MainActor.run { failureModel.isWorking }
+            try expect(!failed, "failed registration reported success")
+            try expect(
+                failureMessage == "복구가 필요합니다. 계정 작업을 중단했습니다.",
+                "registration recovery error was not safe"
+            )
+            try expect(
+                profilesAfterFailure.count == 1,
+                "partial registration failure did not reload durable profiles"
+            )
+            try expect(!isWorkingAfterFailure, "menu bar remained busy after registration failure")
+
+            _ = await failureModel.register(label: "재시도")
+            if let partiallyRegistered = profilesAfterFailure.first {
+                await failureModel.select(partiallyRegistered)
+            }
+            let labelsAfterBlockedRetry = await partialFailureProvider.capturedLabels
+            let targetsAfterBlockedRetry = await partialFailureProvider.targets
+            try expect(labelsAfterBlockedRetry == ["회사"], "recovery gate retried registration")
+            try expect(targetsAfterBlockedRetry.isEmpty, "recovery gate allowed profile selection")
+        },
     ]
 }
 
 private actor MenuBarProviderSpy {
     private var storedProfiles: [ProfileListItem]
     private let applicationIsRunning: Bool
+    private let captureFailureAfterMutation: Bool
+    private let captureRecoveryStatusAfterFailure: RecoveryCLIStatus
+    private var storedRecoveryStatus: RecoveryCLIStatus
     private(set) var targets = [String]()
     private(set) var events = [String]()
+    private(set) var capturedLabels = [String]()
     private(set) var mutationCount = 0
 
-    init(profiles: [ProfileListItem], applicationIsRunning: Bool = true) {
+    init(
+        profiles: [ProfileListItem],
+        applicationIsRunning: Bool = true,
+        captureFailureAfterMutation: Bool = false,
+        captureRecoveryStatusAfterFailure: RecoveryCLIStatus = .pending(
+            transactionID: "00000000-0000-0000-0000-000000000001",
+            phase: .rollbackFailed
+        ),
+        recoveryStatus: RecoveryCLIStatus = .none
+    ) {
         storedProfiles = profiles
         self.applicationIsRunning = applicationIsRunning
+        self.captureFailureAfterMutation = captureFailureAfterMutation
+        self.captureRecoveryStatusAfterFailure = captureRecoveryStatusAfterFailure
+        storedRecoveryStatus = recoveryStatus
     }
 
     func profiles() -> [ProfileListItem] {
         storedProfiles
+    }
+
+    func recoveryStatus() -> RecoveryCLIStatus {
+        storedRecoveryStatus
+    }
+
+    func captureProfile(label: String) throws -> ProfileListItem {
+        guard storedProfiles.count < ProfileRegistry.maximumProfileCount else {
+            throw MenuBarProviderSpyFailure.captureFailed
+        }
+        capturedLabels.append(label)
+        let profile = ProfileListItem(
+            id: ProfileID(UUID()),
+            label: label,
+            email: "captured@example.invalid",
+            active: storedProfiles.isEmpty,
+            needsRelogin: false
+        )
+        storedProfiles.append(profile)
+        if captureFailureAfterMutation {
+            storedRecoveryStatus = captureRecoveryStatusAfterFailure
+            throw MenuBarProviderSpyFailure.captureFailed
+        }
+        return profile
     }
 
     func switchProfile(target: String) throws -> ProfileListItem {
@@ -124,6 +265,7 @@ private actor MenuBarProviderSpy {
 
 private enum MenuBarProviderSpyFailure: Error {
     case missingProfile
+    case captureFailed
 }
 
 private func menuBarProfiles() -> [ProfileListItem] {
