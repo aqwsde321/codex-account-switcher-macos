@@ -533,6 +533,8 @@ ADR-027의 개발 승인에 따라 다음 최소 기능만 추가한다.
 - 단계별 상태와 안전한 오류 표시
 - 이미 활성 카드 클릭 시 Codex 창 활성화
 - 재로그인 필요 표시
+- `rollbackFailed` journal의 exact transaction ID와 previous profile을 확인 snapshot에 묶고, Core lock 안에서 둘 다 재검증한 뒤에만 수동 복구
+- 복구 성공·앱 launch 미확인·journal finalization 불확실을 typed outcome으로 구분하고 마지막 두 분기에서 auth 복구 재시도 금지
 
 후속 범위:
 

@@ -142,6 +142,9 @@ Unit/Integration test는 실제 `~/.codex/auth.json`을 읽거나 쓰지 않는�
 | U-036 | 메뉴바 일반 pending·blocked 상태 | pending phase 표시, blocked 불명확 STOP, mutation 없음 | 예 |
 | U-037 | 수동 복구 뒤 앱 실행 확인 실패 | 복구 profile typed payload와 launch 미확인 outcome 분리, restore 재시도 금지 | 예 |
 | U-038 | 수동 복구 journal 완료 불확실 | 성공 payload·앱 launch 없음, recovery 불확실 outcome | 예 |
+| U-039 | 메뉴바 `rollbackFailed` 수동 복구 | exact transaction+previous ID, dialog dismiss 뒤 snapshot 전달, Core lock 안 재검증, stale 확인 mutation 0회 | 예 |
+| U-040 | 메뉴바 복구 뒤 앱 launch 미확인 | 이전 계정 active와 recovery none 재확인, restore 재시도 0회, 앱만 수동 실행 안내 | 예 |
+| U-041 | 메뉴바 journal 완료 불확실 | 재조회가 blocked면 등록·sync·전환·restore 추가 mutation 0회, none이면 앱 미실행 안내 | 예 |
 
 ## 6. Integration 테스트 매트릭스
 

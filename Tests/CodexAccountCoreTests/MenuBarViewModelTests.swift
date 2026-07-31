@@ -12,7 +12,10 @@ func menuBarViewModelTests() -> [TestCase] {
                     loadRecoveryStatus: { await provider.recoveryStatus() },
                     captureProfile: { try await provider.captureProfile(label: $0) },
                     syncActiveProfile: { try await provider.syncActiveProfile() },
-                    switchProfile: { try await provider.switchProfile(target: $0) }
+                    switchProfile: { try await provider.switchProfile(target: $0) },
+                    restoreRecoveryProfile: {
+                        try await provider.restoreRecoveryProfile(target: $0, expectedTransactionID: $1)
+                    }
                 )
             }
 
@@ -65,7 +68,10 @@ func menuBarViewModelTests() -> [TestCase] {
                     loadRecoveryStatus: { await closedProvider.recoveryStatus() },
                     captureProfile: { try await closedProvider.captureProfile(label: $0) },
                     syncActiveProfile: { try await closedProvider.syncActiveProfile() },
-                    switchProfile: { try await closedProvider.switchProfile(target: $0) }
+                    switchProfile: { try await closedProvider.switchProfile(target: $0) },
+                    restoreRecoveryProfile: {
+                        try await closedProvider.restoreRecoveryProfile(target: $0, expectedTransactionID: $1)
+                    }
                 )
             }
             await closedModel.load()
@@ -86,7 +92,10 @@ func menuBarViewModelTests() -> [TestCase] {
                     loadRecoveryStatus: { await provider.recoveryStatus() },
                     captureProfile: { try await provider.captureProfile(label: $0) },
                     syncActiveProfile: { try await provider.syncActiveProfile() },
-                    switchProfile: { try await provider.switchProfile(target: $0) }
+                    switchProfile: { try await provider.switchProfile(target: $0) },
+                    restoreRecoveryProfile: {
+                        try await provider.restoreRecoveryProfile(target: $0, expectedTransactionID: $1)
+                    }
                 )
             }
 
@@ -126,7 +135,13 @@ func menuBarViewModelTests() -> [TestCase] {
                     loadRecoveryStatus: { await launchFailureProvider.recoveryStatus() },
                     captureProfile: { try await launchFailureProvider.captureProfile(label: $0) },
                     syncActiveProfile: { try await launchFailureProvider.syncActiveProfile() },
-                    switchProfile: { try await launchFailureProvider.switchProfile(target: $0) }
+                    switchProfile: { try await launchFailureProvider.switchProfile(target: $0) },
+                    restoreRecoveryProfile: {
+                        try await launchFailureProvider.restoreRecoveryProfile(
+                            target: $0,
+                            expectedTransactionID: $1
+                        )
+                    }
                 )
             }
             await launchFailureModel.load()
@@ -150,7 +165,13 @@ func menuBarViewModelTests() -> [TestCase] {
                     loadRecoveryStatus: { await partialFailureProvider.recoveryStatus() },
                     captureProfile: { try await partialFailureProvider.captureProfile(label: $0) },
                     syncActiveProfile: { try await partialFailureProvider.syncActiveProfile() },
-                    switchProfile: { try await partialFailureProvider.switchProfile(target: $0) }
+                    switchProfile: { try await partialFailureProvider.switchProfile(target: $0) },
+                    restoreRecoveryProfile: {
+                        try await partialFailureProvider.restoreRecoveryProfile(
+                            target: $0,
+                            expectedTransactionID: $1
+                        )
+                    }
                 )
             }
             await failureModel.load()
@@ -186,7 +207,10 @@ func menuBarViewModelTests() -> [TestCase] {
                     loadRecoveryStatus: { await provider.recoveryStatus() },
                     captureProfile: { try await provider.captureProfile(label: $0) },
                     syncActiveProfile: { try await provider.syncActiveProfile() },
-                    switchProfile: { try await provider.switchProfile(target: $0) }
+                    switchProfile: { try await provider.switchProfile(target: $0) },
+                    restoreRecoveryProfile: {
+                        try await provider.restoreRecoveryProfile(target: $0, expectedTransactionID: $1)
+                    }
                 )
             }
 
@@ -220,7 +244,13 @@ func menuBarViewModelTests() -> [TestCase] {
                     loadRecoveryStatus: { await failureProvider.recoveryStatus() },
                     captureProfile: { try await failureProvider.captureProfile(label: $0) },
                     syncActiveProfile: { try await failureProvider.syncActiveProfile() },
-                    switchProfile: { try await failureProvider.switchProfile(target: $0) }
+                    switchProfile: { try await failureProvider.switchProfile(target: $0) },
+                    restoreRecoveryProfile: {
+                        try await failureProvider.restoreRecoveryProfile(
+                            target: $0,
+                            expectedTransactionID: $1
+                        )
+                    }
                 )
             }
             await failureModel.load()
@@ -261,16 +291,21 @@ func menuBarViewModelTests() -> [TestCase] {
                     loadRecoveryStatus: { await provider.recoveryStatus() },
                     captureProfile: { try await provider.captureProfile(label: $0) },
                     syncActiveProfile: { try await provider.syncActiveProfile() },
-                    switchProfile: { try await provider.switchProfile(target: $0) }
+                    switchProfile: { try await provider.switchProfile(target: $0) },
+                    restoreRecoveryProfile: {
+                        try await provider.restoreRecoveryProfile(target: $0, expectedTransactionID: $1)
+                    }
                 )
             }
 
             await model.load()
             let rollbackMessage = await MainActor.run { model.errorMessage }
+            let rollbackProfile = await MainActor.run { model.recoveryProfile }
             try expect(
                 rollbackMessage == "자동 복구에 실패했습니다. 회사 계정 복구가 필요합니다.",
                 "rollback recovery did not identify the exact previous profile"
             )
+            try expect(rollbackProfile?.id == previous.id, "rollback recovery action targeted another profile")
 
             let interruptedProvider = MenuBarProviderSpy(
                 profiles: menuBarProfiles(),
@@ -286,17 +321,217 @@ func menuBarViewModelTests() -> [TestCase] {
                     loadRecoveryStatus: { await interruptedProvider.recoveryStatus() },
                     captureProfile: { try await interruptedProvider.captureProfile(label: $0) },
                     syncActiveProfile: { try await interruptedProvider.syncActiveProfile() },
-                    switchProfile: { try await interruptedProvider.switchProfile(target: $0) }
+                    switchProfile: { try await interruptedProvider.switchProfile(target: $0) },
+                    restoreRecoveryProfile: {
+                        try await interruptedProvider.restoreRecoveryProfile(
+                            target: $0,
+                            expectedTransactionID: $1
+                        )
+                    }
                 )
             }
             await interruptedModel.load()
             let interruptedMessage = await MainActor.run { interruptedModel.errorMessage }
+            let interruptedRecoveryProfile = await MainActor.run { interruptedModel.recoveryProfile }
             try expect(
                 interruptedMessage == "중단된 계정 작업 복구가 필요합니다. 단계: currentSaved",
                 "pending recovery phase was not shown safely"
             )
+            try expect(interruptedRecoveryProfile == nil, "non-rollback recovery exposed a restore action")
+        },
+        TestCase("MenuBarViewModel restores only after exact confirmation") {
+            let previous = menuBarProfiles()[1]
+            let firstTransactionID = "00000000-0000-0000-0000-000000000020"
+            let nextTransactionID = "00000000-0000-0000-0000-000000000024"
+            let provider = MenuBarProviderSpy(
+                profiles: menuBarProfiles(),
+                recoveryStatus: .pending(
+                    transactionID: firstTransactionID,
+                    phase: .rollbackFailed,
+                    previousProfileID: previous.id
+                ),
+                restoreOutcome: .restoredAndLaunched(restoredProfile(previous))
+            )
+            let model = await makeMenuBarModel(provider: provider)
+
+            await model.load()
+            await MainActor.run { model.requestRecovery() }
+            let pending = await MainActor.run { model.pendingRecoveryProfile }
+            let targetsBeforeConfirmation = await provider.restoreTargets
+            await MainActor.run { model.cancelRecovery() }
+            let targetsAfterCancellation = await provider.restoreTargets
+            await MainActor.run { model.requestRecovery() }
+            guard let staleConfirmation = await MainActor.run(body: {
+                model.pendingRecoveryConfirmation
+            }) else {
+                throw TestFailure(description: "stale recovery confirmation was not created")
+            }
+            await provider.setRecoveryStatus(
+                .pending(
+                    transactionID: nextTransactionID,
+                    phase: .rollbackFailed,
+                    previousProfileID: previous.id
+                )
+            )
+            await MainActor.run { model.cancelRecovery() }
+            await model.confirmRecovery(staleConfirmation)
+            let targetsAfterStaleConfirmation = await provider.restoreTargets
+            await MainActor.run { model.requestRecovery() }
+            guard let currentConfirmation = await MainActor.run(body: {
+                model.pendingRecoveryConfirmation
+            }) else {
+                throw TestFailure(description: "current recovery confirmation was not created")
+            }
+            await MainActor.run { model.cancelRecovery() }
+            await model.confirmRecovery(currentConfirmation)
+            let targetsAfterConfirmation = await provider.restoreTargets
+            let transactionIDsAfterConfirmation = await provider.restoreTransactionIDs
+            let profiles = await MainActor.run { model.profiles }
+            let statusMessage = await MainActor.run { model.statusMessage }
+            let errorMessage = await MainActor.run { model.errorMessage }
+
+            try expect(pending?.id == previous.id, "recovery confirmation targeted another profile")
+            try expect(targetsBeforeConfirmation.isEmpty, "recovery mutated before confirmation")
+            try expect(targetsAfterCancellation.isEmpty, "cancelled recovery reached Core")
+            try expect(
+                targetsAfterStaleConfirmation.isEmpty,
+                "stale confirmation restored a replacement transaction"
+            )
+            try expect(
+                targetsAfterConfirmation == [previous.id.description],
+                "confirmed recovery did not use the exact previous profile ID once"
+            )
+            try expect(
+                transactionIDsAfterConfirmation == [nextTransactionID],
+                "confirmed recovery did not bind the exact transaction ID"
+            )
+            try expect(
+                profiles.filter(\.active).count == 1
+                    && profiles.first(where: { $0.id == previous.id })?.active == true,
+                "successful recovery did not reload one active previous profile"
+            )
+            try expect(
+                statusMessage == "회사 계정을 복구하고 Codex 앱을 열었습니다.",
+                "successful recovery status changed"
+            )
+            try expect(errorMessage == nil, "successful recovery left an error")
+        },
+        TestCase("MenuBarViewModel never retries a launch-unconfirmed recovery") {
+            let previous = menuBarProfiles()[1]
+            let provider = MenuBarProviderSpy(
+                profiles: menuBarProfiles(),
+                recoveryStatus: .pending(
+                    transactionID: "00000000-0000-0000-0000-000000000021",
+                    phase: .rollbackFailed,
+                    previousProfileID: previous.id
+                ),
+                restoreOutcome: .restoredButLaunchUnconfirmed(restoredProfile(previous))
+            )
+            let model = await makeMenuBarModel(provider: provider)
+
+            await model.load()
+            await MainActor.run { model.requestRecovery() }
+            await model.confirmRecovery()
+            await MainActor.run { model.requestRecovery() }
+            await model.confirmRecovery()
+            let targets = await provider.restoreTargets
+            let recoveryStatus = await MainActor.run { model.recoveryStatus }
+            let recoveryProfile = await MainActor.run { model.recoveryProfile }
+            let errorMessage = await MainActor.run { model.errorMessage }
+
+            try expect(targets == [previous.id.description], "launch uncertainty retried auth recovery")
+            try expect(recoveryStatus == .none, "launch uncertainty reopened recovery state")
+            try expect(recoveryProfile == nil, "launch uncertainty left a recovery action")
+            try expect(
+                errorMessage == "회사 계정은 복구했지만 Codex 앱 실행을 확인하지 못했습니다. 복구를 다시 시도하지 말고 앱만 직접 여세요.",
+                "launch uncertainty did not prohibit restore retry"
+            )
+        },
+        TestCase("MenuBarViewModel keeps uncertain recovery fail-closed") {
+            let previous = menuBarProfiles()[1]
+            let blockedProvider = MenuBarProviderSpy(
+                profiles: menuBarProfiles(),
+                recoveryStatus: .pending(
+                    transactionID: "00000000-0000-0000-0000-000000000022",
+                    phase: .rollbackFailed,
+                    previousProfileID: previous.id
+                ),
+                restoreOutcome: .journalFinalizationUncertain,
+                recoveryStatusAfterRestore: .blocked
+            )
+            let blockedModel = await makeMenuBarModel(provider: blockedProvider)
+
+            await blockedModel.load()
+            await MainActor.run { blockedModel.requestRecovery() }
+            await blockedModel.confirmRecovery()
+            _ = await blockedModel.register(label: "재시도")
+            await blockedModel.syncActive()
+            if let active = await MainActor.run(body: { blockedModel.profiles.first(where: \.active) }) {
+                await blockedModel.select(active)
+            }
+            let blockedRestoreTargets = await blockedProvider.restoreTargets
+            let blockedLabels = await blockedProvider.capturedLabels
+            let blockedSyncCount = await blockedProvider.syncCount
+            let blockedSwitchTargets = await blockedProvider.targets
+            let blockedMessage = await MainActor.run { blockedModel.errorMessage }
+
+            try expect(blockedRestoreTargets == [previous.id.description], "uncertain recovery retried restore")
+            try expect(blockedLabels.isEmpty, "uncertain recovery allowed registration")
+            try expect(blockedSyncCount == 0, "uncertain recovery allowed active sync")
+            try expect(blockedSwitchTargets.isEmpty, "uncertain recovery allowed profile selection")
+            try expect(
+                blockedMessage == "복구 상태가 불명확합니다. 계정 작업을 중단했습니다.",
+                "uncertain recovery did not keep STOP state"
+            )
+
+            let reconciledProvider = MenuBarProviderSpy(
+                profiles: menuBarProfiles(),
+                recoveryStatus: .pending(
+                    transactionID: "00000000-0000-0000-0000-000000000023",
+                    phase: .rollbackFailed,
+                    previousProfileID: previous.id
+                ),
+                restoreOutcome: .journalFinalizationUncertain,
+                recoveryStatusAfterRestore: .none
+            )
+            let reconciledModel = await makeMenuBarModel(provider: reconciledProvider)
+            await reconciledModel.load()
+            await MainActor.run { reconciledModel.requestRecovery() }
+            await reconciledModel.confirmRecovery()
+            let reconciledMessage = await MainActor.run { reconciledModel.statusMessage }
+            let reconciledError = await MainActor.run { reconciledModel.errorMessage }
+            try expect(
+                reconciledMessage == "회사 계정 복구를 재확인했습니다. Codex 앱은 열지 않았습니다.",
+                "reconciled finalization did not report app launch omission"
+            )
+            try expect(reconciledError == nil, "reconciled finalization remained blocked")
         },
     ]
+}
+
+private func makeMenuBarModel(provider: MenuBarProviderSpy) async -> MenuBarViewModel {
+    await MainActor.run {
+        MenuBarViewModel(
+            loadProfiles: { await provider.profiles() },
+            loadRecoveryStatus: { await provider.recoveryStatus() },
+            captureProfile: { try await provider.captureProfile(label: $0) },
+            syncActiveProfile: { try await provider.syncActiveProfile() },
+            switchProfile: { try await provider.switchProfile(target: $0) },
+            restoreRecoveryProfile: {
+                try await provider.restoreRecoveryProfile(target: $0, expectedTransactionID: $1)
+            }
+        )
+    }
+}
+
+private func restoredProfile(_ profile: ProfileListItem) -> ProfileListItem {
+    ProfileListItem(
+        id: profile.id,
+        label: profile.label,
+        email: profile.email,
+        active: true,
+        needsRelogin: profile.needsRelogin
+    )
 }
 
 private actor MenuBarProviderSpy {
@@ -305,6 +540,8 @@ private actor MenuBarProviderSpy {
     private let captureFailureAfterMutation: Bool
     private let captureRecoveryStatusAfterFailure: RecoveryCLIStatus
     private let syncFailureAfterMutation: Bool
+    private let restoreOutcome: RecoveryRestoreOutcome?
+    private let recoveryStatusAfterRestore: RecoveryCLIStatus
     private var storedRecoveryStatus: RecoveryCLIStatus
     private(set) var profileLoadCount = 0
     private(set) var recoveryLoadCount = 0
@@ -312,6 +549,8 @@ private actor MenuBarProviderSpy {
     private(set) var targets = [String]()
     private(set) var events = [String]()
     private(set) var capturedLabels = [String]()
+    private(set) var restoreTargets = [String]()
+    private(set) var restoreTransactionIDs = [String]()
     private(set) var mutationCount = 0
 
     init(
@@ -326,13 +565,17 @@ private actor MenuBarProviderSpy {
             )
         ),
         syncFailureAfterMutation: Bool = false,
-        recoveryStatus: RecoveryCLIStatus = .none
+        recoveryStatus: RecoveryCLIStatus = .none,
+        restoreOutcome: RecoveryRestoreOutcome? = nil,
+        recoveryStatusAfterRestore: RecoveryCLIStatus = .none
     ) {
         storedProfiles = profiles
         self.applicationIsRunning = applicationIsRunning
         self.captureFailureAfterMutation = captureFailureAfterMutation
         self.captureRecoveryStatusAfterFailure = captureRecoveryStatusAfterFailure
         self.syncFailureAfterMutation = syncFailureAfterMutation
+        self.restoreOutcome = restoreOutcome
+        self.recoveryStatusAfterRestore = recoveryStatusAfterRestore
         storedRecoveryStatus = recoveryStatus
     }
 
@@ -344,6 +587,10 @@ private actor MenuBarProviderSpy {
     func recoveryStatus() -> RecoveryCLIStatus {
         recoveryLoadCount += 1
         return storedRecoveryStatus
+    }
+
+    func setRecoveryStatus(_ status: RecoveryCLIStatus) {
+        storedRecoveryStatus = status
     }
 
     func captureProfile(label: String) throws -> ProfileListItem {
@@ -407,12 +654,39 @@ private actor MenuBarProviderSpy {
         }
         return updated
     }
+
+    func restoreRecoveryProfile(
+        target: String,
+        expectedTransactionID: String
+    ) throws -> RecoveryRestoreOutcome {
+        restoreTargets.append(target)
+        restoreTransactionIDs.append(expectedTransactionID)
+        guard case let .pending(transactionID, .rollbackFailed, previousProfileID) = storedRecoveryStatus,
+              transactionID == expectedTransactionID,
+              previousProfileID.description == target,
+              let restoreOutcome,
+              storedProfiles.contains(where: { $0.id == previousProfileID }) else {
+            throw MenuBarProviderSpyFailure.recoveryFailed
+        }
+        storedProfiles = storedProfiles.map { profile in
+            ProfileListItem(
+                id: profile.id,
+                label: profile.label,
+                email: profile.email,
+                active: profile.id.description == target,
+                needsRelogin: profile.needsRelogin
+            )
+        }
+        storedRecoveryStatus = recoveryStatusAfterRestore
+        return restoreOutcome
+    }
 }
 
 private enum MenuBarProviderSpyFailure: Error {
     case missingProfile
     case captureFailed
     case syncFailed
+    case recoveryFailed
 }
 
 private func menuBarProfiles() -> [ProfileListItem] {

@@ -51,14 +51,15 @@ ADR-027과 기존 안전 결정을 유지한 채 Step 9 메뉴바 MVP를 구현�
 - 메뉴바 현재 활성 인증의 명시적 수동 동기화와 성공·복구 차단 상태 구현
 - 메뉴바 recovery pending phase·journal previous profile·blocked STOP 표시 구현
 - 수동 복구 완전 성공·앱 실행 미확인·journal 완료 불확실 typed outcome과 phase/expected-active finalization evidence 공통 재개 gate 구현
-- fake credential만 사용하는 96개 debug 테스트 통과
+- 메뉴바 exact transaction/previous-profile 수동 복구, 명시 확인, typed outcome별 성공·launch 미확인·STOP 처리 구현
+- fake credential만 사용하는 99개 debug 테스트 통과
 - 실제 read-only inspect에서 사용자 auth와 helper store 무변경 확인
 - `rollbackFailed` 수동 복구 CLI와 실환경 A 복구 2회 완료
 - debug 전용 B-011 실패 주입에서 source 자동 롤백과 최종 A 복귀 확인
 
 미완료:
 
-- typed outcome을 사용하는 메뉴바 수동 복구·재로그인 동작·세부 진행 단계 UI
+- 메뉴바 재로그인 동작·세부 진행 단계 UI
 - 잔존 앱 프로세스 2차 종료 확인과 서명된 앱의 실제 Keychain CRUD·접근 정책 검증
 - MVP 완료·배포 전 `07_test_acceptance.md` §16 형식의 동일 task 왕복 증거 보존
 
@@ -321,7 +322,7 @@ cd codex-account-switcher-spike
 
 ADR-027의 개발 승인에 따라 시작한다. B-010 정식 증거 공백은 릴리스 게이트로 남긴다.
 
-현재 1~3, 4의 실제 provider 주입·등록·활성 인증 동기화, 5의 recovery mutation gate와 read-only 상세 표시, 수동 복구 typed outcome까지 완료됐다. typed outcome을 사용하는 메뉴바 수동 복구, 재로그인 동작, 세부 진행 단계 연결이 다음 작업이다.
+현재 1~3, 4의 실제 provider 주입·등록·활성 인증 동기화, 5의 recovery mutation gate·상세 표시·exact transaction/previous-profile 수동 복구까지 완료됐다. 재로그인 동작과 세부 진행 단계 연결이 다음 작업이다.
 
 구현 순서:
 
@@ -394,6 +395,16 @@ manual recovery outcome slice의 완료 기준:
 - finalization evidence의 phase/profile·registry·검증 당시 active auth digest·configured credential·잔존 artifact가 다르면 같은 provider와 재시작 provider 모두 blocked이고 mutation은 0회다.
 - evidence와 journal이 함께 남으면 공통 mutation gate가 journal 내구 삭제→상태 재검증→evidence 내구 삭제를 재개한다. journal이 없으면 store directory `fsync` 뒤 같은 상태를 재검증한다.
 - 위 cleanup과 evidence 제거를 모두 확인한 뒤에만 `recovery status=none`으로 STOP을 해제한다.
+
+menu bar manual recovery slice의 완료 기준:
+
+- 버튼은 `rollbackFailed` journal의 exact `previousProfileID`가 등록돼 있고 재로그인이 필요 없을 때만 표시한다.
+- 확인 snapshot은 transaction ID와 previous profile을 함께 보존한다. dialog 자동 dismiss가 model pending을 지워도 action은 이 snapshot을 전달한다.
+- 확인 전 Core restore 호출은 0회다. 확인 시 recovery status를 다시 읽고, Core transaction lock 안에서 같은 transaction ID와 opaque profile ID를 모두 재검증한 뒤 1회 호출한다.
+- 성공 뒤 profile/recovery를 다시 읽어 previous 하나만 active이고 recovery none인지 확인한다.
+- launch 미확인은 복구 완료를 유지하고 restore 재시도를 금지하며 앱만 직접 열도록 안내한다.
+- journal finalization 불확실은 재조회가 none일 때만 복구 재확인으로 표시한다. blocked/pending이면 모든 mutation과 앱 실행을 금지한다.
+- 테스트는 fake provider만 사용하고 실제 auth, Keychain, 공식 앱을 건드리지 않는다.
 
 ## 8. 실제 switch를 이 task 안에서 실행하면 안 되는 이유
 

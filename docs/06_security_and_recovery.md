@@ -1,6 +1,6 @@
 # 보안·복구 설계
 
-- 상태: Swift CLI Spike·manual recovery typed outcome·journal 부재 내구 재확인 gate·Keychain backend·메뉴바 provider/등록/활성 인증 sync/read-only recovery 상태 표시 완료, 메뉴바 수동 복구·실 Keychain·배포 보안 검증 전
+- 상태: Swift CLI Spike·manual recovery typed outcome·durable finalization gate·Keychain backend·메뉴바 provider/등록/활성 인증 sync/수동 복구 완료, 메뉴바 재로그인·실 Keychain·배포 보안 검증 전
 - 기준일: 2026-07-31
 - 적용 대상: Swift CLI Spike와 후속 macOS 메뉴바 앱
 

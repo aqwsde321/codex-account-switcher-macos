@@ -80,22 +80,40 @@ func cliApplicationTests() -> [TestCase] {
                 let fixture = try makeManualRecoveryFixture(in: directory)
                 let store = try SpikeStore.openExisting(at: fixture.storeURL)
                 let launches = await MainActor.run { AppLaunchRecorder() }
-                let application = CLIApplication(
-                    provider: LocalCLIDataProvider(
-                        storeURL: fixture.storeURL,
-                        activeAuthURL: fixture.authURL,
-                        processProvider: EmptyProcessSnapshotProvider(),
-                        locateApp: { fixture.descriptor },
-                        runningApplicationPIDs: { _ in [] },
-                        requestApplicationTermination: { _ in [] },
-                        normalTerminationGracePolls: 0,
-                        quiescenceSleep: { _ in },
-                        launchApplication: { _ in
-                            launches.record()
-                            throw CodexAppLifecycleFailure.launchFailed
-                        }
-                    )
+                let provider = LocalCLIDataProvider(
+                    storeURL: fixture.storeURL,
+                    activeAuthURL: fixture.authURL,
+                    processProvider: EmptyProcessSnapshotProvider(),
+                    locateApp: { fixture.descriptor },
+                    runningApplicationPIDs: { _ in [] },
+                    requestApplicationTermination: { _ in [] },
+                    normalTerminationGracePolls: 0,
+                    quiescenceSleep: { _ in },
+                    launchApplication: { _ in
+                        launches.record()
+                        throw CodexAppLifecycleFailure.launchFailed
+                    }
                 )
+                let application = CLIApplication(provider: provider)
+                let registryBeforeStaleConfirmation = try store.loadRegistry()
+                let authBeforeStaleConfirmation = try Data(contentsOf: fixture.authURL)
+                let journalBeforeStaleConfirmation = try store.loadJournalIfPresent()
+
+                do {
+                    _ = try await provider.restoreRecoveryProfile(
+                        target: fixture.previous.id.description,
+                        expectedTransactionID: "00000000-0000-0000-0000-000000000099"
+                    )
+                    throw TestFailure(description: "stale recovery transaction was accepted")
+                } catch let failure as LocalCLIDataProviderFailure {
+                    try expect(
+                        failure == .manualRecoveryUnavailable,
+                        "stale recovery transaction returned another failure"
+                    )
+                }
+                let registryAfterStaleConfirmation = try store.loadRegistry()
+                let authAfterStaleConfirmation = try Data(contentsOf: fixture.authURL)
+                let journalAfterStaleConfirmation = try store.loadJournalIfPresent()
 
                 let result = await application.run(
                     arguments: ["recovery", "restore", "--profile", fixture.previous.label],
@@ -107,6 +125,12 @@ func cliApplicationTests() -> [TestCase] {
                 let journal = try store.loadJournalIfPresent()
                 let launchCount = await MainActor.run { launches.count }
 
+                try expect(
+                    registryAfterStaleConfirmation == registryBeforeStaleConfirmation
+                        && authAfterStaleConfirmation == authBeforeStaleConfirmation
+                        && journalAfterStaleConfirmation == journalBeforeStaleConfirmation,
+                    "stale recovery confirmation mutated state"
+                )
                 try expect(result.exitCode == 1, "unconfirmed app launch returned full success")
                 try expect(
                     result.standardOutput.contains("recovery=restored application_launch=unconfirmed"),

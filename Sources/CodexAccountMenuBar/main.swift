@@ -53,6 +53,15 @@ struct CodexAccountMenuBarApp: App {
                         throw MenuBarStartupFailure.credentialStoreConfiguration
                     }
                     return try await provider.switchProfile(target: $0)
+                },
+                restoreRecoveryProfile: { target, transactionID in
+                    guard let provider else {
+                        throw MenuBarStartupFailure.credentialStoreConfiguration
+                    }
+                    return try await provider.restoreRecoveryProfile(
+                        target: target,
+                        expectedTransactionID: transactionID
+                    )
                 }
             )
         )
@@ -121,6 +130,28 @@ private struct AccountMenuView: View {
                     Button("취소", role: .cancel) {}
                 } message: {
                     Text("공식 앱과 독립 Codex 프로세스를 먼저 종료하세요. 현재 로그인 이메일이 활성 프로필과 같을 때만 저장합니다.")
+                }
+            }
+
+            if let recoveryProfile = model.recoveryProfile {
+                Button("\(recoveryProfile.label) 계정 복구…") {
+                    model.requestRecovery()
+                }
+                .disabled(model.isWorking)
+                .confirmationDialog(
+                    "\(recoveryProfile.label) 계정을 복구할까요?",
+                    isPresented: recoveryConfirmationPresented,
+                    titleVisibility: .visible,
+                    presenting: model.pendingRecoveryConfirmation
+                ) { confirmation in
+                    Button("복구", role: .destructive) {
+                        Task { await model.confirmRecovery(confirmation) }
+                    }
+                    Button("취소", role: .cancel) {
+                        model.cancelRecovery()
+                    }
+                } message: { _ in
+                    Text("공식 앱을 정상 종료하고 저장된 이전 인증으로 복구합니다. 독립 Codex CLI와 IDE 작업은 먼저 직접 종료하세요.")
                 }
             }
 
@@ -205,6 +236,17 @@ private struct AccountMenuView: View {
             set: { presented in
                 if !presented {
                     model.cancelSwitch()
+                }
+            }
+        )
+    }
+
+    private var recoveryConfirmationPresented: Binding<Bool> {
+        Binding(
+            get: { model.pendingRecoveryConfirmation != nil },
+            set: { presented in
+                if !presented {
+                    model.cancelRecovery()
                 }
             }
         )

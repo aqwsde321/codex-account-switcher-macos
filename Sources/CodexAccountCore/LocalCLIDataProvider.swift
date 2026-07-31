@@ -331,6 +331,13 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
 #endif
 
     public func restoreRecoveryProfile(target value: String) async throws -> RecoveryRestoreOutcome {
+        try await restoreRecoveryProfile(target: value, expectedTransactionID: nil)
+    }
+
+    public func restoreRecoveryProfile(
+        target value: String,
+        expectedTransactionID: String?
+    ) async throws -> RecoveryRestoreOutcome {
         guard !switchInProgress else {
             throw LocalCLIDataProviderFailure.switchAlreadyRunning
         }
@@ -351,6 +358,7 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
         let journalFinalizationEvidence = try store.loadJournalFinalizationEvidenceIfPresent()
         guard let journal = try store.loadJournalIfPresent(),
               journal.phase == .rollbackFailed,
+              expectedTransactionID == nil || journal.transactionID.uuidString == expectedTransactionID,
               journalFinalizationEvidence == nil,
               journal.previousProfileID != journal.targetProfileID,
               captureProfileID == nil || captureProfileID == journal.targetProfileID,
