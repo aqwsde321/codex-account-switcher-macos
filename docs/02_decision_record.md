@@ -514,6 +514,30 @@
   - 공식 앱이 안정적인 다중 계정 또는 계정 지정 로그인 API를 제공함
   - 앱 자동 실행을 포함한 별도 typed outcome 요구가 확인됨
 
+## ADR-030: 소스 배포는 사용자 기본 file-based Keychain을 사용한다
+
+- 상태: 승인 (2026-07-31)
+- 결정:
+  - 초기 제품은 GitHub 소스에서 직접 빌드하는 비샌드박스 `.app`으로 배포한다.
+  - 제품 비활성 인증은 기존 service `CodexAccountSwitcher.credentials.v1`과 profile UUID account를 유지한 사용자 기본 file-based Keychain generic-password item에 저장한다. 일반 구성에서는 login Keychain이다.
+  - 제한된 signing entitlement가 필요한 Data Protection Keychain은 초기 소스 배포에서 사용하지 않는다.
+  - plaintext credential fallback은 만들지 않는다. Developer ID 서명·공증은 ADR-025의 안정화 후 단계로 유지한다.
+- 이유:
+  - raw SwiftPM/ad-hoc 실행에서 Data Protection Keychain add는 `errSecMissingEntitlement`로 실패했다.
+  - 임의 access-group entitlement를 ad-hoc 서명에 추가하면 macOS가 유효한 provisioning profile 부재로 프로세스를 종료한다.
+  - 기본 file-based Keychain은 별도 Apple 개발자 자격 없이 소스 빌드 앱에서 사용할 수 있고 비밀을 앱 파일에 materialize하지 않는다.
+- 기각 대안:
+  - 초기 단계부터 Apple Development/Developer ID와 provisioning profile 요구: 소스 공유 목적보다 배포 인프라가 커진다.
+  - Application Support의 `0600` credential 파일: 제품 인증을 Keychain에 둔다는 ADR-012를 약화한다.
+  - 설치 과정의 자체서명 인증서 자동 생성·신뢰 등록: 관리자 권한과 시스템 trust 변경을 기본 설치에 추가한다.
+- 호환성:
+  - 공개 배포 전 Data Protection Keychain 제품 item은 지원된 적이 없으므로 자동 migration은 만들지 않는다.
+  - ad-hoc 재빌드는 code identity가 바뀌어 기존 item 접근 시 Keychain 확인이나 거부가 발생할 수 있다. 현재 빌드의 CRUD만 보장하며 update-safe identity로 과장하지 않는다.
+  - 향후 App Store sandbox, 조직 배포 또는 Keychain access group 공유가 필요하면 signing identity와 migration을 먼저 고정한다.
+- 재검토 트리거:
+  - Developer ID 릴리스와 provisioning profile을 포함한 배포 경로가 확정됨
+  - App Store sandbox 또는 여러 executable 사이 Keychain access group 공유가 필요함
+
 ## 2. 결정 간 핵심 제약
 
 아래 제약은 하나라도 깨지면 구현을 계속하지 않는다.

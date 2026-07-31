@@ -1,13 +1,21 @@
 import AppKit
 import CodexAccountCore
 import CodexAccountMenuBarModel
+import Darwin
 import SwiftUI
+
+private let productCredentialService = "CodexAccountSwitcher.credentials.v1"
 
 @main
 struct CodexAccountMenuBarApp: App {
     @StateObject private var model: MenuBarViewModel
 
     init() {
+        if CommandLine.arguments.count == 2,
+           CommandLine.arguments[1] == "--keychain-smoke-test" {
+            Darwin.exit(runKeychainSmokeTest())
+        }
+
         let home = FileManager.default.homeDirectoryForCurrentUser
         let storeURL = home
             .appendingPathComponent("Library/Application Support", isDirectory: true)
@@ -19,7 +27,7 @@ struct CodexAccountMenuBarApp: App {
             storeURL: storeURL,
             activeAuthURL: authURL,
             credentialStore: KeychainCredentialStore(
-                service: "CodexAccountSwitcher.credentials.v1"
+                service: productCredentialService
             ),
             confirmAppOwnedTermination: { count in
                 await MainActor.run {
@@ -361,6 +369,76 @@ private struct ProfileCard: View {
 
 private enum MenuBarStartupFailure: Error, Sendable {
     case credentialStoreConfiguration
+}
+
+private enum KeychainSmokeFailure: Error {
+    case credentialMismatch
+    case deletedCredentialReadable
+}
+
+private func runKeychainSmokeTest() -> Int32 {
+    let profileID = ProfileID(UUID())
+    let service = "\(productCredentialService).smoke.\(UUID().uuidString)"
+    var stage = "configuration"
+    var created = false
+
+    do {
+        let store = try KeychainCredentialStore(service: service)
+        let first = try CredentialBlob(
+            validating: Data(
+                #"{"auth_mode":"chatgpt","tokens":{"id_token":"synthetic-id-1","access_token":"synthetic-access-1","refresh_token":"synthetic-refresh-1"}}"#.utf8
+            )
+        )
+        let second = try CredentialBlob(
+            validating: Data(
+                #"{"auth_mode":"chatgpt","tokens":{"id_token":"synthetic-id-2","access_token":"synthetic-access-2","refresh_token":"synthetic-refresh-2"}}"#.utf8
+            )
+        )
+
+        stage = "create"
+        try store.saveCredential(first, for: profileID)
+        created = true
+
+        stage = "read"
+        guard try store.loadCredential(for: profileID) == first else {
+            throw KeychainSmokeFailure.credentialMismatch
+        }
+
+        stage = "update"
+        try store.saveCredential(second, for: profileID)
+        guard try store.loadCredential(for: profileID) == second else {
+            throw KeychainSmokeFailure.credentialMismatch
+        }
+
+        stage = "delete"
+        try store.removeCredential(for: profileID)
+        try store.removeCredential(for: profileID)
+
+        stage = "verify-delete"
+        do {
+            _ = try store.loadCredential(for: profileID)
+            throw KeychainSmokeFailure.deletedCredentialReadable
+        } catch CredentialStoreError.notFound {
+            created = false
+            print("keychain_smoke=passed")
+            return 0
+        }
+    } catch {
+        let cleanup: String
+        if created,
+           let store = try? KeychainCredentialStore(service: service) {
+            do {
+                try store.removeCredential(for: profileID)
+                cleanup = "passed"
+            } catch {
+                cleanup = "failed"
+            }
+        } else {
+            cleanup = "not_needed"
+        }
+        print("keychain_smoke=failed stage=\(stage) cleanup=\(cleanup)")
+        return cleanup == "failed" ? 2 : 1
+    }
 }
 
 @MainActor

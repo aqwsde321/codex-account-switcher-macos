@@ -157,7 +157,6 @@ private struct SystemGenericPasswordClient: GenericPasswordClient {
             query(for: key) as CFDictionary,
             [
                 kSecValueData as String: data,
-                kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
             ] as CFDictionary
         )
     }
@@ -166,7 +165,6 @@ private struct SystemGenericPasswordClient: GenericPasswordClient {
         SecItemAdd(
             query(for: key).merging([
                 kSecValueData as String: data,
-                kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
             ]) { _, new in new } as CFDictionary,
             nil
         )
@@ -181,7 +179,6 @@ private struct SystemGenericPasswordClient: GenericPasswordClient {
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: key.service,
             kSecAttrAccount as String: key.account,
-            kSecUseDataProtectionKeychain as String: true,
         ]
     }
 }
