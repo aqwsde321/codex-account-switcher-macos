@@ -112,11 +112,85 @@ func spikeStoreTests() -> [TestCase] {
                 )
                 _ = try store.updateJournal(updatedJournal)
                 let loadedUpdatedJournal = try store.loadJournalIfPresent()
+                let evidence = JournalFinalizationEvidence(
+                    transactionID: journal.transactionID,
+                    journalPhase: updatedJournal.phase,
+                    expectedActiveProfileID: profileID,
+                    expectedActiveAuthSHA256: String(repeating: "a", count: 64)
+                )
+                _ = try store.createJournalFinalizationEvidence(evidence)
+                let loadedEvidence = try store.loadJournalFinalizationEvidenceIfPresent()
+                let evidenceMode = try storeMode(
+                    at: store.rootURL.appendingPathComponent("journal-finalization.json")
+                )
                 try expect(loadedUpdatedJournal == updatedJournal, "existing journal was not updated")
+                try expect(loadedEvidence == evidence, "journal finalization evidence changed")
+                try expect(evidenceMode == 0o600, "journal finalization evidence mode is not 0600")
 
                 _ = try store.removeJournal()
+                _ = try store.removeJournalFinalizationEvidence()
                 let removedJournal = try store.loadJournalIfPresent()
+                let removedEvidence = try store.loadJournalFinalizationEvidenceIfPresent()
                 try expect(removedJournal == nil, "journal remains after durable removal")
+                try expect(removedEvidence == nil, "journal finalization evidence remains")
+            }
+        },
+        TestCase("SpikeStore rejects malformed journal finalization evidence") {
+            try withStoreTemporaryDirectory { parent in
+                let store = try SpikeStore.create(
+                    at: parent.appendingPathComponent("store", isDirectory: true)
+                )
+                let transactionID = UUID()
+                let profileID = ProfileID(UUID())
+                let evidenceURL = store.rootURL.appendingPathComponent(
+                    "journal-finalization.json",
+                    isDirectory: false
+                )
+                let malformedDigest = "g" + String(repeating: "a", count: 63)
+                let malformedDigestDocument = Data(
+                    """
+                    {
+                      "schemaVersion": 1,
+                      "transactionId": "\(transactionID.uuidString)",
+                      "journalPhase": "rollbackFailed",
+                      "expectedActiveProfileId": "\(profileID)",
+                      "expectedActiveAuthSha256": "\(malformedDigest)"
+                    }
+                    """.utf8
+                )
+                try malformedDigestDocument.write(to: evidenceURL, options: .withoutOverwriting)
+                try FileManager.default.setAttributes(
+                    [.posixPermissions: 0o600],
+                    ofItemAtPath: evidenceURL.path
+                )
+
+                try expectError(
+                    SpikeStoreError.invalidJournalFinalizationEvidence,
+                    "malformed journal finalization digest was accepted"
+                ) {
+                    _ = try store.loadJournalFinalizationEvidenceIfPresent()
+                }
+
+                let unknownFieldDocument = Data(
+                    """
+                    {
+                      "schemaVersion": 1,
+                      "transactionId": "\(transactionID.uuidString)",
+                      "journalPhase": "rollbackFailed",
+                      "expectedActiveProfileId": "\(profileID)",
+                      "expectedActiveAuthSha256": "\(String(repeating: "a", count: 64))",
+                      "unknown": true
+                    }
+                    """.utf8
+                )
+                try unknownFieldDocument.write(to: evidenceURL)
+
+                try expectError(
+                    SpikeStoreError.invalidJournalFinalizationEvidence,
+                    "unknown journal finalization evidence field was accepted"
+                ) {
+                    _ = try store.loadJournalFinalizationEvidenceIfPresent()
+                }
             }
         },
         TestCase("SpikeStore creates and removes a pending capture profile ID") {

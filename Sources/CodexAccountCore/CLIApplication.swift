@@ -68,6 +68,12 @@ public enum RecoveryCLIStatus: Equatable, Sendable {
     case blocked
 }
 
+public enum RecoveryRestoreOutcome: Equatable, Sendable {
+    case restoredAndLaunched(ProfileListItem)
+    case restoredButLaunchUnconfirmed(ProfileListItem)
+    case journalFinalizationUncertain
+}
+
 #if SPIKE_FAULT_INJECTION
 public enum PostLaunchRollbackTestFailure: Error, Equatable, Sendable {
     case injectionNotTriggered
@@ -81,7 +87,7 @@ public protocol CLIDataProviding: Sendable {
     func captureProfile(label: String) async throws -> ProfileListItem
     func syncActiveProfile() async throws -> ProfileListItem
     func switchProfile(target: String) async throws -> ProfileListItem
-    func restoreRecoveryProfile(target: String) async throws -> ProfileListItem
+    func restoreRecoveryProfile(target: String) async throws -> RecoveryRestoreOutcome
 #if SPIKE_FAULT_INJECTION
     func testPostLaunchRollback(target: String) async throws -> ProfileListItem
 #endif
@@ -152,12 +158,26 @@ public struct CLIApplication: Sendable {
                         standardError: "error=confirmation_required\n"
                     )
                 }
-                let profile = try await provider.restoreRecoveryProfile(target: arguments[3])
-                return CLIResult(
-                    exitCode: 0,
-                    standardOutput: "recovery=restored\n" + render([profile]),
-                    standardError: ""
-                )
+                switch try await provider.restoreRecoveryProfile(target: arguments[3]) {
+                case let .restoredAndLaunched(profile):
+                    return CLIResult(
+                        exitCode: 0,
+                        standardOutput: "recovery=restored\n" + render([profile]),
+                        standardError: ""
+                    )
+                case let .restoredButLaunchUnconfirmed(profile):
+                    return CLIResult(
+                        exitCode: 1,
+                        standardOutput: "recovery=restored application_launch=unconfirmed\n" + render([profile]),
+                        standardError: "error=application_launch_unconfirmed\n"
+                    )
+                case .journalFinalizationUncertain:
+                    return CLIResult(
+                        exitCode: 1,
+                        standardOutput: "",
+                        standardError: "error=recovery_uncertain\n"
+                    )
+                }
             }
             if arguments == ["profile", "sync-active"] {
                 guard mutationConfirmed else {

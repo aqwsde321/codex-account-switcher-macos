@@ -180,6 +180,29 @@ public struct SpikeStore {
         return try files.remove(at: journalURL, expecting: expected)
     }
 
+    package func createJournalFinalizationEvidence(
+        _ evidence: JournalFinalizationEvidence
+    ) throws -> FileIdentity {
+        try files.replace(
+            contents: SensitiveBytes(try JournalFinalizationEvidenceCodec.encode(evidence)),
+            at: journalFinalizationEvidenceURL,
+            expecting: .absent
+        )
+    }
+
+    package func loadJournalFinalizationEvidenceIfPresent() throws -> JournalFinalizationEvidence? {
+        guard try files.snapshot(at: journalFinalizationEvidenceURL) != .absent else {
+            return nil
+        }
+        let result = try files.read(at: journalFinalizationEvidenceURL, maximumBytes: 1_024)
+        return try JournalFinalizationEvidenceCodec.decode(result.contents.data)
+    }
+
+    package func removeJournalFinalizationEvidence() throws -> DurableRemoval {
+        let expected = try files.snapshot(at: journalFinalizationEvidenceURL)
+        return try files.remove(at: journalFinalizationEvidenceURL, expecting: expected)
+    }
+
     public func tryAcquireTransactionLock() throws -> ExclusiveFileLock? {
         try ExclusiveFileLock.tryAcquire(at: rootURL.appendingPathComponent("switch.lock"))
     }
@@ -200,9 +223,79 @@ public struct SpikeStore {
         rootURL.appendingPathComponent("capture-profile-id", isDirectory: false)
     }
 
+    private var journalFinalizationEvidenceURL: URL {
+        rootURL.appendingPathComponent("journal-finalization.json", isDirectory: false)
+    }
+
     private func replace(contents: SensitiveBytes, at url: URL) throws -> FileIdentity {
         let expected = try files.snapshot(at: url)
         return try files.replace(contents: contents, at: url, expecting: expected)
+    }
+}
+
+package struct JournalFinalizationEvidence: Codable, Equatable, Sendable {
+    package let schemaVersion: Int
+    package let transactionID: UUID
+    package let journalPhase: SwitchPhase
+    package let expectedActiveProfileID: ProfileID
+    package let expectedActiveAuthSHA256: String
+
+    package init(
+        transactionID: UUID,
+        journalPhase: SwitchPhase,
+        expectedActiveProfileID: ProfileID,
+        expectedActiveAuthSHA256: String
+    ) {
+        schemaVersion = 1
+        self.transactionID = transactionID
+        self.journalPhase = journalPhase
+        self.expectedActiveProfileID = expectedActiveProfileID
+        self.expectedActiveAuthSHA256 = expectedActiveAuthSHA256
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion
+        case transactionID = "transactionId"
+        case journalPhase
+        case expectedActiveProfileID = "expectedActiveProfileId"
+        case expectedActiveAuthSHA256 = "expectedActiveAuthSha256"
+    }
+}
+
+private enum JournalFinalizationEvidenceCodec {
+    static func encode(_ evidence: JournalFinalizationEvidence) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return try encoder.encode(evidence)
+    }
+
+    static func decode(_ data: Data) throws -> JournalFinalizationEvidence {
+        do {
+            try StrictJSONDocumentValidator.validate(data, maximumBytes: 1_024)
+            guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  Set(object.keys) == [
+                      "schemaVersion", "transactionId", "journalPhase", "expectedActiveProfileId",
+                      "expectedActiveAuthSha256",
+                  ] else {
+                throw SpikeStoreError.invalidJournalFinalizationEvidence
+            }
+        } catch {
+            throw SpikeStoreError.invalidJournalFinalizationEvidence
+        }
+        let evidence: JournalFinalizationEvidence
+        do {
+            evidence = try JSONDecoder().decode(JournalFinalizationEvidence.self, from: data)
+        } catch {
+            throw SpikeStoreError.invalidJournalFinalizationEvidence
+        }
+        guard evidence.schemaVersion == 1,
+              evidence.expectedActiveAuthSHA256.count == 64,
+              evidence.expectedActiveAuthSHA256.unicodeScalars.allSatisfy({
+                  CharacterSet(charactersIn: "0123456789abcdef").contains($0)
+              }) else {
+            throw SpikeStoreError.invalidJournalFinalizationEvidence
+        }
+        return evidence
     }
 }
 
@@ -211,6 +304,7 @@ public enum SpikeStoreError: Error, Equatable, Sendable {
     case missingJournal
     case invalidJournalUpdate
     case invalidCaptureProfileID
+    case invalidJournalFinalizationEvidence
 }
 
 enum PrivateDirectory {

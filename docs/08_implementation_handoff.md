@@ -50,14 +50,15 @@ ADR-027과 기존 안전 결정을 유지한 채 Step 9 메뉴바 MVP를 구현�
 - 메뉴바 현재 로그인 등록, 추가 등록 상태 재조회, startup/실패 recovery gate 구현
 - 메뉴바 현재 활성 인증의 명시적 수동 동기화와 성공·복구 차단 상태 구현
 - 메뉴바 recovery pending phase·journal previous profile·blocked STOP 표시 구현
-- fake credential만 사용하는 92개 debug 테스트 통과
+- 수동 복구 완전 성공·앱 실행 미확인·journal 완료 불확실 typed outcome과 phase/expected-active finalization evidence 공통 재개 gate 구현
+- fake credential만 사용하는 96개 debug 테스트 통과
 - 실제 read-only inspect에서 사용자 auth와 helper store 무변경 확인
 - `rollbackFailed` 수동 복구 CLI와 실환경 A 복구 2회 완료
 - debug 전용 B-011 실패 주입에서 source 자동 롤백과 최종 A 복귀 확인
 
 미완료:
 
-- 수동 복구 typed outcome·재로그인 동작·세부 진행 단계 UI
+- typed outcome을 사용하는 메뉴바 수동 복구·재로그인 동작·세부 진행 단계 UI
 - 잔존 앱 프로세스 2차 종료 확인과 서명된 앱의 실제 Keychain CRUD·접근 정책 검증
 - MVP 완료·배포 전 `07_test_acceptance.md` §16 형식의 동일 task 왕복 증거 보존
 
@@ -320,7 +321,7 @@ cd codex-account-switcher-spike
 
 ADR-027의 개발 승인에 따라 시작한다. B-010 정식 증거 공백은 릴리스 게이트로 남긴다.
 
-현재 1~3, 4의 실제 provider 주입·등록·활성 인증 동기화, 5의 recovery mutation gate와 read-only 상세 표시까지 완료됐다. 수동 복구 typed outcome, 재로그인 동작, 세부 진행 단계 연결이 다음 작업이다.
+현재 1~3, 4의 실제 provider 주입·등록·활성 인증 동기화, 5의 recovery mutation gate와 read-only 상세 표시, 수동 복구 typed outcome까지 완료됐다. typed outcome을 사용하는 메뉴바 수동 복구, 재로그인 동작, 세부 진행 단계 연결이 다음 작업이다.
 
 구현 순서:
 
@@ -384,7 +385,15 @@ read-only recovery status slice의 완료 기준:
 - `rollbackFailed`는 현재 active나 label을 추측하지 않고 exact previous ID에 해당하는 프로필을 표시한다.
 - 다른 pending은 persisted phase를 표시하고 blocked는 상태 불명확 STOP을 표시한다.
 - 모든 recovery required 상태에서 등록·sync·전환 mutation 차단을 유지한다.
-- 수동 restore UI는 Core가 journal 내구성 불확실과 복구 완료 뒤 앱 launch 실패를 typed outcome으로 구분할 때까지 연결하지 않는다.
+
+manual recovery outcome slice의 완료 기준:
+
+- `RecoveryRestoreOutcome`은 완전 성공, journal 내구 삭제 뒤 앱 launch 미확인, journal 완료 불확실을 구분한다.
+- launch 미확인은 복구 profile을 반환하되 exit 1과 allow-listed 오류를 유지하며 restore 재시도를 금지한다.
+- journal 완료 불확실은 성공 profile과 앱 launch를 내보내지 않는다.
+- finalization evidence의 phase/profile·registry·검증 당시 active auth digest·configured credential·잔존 artifact가 다르면 같은 provider와 재시작 provider 모두 blocked이고 mutation은 0회다.
+- evidence와 journal이 함께 남으면 공통 mutation gate가 journal 내구 삭제→상태 재검증→evidence 내구 삭제를 재개한다. journal이 없으면 store directory `fsync` 뒤 같은 상태를 재검증한다.
+- 위 cleanup과 evidence 제거를 모두 확인한 뒤에만 `recovery status=none`으로 STOP을 해제한다.
 
 ## 8. 실제 switch를 이 task 안에서 실행하면 안 되는 이유
 

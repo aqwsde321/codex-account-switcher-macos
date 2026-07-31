@@ -46,6 +46,8 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
     private let requestProcessTermination: @Sendable (ProcessRecord) throws -> Void
     private let normalTerminationGracePolls: Int
     private let quiescenceSleep: @Sendable (Duration) async throws -> Void
+    private let removeJournalFile: @Sendable () throws -> DurableRemoval
+    private let syncStoreDirectory: @Sendable () throws -> Void
     private let activateApplication: @MainActor @Sendable (CodexAppDescriptor) throws -> Bool
     private let launchApplication: @MainActor @Sendable (CodexAppDescriptor) async throws -> Int32
     private let files = DarwinDurableFileOperations()
@@ -96,6 +98,12 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
         requestProcessTermination = sendSIGTERM
         normalTerminationGracePolls = 4
         quiescenceSleep = { try await Task.sleep(for: $0) }
+        removeJournalFile = {
+            try SpikeStore.openExisting(at: storeURL).removeJournal()
+        }
+        syncStoreDirectory = {
+            try PrivateDirectory.sync(at: storeURL)
+        }
         activateApplication = { descriptor in
             try CodexAppLifecycle().activateIfRunning(descriptor)
         }
@@ -121,6 +129,8 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
         quiescenceSleep: @escaping @Sendable (Duration) async throws -> Void = {
             try await Task.sleep(for: $0)
         },
+        removeJournalFile: (@Sendable () throws -> DurableRemoval)? = nil,
+        syncStoreDirectory: (@Sendable () throws -> Void)? = nil,
         activateApplication: @escaping @MainActor @Sendable (CodexAppDescriptor) throws -> Bool = {
             descriptor in
             try CodexAppLifecycle().activateIfRunning(descriptor)
@@ -141,6 +151,12 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
         self.requestProcessTermination = requestProcessTermination
         self.normalTerminationGracePolls = min(max(normalTerminationGracePolls, 0), 119)
         self.quiescenceSleep = quiescenceSleep
+        self.removeJournalFile = removeJournalFile ?? {
+            try SpikeStore.openExisting(at: storeURL).removeJournal()
+        }
+        self.syncStoreDirectory = syncStoreDirectory ?? {
+            try PrivateDirectory.sync(at: storeURL)
+        }
         self.activateApplication = activateApplication
         self.launchApplication = launchApplication
     }
@@ -314,7 +330,7 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
     }
 #endif
 
-    public func restoreRecoveryProfile(target value: String) async throws -> ProfileListItem {
+    public func restoreRecoveryProfile(target value: String) async throws -> RecoveryRestoreOutcome {
         guard !switchInProgress else {
             throw LocalCLIDataProviderFailure.switchAlreadyRunning
         }
@@ -332,8 +348,10 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
         }
         let registry = try store.loadRegistry()
         let captureProfileID = try store.loadCaptureProfileIDIfPresent()
+        let journalFinalizationEvidence = try store.loadJournalFinalizationEvidenceIfPresent()
         guard let journal = try store.loadJournalIfPresent(),
               journal.phase == .rollbackFailed,
+              journalFinalizationEvidence == nil,
               journal.previousProfileID != journal.targetProfileID,
               captureProfileID == nil || captureProfileID == journal.targetProfileID,
               registry.activeProfileID == journal.previousProfileID
@@ -375,6 +393,7 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
         guard try await locateApp() == descriptor,
               try store.loadRegistry() == registry,
               try store.loadJournalIfPresent() == journal,
+              try store.loadJournalFinalizationEvidenceIfPresent() == journalFinalizationEvidence,
               try store.loadCaptureProfileIDIfPresent() == captureProfileID else {
             throw LocalCLIDataProviderFailure.manualRecoveryUnavailable
         }
@@ -401,16 +420,24 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
         if captureProfileID != nil {
             _ = try store.removeCaptureProfileID()
         }
-        try await removeJournalDurably()
-        try await launchPrevious()
-
-        return ProfileListItem(
+        let restoredProfile = ProfileListItem(
             id: profile.id,
             label: profile.label,
             email: profile.email,
             active: true,
             needsRelogin: profile.needsRelogin
         )
+        do {
+            try await removeJournalDurably()
+        } catch where mutationOutcomeIsUncertain(error) {
+            return .journalFinalizationUncertain
+        }
+        do {
+            try await launchPrevious()
+            return .restoredAndLaunched(restoredProfile)
+        } catch {
+            return .restoredButLaunchUnconfirmed(restoredProfile)
+        }
     }
 
     public func syncActiveProfile() async throws -> ProfileListItem {
@@ -428,7 +455,7 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
             probeChildUnconfirmed = false
         }
 
-        guard try store.loadJournalIfPresent() == nil,
+        guard try journalIsDurablyAbsent(in: store),
               try store.loadCaptureProfileIDIfPresent() == nil,
               try !verificationWorkspaceExists() else {
             throw LocalCLIDataProviderFailure.pendingRecovery
@@ -524,18 +551,26 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
             guard let store = try openStoreIfPresent() else {
                 return .none
             }
-            if let journal = try store.loadJournalIfPresent() {
-                return .pending(
-                    transactionID: journal.transactionID.uuidString,
-                    phase: journal.phase,
-                    previousProfileID: journal.previousProfileID
-                )
-            }
-            guard try store.loadCaptureProfileIDIfPresent() == nil,
-                  try !verificationWorkspaceExists() else {
+            guard let lock = try store.tryAcquireTransactionLock() else {
                 return .blocked
             }
-            return .none
+            defer { lock.release() }
+            if try journalIsDurablyAbsent(in: store) {
+                guard try store.loadCaptureProfileIDIfPresent() == nil,
+                      try !verificationWorkspaceExists() else {
+                    return .blocked
+                }
+                return .none
+            }
+            guard let journal = try store.loadJournalIfPresent(),
+                  try store.loadJournalFinalizationEvidenceIfPresent() == nil else {
+                return .blocked
+            }
+            return .pending(
+                transactionID: journal.transactionID.uuidString,
+                phase: journal.phase,
+                previousProfileID: journal.previousProfileID
+            )
         } catch {
             return .blocked
         }
@@ -553,7 +588,7 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
         captureLock = lock
 
         do {
-            guard try store.loadJournalIfPresent() == nil,
+            guard try journalIsDurablyAbsent(in: store),
                   try !verificationWorkspaceExists() else {
                 throw LocalCLIDataProviderFailure.pendingRecovery
             }
@@ -879,7 +914,7 @@ extension LocalCLIDataProvider: SwitchTransactionDriving {
         guard try context.store.loadRegistry() == context.registry else {
             throw LocalCLIDataProviderFailure.invalidSwitchState
         }
-        return try context.store.loadJournalIfPresent() != nil
+        return try !journalIsDurablyAbsent(in: context.store)
             || context.store.loadCaptureProfileIDIfPresent() != nil
             || verificationWorkspaceExists()
     }
@@ -906,6 +941,11 @@ extension LocalCLIDataProvider: SwitchTransactionDriving {
               !target.needsRelogin else {
             throw LocalCLIDataProviderFailure.invalidSwitchState
         }
+        let activeAuthDestination = try files.snapshot(at: activeAuthURL)
+        guard case .exact = activeAuthDestination else {
+            throw LocalCLIDataProviderFailure.invalidSwitchState
+        }
+        switchActiveAuthDestination = activeAuthDestination
         _ = try credentialStore.loadCredential(for: source.id)
         _ = try credentialStore.loadCredential(for: target.id)
     }
@@ -1104,12 +1144,16 @@ extension LocalCLIDataProvider: SwitchTransactionDriving {
         guard try context.store.loadRegistry() == context.registry else {
             throw LocalCLIDataProviderFailure.registryRoundTripFailed
         }
-        if let expectedDestination = switchActiveAuthDestination {
-            guard try files.snapshot(at: activeAuthURL) == expectedDestination else {
-                throw LocalCLIDataProviderFailure.activeAuthChanged
-            }
+        guard case let .exact(expectedIdentity) = switchActiveAuthDestination,
+              try files.snapshot(at: activeAuthURL) == .exact(expectedIdentity),
+              let activeProfileID = context.registry.activeProfileID else {
+            throw LocalCLIDataProviderFailure.registryRoundTripFailed
         }
-        _ = try context.store.removeJournal()
+        try finalizeJournal(
+            in: context.store,
+            expectedActiveProfileID: activeProfileID,
+            expectedActiveAuthIdentity: expectedIdentity
+        )
     }
 
     public func activateExistingApplication() async throws {
@@ -1658,7 +1702,11 @@ private extension LocalCLIDataProvider {
                 try credentialStore.removeCredential(for: captureProfileID)
             }
             _ = try store.removeCaptureProfileID()
-            _ = try store.removeJournal()
+            try finalizeJournal(
+                in: store,
+                expectedActiveProfileID: previous.id,
+                expectedActiveAuthIdentity: restoredIdentity
+            )
         } catch {
             let failed = SwitchJournalRecord(
                 transactionID: rollback.transactionID,
@@ -1684,6 +1732,135 @@ private extension LocalCLIDataProvider {
             return nil
         }
         return try SpikeStore.openExisting(at: storeURL)
+    }
+
+    func finalizeJournal(
+        in store: SpikeStore,
+        expectedActiveProfileID: ProfileID,
+        expectedActiveAuthIdentity: FileIdentity
+    ) throws {
+        guard let journal = try store.loadJournalIfPresent() else {
+            throw LocalCLIDataProviderFailure.activeAuthChanged
+        }
+        let evidence = JournalFinalizationEvidence(
+            transactionID: journal.transactionID,
+            journalPhase: journal.phase,
+            expectedActiveProfileID: expectedActiveProfileID,
+            expectedActiveAuthSHA256: expectedActiveAuthIdentity.sha256.description
+        )
+        guard journalMatchesFinalizationEvidence(journal, evidence: evidence),
+              try finalizationStateMatches(
+                  evidence,
+                  in: store,
+                  expectedActiveAuthIdentity: expectedActiveAuthIdentity
+              ) else {
+            throw LocalCLIDataProviderFailure.activeAuthChanged
+        }
+        if let existing = try store.loadJournalFinalizationEvidenceIfPresent() {
+            guard existing == evidence else {
+                throw LocalCLIDataProviderFailure.pendingRecovery
+            }
+        } else {
+            _ = try store.createJournalFinalizationEvidence(evidence)
+        }
+        guard try store.loadJournalFinalizationEvidenceIfPresent() == evidence,
+              try finalizationStateMatches(
+                  evidence,
+                  in: store,
+                  expectedActiveAuthIdentity: expectedActiveAuthIdentity
+              ) else {
+            throw LocalCLIDataProviderFailure.activeAuthChanged
+        }
+        _ = try removeJournalFile()
+        guard try store.loadJournalIfPresent() == nil,
+              try store.loadJournalFinalizationEvidenceIfPresent() == evidence,
+              try finalizationStateMatches(
+                  evidence,
+                  in: store,
+                  expectedActiveAuthIdentity: expectedActiveAuthIdentity
+              ) else {
+            throw LocalCLIDataProviderFailure.activeAuthChanged
+        }
+        _ = try store.removeJournalFinalizationEvidence()
+    }
+
+    func journalIsDurablyAbsent(in store: SpikeStore) throws -> Bool {
+        let journal = try store.loadJournalIfPresent()
+        guard let evidence = try store.loadJournalFinalizationEvidenceIfPresent() else {
+            guard journal == nil else { return false }
+            do {
+                try syncStoreDirectory()
+                return true
+            } catch {
+                return false
+            }
+        }
+
+        guard journal.map({ journalMatchesFinalizationEvidence($0, evidence: evidence) }) ?? true,
+              try finalizationStateMatches(evidence, in: store) else {
+            return false
+        }
+        do {
+            if journal == nil {
+                try syncStoreDirectory()
+            } else {
+                _ = try removeJournalFile()
+                guard try store.loadJournalIfPresent() == nil else { return false }
+            }
+            guard try store.loadJournalFinalizationEvidenceIfPresent() == evidence,
+                  try finalizationStateMatches(evidence, in: store) else {
+                return false
+            }
+            _ = try store.removeJournalFinalizationEvidence()
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    func journalMatchesFinalizationEvidence(
+        _ journal: SwitchJournalRecord,
+        evidence: JournalFinalizationEvidence
+    ) -> Bool {
+        let expectedProfileID = journal.phase == .targetVerified
+            ? journal.targetProfileID
+            : journal.previousProfileID
+        let phaseMatches = journal.phase == evidence.journalPhase
+            || (journal.phase == .rollbackFailed && evidence.journalPhase == .rollbackStarted)
+        return journal.transactionID == evidence.transactionID
+            && phaseMatches
+            && expectedProfileID == evidence.expectedActiveProfileID
+    }
+
+    func finalizationStateMatches(
+        _ evidence: JournalFinalizationEvidence,
+        in store: SpikeStore,
+        expectedActiveAuthIdentity: FileIdentity? = nil
+    ) throws -> Bool {
+        let registry = try store.loadRegistry()
+        guard registry.activeProfileID == evidence.expectedActiveProfileID,
+              registry.profiles.contains(where: {
+                  $0.id == evidence.expectedActiveProfileID && !$0.needsRelogin
+              }),
+              try store.loadCaptureProfileIDIfPresent() == nil,
+              try !verificationWorkspaceExists(),
+              case let .exact(activeIdentity) = try files.snapshot(at: activeAuthURL),
+              expectedActiveAuthIdentity.map({ $0 == activeIdentity }) ?? true,
+              activeIdentity.sha256.description == evidence.expectedActiveAuthSHA256 else {
+            return false
+        }
+        if evidence.journalPhase != .preparing && evidence.journalPhase != .quitRequested {
+            let current = try readCurrentCredential()
+            guard current.identity == activeIdentity,
+                  current.credential
+                    == (try credentialStore.loadCredential(for: evidence.expectedActiveProfileID)) else {
+                return false
+            }
+        }
+        return try store.loadRegistry() == registry
+            && store.loadCaptureProfileIDIfPresent() == nil
+            && !verificationWorkspaceExists()
+            && files.snapshot(at: activeAuthURL) == .exact(activeIdentity)
     }
 
     func count(_ disposition: ProcessDisposition, in inventory: ProcessInventory) -> Int {

@@ -24,6 +24,7 @@
 - 저장 프로필 `switch --target`, 정상 종료, 격리 검증·refresh, 원자 교체, 재실행·검증, 실패 rollback
 - debug build의 post-launch 검증 실패 주입과 source 자동 롤백 실검증
 - `rollbackFailed` journal의 이전 프로필을 명시적으로 복구하는 `recovery restore`
+- 수동 복구의 완전 성공·앱 실행 미확인·journal 완료 불확실 typed outcome과 phase/expected-active finalization evidence gate
 - fake 3계정 카드와 확인 흐름을 가진 `MenuBarExtra` UI 프로토타입
 - CLI private file store와 제품 Keychain을 분리한 credential backend 경계, generic-password CRUD와 plaintext fallback 금지
 - `MenuBarExtra`의 실제 `LocalCLIDataProvider`·Keychain 주입과 Spike에서 분리된 제품 metadata store
@@ -153,7 +154,11 @@ A 활성, B 비활성, `recovery=none`이어야 한다. `rollback_failed`, `reco
 ./Scripts/dev.sh run recovery restore --profile A
 ```
 
-`RESTORE`를 입력하고, 잔존 앱 소유 프로세스 확인이 나오면 `TERMINATE`를 입력한다. process gate → stale verifier를 private `recovery-evidence`로 격리 → 저장된 A 검증 → 공용 auth 원자 복구 → A 이메일 검증 → registry A commit → capture 임시 artifact 정리 → journal 삭제 → 앱 실행 순서다. 등록된 B 프로필·저장본과 stale verifier 증거는 보존한다. 성공 출력은 `recovery=restored`, A `active=true`이며 `recovery status`는 `recovery=none`이어야 한다.
+`RESTORE`를 입력하고, 잔존 앱 소유 프로세스 확인이 나오면 `TERMINATE`를 입력한다. process gate → stale verifier를 private `recovery-evidence`로 격리 → 저장된 A 검증 → 공용 auth 원자 복구 → A 이메일 검증 → registry A commit → capture 임시 artifact 정리 → journal 삭제 → 앱 실행 순서다. 등록된 B 프로필·저장본과 stale verifier 증거는 보존한다.
+
+- `recovery=restored`: 복구와 앱 PID 확인 완료. A `active=true`, `recovery status`는 `recovery=none`이어야 한다.
+- `error=application_launch_unconfirmed`: auth·registry 복구와 journal 내구 삭제는 완료됐다. restore를 재실행하지 말고 `recovery status`가 `none`인지 확인한 뒤 앱 실행만 별도로 처리한다.
+- `error=recovery_uncertain`: journal unlink/parent `fsync` 완료를 단정할 수 없어 앱을 실행하지 않는다. 공통 mutation gate가 finalization evidence의 journal phase/expected active 조합·registry·검증 당시 active auth digest·잔존 artifact를 재검증한다. journal이 남았으면 내구 삭제하고, 없으면 store directory를 `fsync`한 뒤 상태를 다시 확인해 evidence를 제거한다. 이 절차가 끝나 `recovery status=none`일 때만 계속한다.
 
 ## 안전 규칙
 

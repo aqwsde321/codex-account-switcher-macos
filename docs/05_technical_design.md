@@ -177,11 +177,15 @@ path만 같다고 공식 앱으로 신뢰하지 않는다. bundle id와 서명 �
 책임:
 
 - transaction phase를 secret-free JSON으로 지속
-- crash 후 다음 행동 결정에 필요한 transaction/profile UUID와 시각만 저장
+- crash 후 다음 행동 결정에 필요한 transaction/profile UUID, phase, 시각, 복원 불가능한 active auth SHA-256만 저장
 - email, token, auth blob을 저장하지 않음
 - journal destination과 같은 디렉터리에 `0600` temp를 만들고 전체 write, file `fsync`, POSIX `rename`, parent directory `fsync` 순서로 지속
 - 각 phase를 durable하게 만든 뒤에만 다음 side effect를 시작
 - registry commit을 durable하게 완료한 뒤 journal을 `unlink`하고 journal parent directory를 `fsync`
+- journal 삭제 전 exact `schemaVersion, transactionId, journalPhase, expectedActiveProfileId, expectedActiveAuthSha256` finalization evidence를 같은 내구 쓰기 계약으로 저장하고 삭제 완료 뒤 제거
+- auth digest는 finalization 시 새로 관찰한 값을 신뢰하지 않고, 이전 검증 또는 pre-mutation unchanged gate가 보존한 exact `FileIdentity`에서만 만든다.
+- transaction lock 아래 phase/expected profile 합법성, registry, active auth digest, capture marker·verifier workspace 부재를 검증한다. `preparing`/`quitRequested` phase가 아니면 configured credential과 active auth도 exact 일치해야 한다.
+- evidence와 journal이 함께 남은 crash window는 같은 공통 gate가 journal을 내구 삭제하고 상태를 다시 검증한 뒤 evidence를 제거한다. exact phase 일치와 finalization 실패 뒤의 `rollbackStarted` evidence/`rollbackFailed` journal 전이만 허용한다. journal이 화면상 없으면 parent directory `fsync` 뒤 같은 재검증을 수행한다.
 - auth/credential/registry mutation 전 취소는 journal `unlink`와 parent directory `fsync`가 끝난 뒤 반환
 - malformed/torn journal, 알 수 없는 phase, 필수 필드 누락을 자동 보정·삭제하지 않고 모든 auth write와 앱 실행을 중단
 
@@ -415,6 +419,8 @@ Spike에서 다음을 확인했다.
 대상 사전 검증은 active `auth.json`을 변경하지 않는다. `false` identity 확인, `true` refresh, 동일 이메일 재확인, refreshed blob의 durable credential-store 저장이 모두 성공해야 `targetValidated`가 된다. 중간 실패 시 active source는 그대로 두고 대상 profile과 기존 credential을 보존한다. 명시적인 인증 만료·폐기·refresh 거부·identity 불일치는 `needsRelogin`으로 분류한다. network/timeout/DNS 실패나 credential-store write 실패는 token 폐기 또는 계정 revocation으로 단정하지 않으며 `needsRelogin`을 바꾸지 않는다.
 
 현재 token refresh 뒤 오류가 발생하면 `rollbackStarted`를 먼저 durable하게 기록하고 secure store의 검증된 previous blob을 공용 auth에 원자 복구한다. previous 이메일 검증→registry previous durable commit→journal unlink와 parent `fsync`를 순서대로 완료한 뒤에만 previous 앱을 다시 연다. 실패하면 `rollbackFailed`를 durable하게 기록하고 앱을 열지 않는다.
+
+명시적 `rollbackFailed` 복구 결과는 세 가지다. journal 내구 삭제와 앱 PID 확인이 모두 끝나면 `restoredAndLaunched`, journal 내구 삭제 뒤 앱 PID만 확인하지 못하면 `restoredButLaunchUnconfirmed`, journal unlink 결과 또는 parent `fsync`가 불확실하면 `journalFinalizationUncertain`이다. 마지막 분기에서는 앱을 실행하지 않는다. 이후 상태 조회와 모든 mutation gate는 lock 아래 phase/expected profile, registry, 이전에 검증된 active auth SHA-256, configured credential, 잔존 artifact를 재검증한다. journal이 남으면 내구 삭제하고 상태를 다시 검증한 뒤 evidence를 제거한다. journal이 없으면 store directory `fsync` 뒤 같은 순서로 정리한다. 실패하면 `blocked`, 모두 성공하면 그때만 `none`이다.
 
 아직 auth, credential, registry mutation이 전혀 없는 상태에서 사용자가 취소하면 journal을 `unlink`하고 parent directory를 `fsync`한 뒤에만 취소 완료를 반환한다. mutation 가능성이 있거나 durable 여부가 모호하면 journal을 삭제하지 않고 recovery로 진입한다.
 

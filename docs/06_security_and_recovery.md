@@ -1,7 +1,7 @@
 # 보안·복구 설계
 
-- 상태: Swift CLI Spike·manual recovery·Keychain backend·메뉴바 provider/등록/활성 인증 sync/read-only recovery 상태 표시·gate 완료, 메뉴바 수동 복구·실 Keychain·배포 보안 검증 전
-- 기준일: 2026-07-30
+- 상태: Swift CLI Spike·manual recovery typed outcome·journal 부재 내구 재확인 gate·Keychain backend·메뉴바 provider/등록/활성 인증 sync/read-only recovery 상태 표시 완료, 메뉴바 수동 복구·실 Keychain·배포 보안 검증 전
+- 기준일: 2026-07-31
 - 적용 대상: Swift CLI Spike와 후속 macOS 메뉴바 앱
 
 ## 1. 보안 목표와 비목표
@@ -35,7 +35,7 @@
 | 계정 이메일 | 중간 | secret-free registry/UI | 로그에서는 마스킹 |
 | 프로필 ID | 낮음 | registry/journal | 이메일 대신 transaction 식별에 사용 |
 | task/session/history | 높음 | 공용 `~/.codex` | 계정 간 공유 사실을 명시 |
-| switch journal | 낮음 | Application Support | 고정 schema 외 값·토큰·이메일·build 미포함 |
+| switch journal/finalization evidence | 낮음 | Application Support | 고정 schema 외 값·토큰·이메일·build 미포함 |
 | 진단 로그 | 중간 | Application Support/logs | 최소 수집·짧은 보존 |
 
 ## 3. 신뢰 경계
@@ -219,6 +219,8 @@ preparing
 - 전체 bytes 기록과 file `fsync` 성공 후 `rename`하고, parent directory를 `fsync`한다.
 - 각 phase는 그 phase 다음 side effect를 시작하기 전에 위 절차로 내구 기록한다. 어느 단계든 실패하면 다음 side effect를 실행하지 않는다.
 - registry commit은 같은 내구 쓰기 절차로 먼저 완료한다. 그 뒤 journal을 `unlink`하고 journal parent directory를 `fsync`해야 transaction 완료다.
+- journal 삭제 전 `schemaVersion, transactionId, journalPhase, expectedActiveProfileId, expectedActiveAuthSha256` 다섯 필드의 finalization evidence를 내구 저장한다. digest는 이전 검증 또는 pre-mutation unchanged gate가 보존한 exact `FileIdentity`에서만 만든다.
+- lock 아래 phase/expected profile, registry, active auth digest, capture marker·verifier workspace 부재를 확인한다. `preparing`/`quitRequested` 외 phase는 configured credential exact 일치도 요구한다. journal/evidence phase는 exact 일치 또는 finalization 실패 뒤 `rollbackStarted`→`rollbackFailed`만 허용한다. journal과 evidence가 함께 남으면 journal 내구 삭제→상태 재검증→evidence 내구 삭제를 재개하고, journal이 없으면 directory `fsync`→상태 재검증→evidence 삭제를 수행한다. 실패하면 `blocked`이고 switch·capture·sync를 모두 거부한다.
 - `authReplaced` 전 사용자 취소나 process/compatibility 차단은 active가 검증된 source 상태임을 확인한 뒤 journal을 `unlink`하고 parent directory를 `fsync`한다.
 - journal이 누락이 아니라 malformed, 필드 초과·누락, 알 수 없는 phase, torn JSON이면 자동 추정·삭제·인증 변경 없이 `STOP`한다.
 
@@ -258,7 +260,7 @@ preparing
 | 대상 이메일 불일치 | 예 | 대상 앱 종료 후 이전 auth 복구 | 복구 후 이전 계정 |
 | 이전 auth 복구 실패 | 불명확 | `rollbackFailed`, 자동 동작 중지 | 금지 |
 | 이전 이메일 검증 실패 | 이전본 예상 | 앱 종료 유지·수동 복구 | 금지 |
-| journal unlink 또는 parent `fsync` 실패 | 대상 검증 완료 | journal 보존으로 간주하고 다음 시작에 target 재판정 | 대상 계정 가능 |
+| journal unlink 또는 parent `fsync` 실패 | 단계에 따름 | phase/profile·registry·active digest·configured credential·잔존 artifact 재검증 후 journal/evidence 순서대로 cleanup 재개 | 검증 전 금지 |
 
 ## 8. 자동 롤백 알고리즘
 
@@ -311,6 +313,12 @@ journal 단계만 믿고 파일을 쓰지 않는다. 항상 현재 프로세스 
 9. capture 실패라면 등록된 target은 보존하고, 미등록 임시 target credential과 capture marker만 제거한다.
 10. journal을 마지막에 unlink하고 parent directory를 `fsync`한다.
 11. 확인 성공 후 공식 앱을 실행한다.
+
+결과 계약:
+
+- `recovery=restored`: auth·registry 복구, journal 내구 삭제, 앱 PID 확인이 모두 완료됐다.
+- `error=application_launch_unconfirmed`: auth·registry 복구와 journal 내구 삭제는 완료됐지만 앱 PID 확인은 실패했다. restore를 재시도하지 않고 `recovery status=none` 확인 뒤 앱 실행만 별도로 처리한다.
+- `error=recovery_uncertain`: journal 완료를 단정하지 않고 앱도 실행하지 않는다. 같은 provider와 재시작 provider의 공통 gate가 durable evidence의 phase/expected active, registry, 이전 검증 active auth SHA-256, configured credential, 잔존 artifact를 재검증한다. journal이 남으면 내구 삭제하고, 없으면 store directory를 `fsync`한 뒤 상태를 다시 확인해 evidence를 제거한다. 하나라도 실패하면 `blocked`와 mutation 금지를 유지한다.
 
 수동 복구에서도 auth 원문을 터미널에 출력하거나 텍스트 편집기로 붙여넣지 않는다. 저장본을 직접 `cp`하는 절차는 최후의 개발자 복구 수단이며 일반 사용자 UI로 제공하지 않는다.
 

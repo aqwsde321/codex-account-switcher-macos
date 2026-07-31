@@ -140,6 +140,8 @@ Unit/Integration test는 실제 `~/.codex/auth.json`을 읽거나 쓰지 않는�
 | U-034 | 메뉴바 활성 인증 sync 뒤 recovery blocked | STOP 안내, sync·등록·전환 추가 mutation 0회 | 예 |
 | U-035 | 메뉴바 `rollbackFailed` 상태 | journal previous profile ID로 정확한 이전 계정 표시 | 예 |
 | U-036 | 메뉴바 일반 pending·blocked 상태 | pending phase 표시, blocked 불명확 STOP, mutation 없음 | 예 |
+| U-037 | 수동 복구 뒤 앱 실행 확인 실패 | 복구 profile typed payload와 launch 미확인 outcome 분리, restore 재시도 금지 | 예 |
+| U-038 | 수동 복구 journal 완료 불확실 | 성공 payload·앱 launch 없음, recovery 불확실 outcome | 예 |
 
 ## 6. Integration 테스트 매트릭스
 
@@ -194,6 +196,9 @@ Unit/Integration test는 실제 `~/.codex/auth.json`을 읽거나 쓰지 않는�
 | I-045 | A/B 등록 상태에서 C capture | C 저장 후 등록 시작 전 active 복원, A/B/C credential 보존 | 예 |
 | I-046 | 세 프로필 상태에서 네 번째 capture | auth·credential·registry·journal mutation 0회 | 예 |
 | I-047 | 제3 프로필이 있는 `rollbackFailed` 복구 | previous 복구, 무관한 프로필과 credential 보존 | 예 |
+| I-048 | 수동 복구 commit 뒤 앱 launch 실패 | exit 1과 `application_launch_unconfirmed`, previous active·auth와 journal 내구 삭제 보존 | 예 |
+| I-049 | journal unlink가 보이나 parent `fsync` 실패 | exit 1과 `recovery_uncertain`, durable phase/profile+auth-digest evidence 보존, registry/auth digest 불일치나 fsync 실패 시 blocked·mutation 0회; 모두 재검증 뒤에만 none | 예 |
+| I-050 | evidence 저장 뒤 journal unlink 전 중단 | 무관한 phase/profile은 blocked+양쪽 보존, exact 또는 `rollbackStarted` evidence/`rollbackFailed` journal 조합이면 status 선행 없이 공통 mutation gate가 cleanup 재개 | 예 |
 
 ## 7. 공식 앱 Black-box 매트릭스
 
@@ -449,7 +454,7 @@ MVP는 최대 3개 계정을 노출하며 `personalAuth`, `workAuth` 같은 고�
 
 - 공식 앱 Black-box B-001~B-016 PASS
 - process gate와 독립 CLI P-001~P-008 PASS 또는 P-008의 명시적 안전 조건 충족
-- Integration I-001~I-047 PASS
+- Integration I-001~I-050 PASS
 - 동일 task B-010: A→B→A 3회 연속 실제 메시지 PASS
 - 모든 전환에서 이메일 검증 PASS
 - secret exposure 0건

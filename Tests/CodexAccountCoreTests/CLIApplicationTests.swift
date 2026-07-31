@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import CodexAccountCore
 
@@ -73,6 +74,333 @@ func cliApplicationTests() -> [TestCase] {
                 !result.standardOutput.contains(previousProfileID.description),
                 "menu-only previous profile ID leaked into CLI output"
             )
+        },
+        TestCase("Manual recovery reports a restored profile when app launch is unconfirmed") {
+            try await withCaptureTemporaryDirectory { directory in
+                let fixture = try makeManualRecoveryFixture(in: directory)
+                let store = try SpikeStore.openExisting(at: fixture.storeURL)
+                let launches = await MainActor.run { AppLaunchRecorder() }
+                let application = CLIApplication(
+                    provider: LocalCLIDataProvider(
+                        storeURL: fixture.storeURL,
+                        activeAuthURL: fixture.authURL,
+                        processProvider: EmptyProcessSnapshotProvider(),
+                        locateApp: { fixture.descriptor },
+                        runningApplicationPIDs: { _ in [] },
+                        requestApplicationTermination: { _ in [] },
+                        normalTerminationGracePolls: 0,
+                        quiescenceSleep: { _ in },
+                        launchApplication: { _ in
+                            launches.record()
+                            throw CodexAppLifecycleFailure.launchFailed
+                        }
+                    )
+                )
+
+                let result = await application.run(
+                    arguments: ["recovery", "restore", "--profile", fixture.previous.label],
+                    mutationConfirmed: true
+                )
+                let registry = try store.loadRegistry()
+                let active = try CredentialBlob(validating: Data(contentsOf: fixture.authURL))
+                let storedPrevious = try store.loadCredential(for: fixture.previous.id)
+                let journal = try store.loadJournalIfPresent()
+                let launchCount = await MainActor.run { launches.count }
+
+                try expect(result.exitCode == 1, "unconfirmed app launch returned full success")
+                try expect(
+                    result.standardOutput.contains("recovery=restored application_launch=unconfirmed"),
+                    "durable recovery was hidden after app launch failure"
+                )
+                try expect(
+                    result.standardOutput.contains("active=true label=A"),
+                    "launch uncertainty lost the restored profile payload"
+                )
+                try expect(
+                    result.standardError == "error=application_launch_unconfirmed\n",
+                    "app launch failure was not typed"
+                )
+                try expect(registry.activeProfileID == fixture.previous.id, "recovery did not commit previous")
+                try expect(active == storedPrevious, "recovery did not restore previous auth")
+                try expect(journal == nil, "durable recovery left a journal")
+                try expect(launchCount == 1, "app launch was not attempted exactly once")
+            }
+        },
+        TestCase("Manual recovery stops when journal finalization durability is unknown") {
+            try await withCaptureTemporaryDirectory { directory in
+                let fixture = try makeManualRecoveryFixture(in: directory)
+                let store = try SpikeStore.openExisting(at: fixture.storeURL)
+                let launches = await MainActor.run { AppLaunchRecorder() }
+                let syncFailure = DurableFileFailure(
+                    mutation: .remove,
+                    stage: .syncParent,
+                    errno: EIO,
+                    certainty: .durabilityUnknown
+                )
+                let provider = LocalCLIDataProvider(
+                    storeURL: fixture.storeURL,
+                    activeAuthURL: fixture.authURL,
+                    processProvider: EmptyProcessSnapshotProvider(),
+                    locateApp: { fixture.descriptor },
+                    runningApplicationPIDs: { _ in [] },
+                    requestApplicationTermination: { _ in [] },
+                    normalTerminationGracePolls: 0,
+                    quiescenceSleep: { _ in },
+                    removeJournalFile: {
+                        _ = try SpikeStore.openExisting(at: fixture.storeURL).removeJournal()
+                        throw syncFailure
+                    },
+                    syncStoreDirectory: { throw syncFailure },
+                    launchApplication: { _ in
+                        launches.record()
+                        return 301
+                    }
+                )
+                let application = CLIApplication(provider: provider)
+
+                let result = await application.run(
+                    arguments: ["recovery", "restore", "--profile", fixture.previous.label],
+                    mutationConfirmed: true
+                )
+                let recovery = await application.run(arguments: ["recovery", "status"])
+                let blockedSwitch = await application.run(
+                    arguments: ["switch", "--target", "B"],
+                    mutationConfirmed: true
+                )
+                let blockedCapture = await application.run(
+                    arguments: ["profile", "capture", "--label", "C"],
+                    mutationConfirmed: true
+                )
+                let blockedSync = await application.run(
+                    arguments: ["profile", "sync-active"],
+                    mutationConfirmed: true
+                )
+                let restartedApplication = CLIApplication(
+                    provider: LocalCLIDataProvider(
+                        storeURL: fixture.storeURL,
+                        activeAuthURL: fixture.authURL,
+                        processProvider: EmptyProcessSnapshotProvider(),
+                        locateApp: { fixture.descriptor },
+                        runningApplicationPIDs: { _ in [] },
+                        syncStoreDirectory: { throw syncFailure }
+                    )
+                )
+                let restartedRecovery = await restartedApplication.run(arguments: ["recovery", "status"])
+                let restoredRegistry = try store.loadRegistry()
+                let restoredAuthData = try Data(contentsOf: fixture.authURL)
+                let evidenceBeforeMismatch = try store.loadJournalFinalizationEvidenceIfPresent()
+                _ = try store.saveRegistry(
+                    ProfileRegistry(
+                        activeProfileID: fixture.target.id,
+                        profiles: restoredRegistry.profiles
+                    )
+                )
+                let mismatchedApplication = CLIApplication(
+                    provider: LocalCLIDataProvider(
+                        storeURL: fixture.storeURL,
+                        activeAuthURL: fixture.authURL,
+                        processProvider: EmptyProcessSnapshotProvider(),
+                        locateApp: { fixture.descriptor },
+                        runningApplicationPIDs: { _ in [] }
+                    )
+                )
+                let mismatchedRecovery = await mismatchedApplication.run(arguments: ["recovery", "status"])
+                let evidenceAfterMismatch = try store.loadJournalFinalizationEvidenceIfPresent()
+                _ = try store.saveRegistry(restoredRegistry)
+                let files = DarwinDurableFileOperations()
+                _ = try files.replace(
+                    contents: SensitiveBytes(fixture.targetAuthData),
+                    at: fixture.authURL,
+                    expecting: files.snapshot(at: fixture.authURL)
+                )
+                let authMismatchedApplication = CLIApplication(
+                    provider: LocalCLIDataProvider(
+                        storeURL: fixture.storeURL,
+                        activeAuthURL: fixture.authURL,
+                        processProvider: EmptyProcessSnapshotProvider(),
+                        locateApp: { fixture.descriptor },
+                        runningApplicationPIDs: { _ in [] }
+                    )
+                )
+                let authMismatchedRecovery = await authMismatchedApplication.run(
+                    arguments: ["recovery", "status"]
+                )
+                let evidenceAfterAuthMismatch = try store.loadJournalFinalizationEvidenceIfPresent()
+                _ = try files.replace(
+                    contents: SensitiveBytes(restoredAuthData),
+                    at: fixture.authURL,
+                    expecting: files.snapshot(at: fixture.authURL)
+                )
+                let reconciledApplication = CLIApplication(
+                    provider: LocalCLIDataProvider(
+                        storeURL: fixture.storeURL,
+                        activeAuthURL: fixture.authURL,
+                        processProvider: EmptyProcessSnapshotProvider(),
+                        locateApp: { fixture.descriptor },
+                        runningApplicationPIDs: { _ in [] }
+                    )
+                )
+                let reconciledRecovery = await reconciledApplication.run(arguments: ["recovery", "status"])
+                let registry = try store.loadRegistry()
+                let active = try CredentialBlob(validating: Data(contentsOf: fixture.authURL))
+                let storedPrevious = try store.loadCredential(for: fixture.previous.id)
+                let visibleJournal = try store.loadJournalIfPresent()
+                let evidenceAfterReconciliation = try store.loadJournalFinalizationEvidenceIfPresent()
+                let captureProfileID = try store.loadCaptureProfileIDIfPresent()
+                let launchCount = await MainActor.run { launches.count }
+
+                try expect(result.exitCode == 1, "unknown journal durability returned success")
+                try expect(result.standardOutput.isEmpty, "unknown durability reported restored output")
+                try expect(
+                    result.standardError == "error=recovery_uncertain\n",
+                    "unknown journal durability was not typed"
+                )
+                try expect(recovery.standardOutput == "recovery=blocked\n", "uncertain recovery gate reopened")
+                try expect(
+                    restartedRecovery.standardOutput == "recovery=blocked\n",
+                    "restarted provider lost the uncertain recovery gate"
+                )
+                try expect(
+                    evidenceBeforeMismatch?.expectedActiveProfileID == fixture.previous.id,
+                    "journal finalization evidence lost the expected active profile"
+                )
+                try expect(
+                    mismatchedRecovery.standardOutput == "recovery=blocked\n"
+                        && evidenceAfterMismatch == evidenceBeforeMismatch,
+                    "registry mismatch cleared journal finalization evidence"
+                )
+                try expect(
+                    authMismatchedRecovery.standardOutput == "recovery=blocked\n"
+                        && evidenceAfterAuthMismatch == evidenceBeforeMismatch,
+                    "active auth mismatch cleared journal finalization evidence"
+                )
+                try expect(
+                    reconciledRecovery.standardOutput == "recovery=none\n",
+                    "verified state and directory fsync did not reconcile journal absence"
+                )
+                try expect(
+                    [blockedSwitch, blockedCapture, blockedSync].allSatisfy { $0.exitCode == 1 },
+                    "uncertain recovery allowed a mutation"
+                )
+                try expect(registry.activeProfileID == fixture.previous.id, "recovery lost previous registry commit")
+                try expect(active == storedPrevious, "recovery lost previous auth verification")
+                try expect(visibleJournal == nil, "fault did not cover the visible-unlink window")
+                try expect(evidenceAfterReconciliation == nil, "reconciled finalization evidence remained")
+                try expect(captureProfileID == nil, "uncertain recovery created capture state")
+                try expect(launchCount == 0, "uncertain journal finalization launched the app")
+            }
+        },
+        TestCase("Journal finalization resumes through the shared mutation gate") {
+            try await withCaptureTemporaryDirectory { directory in
+                let fixture = try makeManualRecoveryFixture(in: directory)
+                let store = try SpikeStore.openExisting(at: fixture.storeURL)
+                let unlinkFailure = DurableFileFailure(
+                    mutation: .remove,
+                    stage: .unlink,
+                    errno: EIO,
+                    certainty: .destinationUnchanged
+                )
+                let interruptedApplication = CLIApplication(
+                    provider: LocalCLIDataProvider(
+                        storeURL: fixture.storeURL,
+                        activeAuthURL: fixture.authURL,
+                        processProvider: EmptyProcessSnapshotProvider(),
+                        locateApp: { fixture.descriptor },
+                        runningApplicationPIDs: { _ in [] },
+                        requestApplicationTermination: { _ in [] },
+                        normalTerminationGracePolls: 0,
+                        quiescenceSleep: { _ in },
+                        removeJournalFile: { throw unlinkFailure }
+                    )
+                )
+
+                let interrupted = await interruptedApplication.run(
+                    arguments: ["recovery", "restore", "--profile", fixture.previous.label],
+                    mutationConfirmed: true
+                )
+                let journalBeforeResume = try store.loadJournalIfPresent()
+                let evidenceBeforeResume = try store.loadJournalFinalizationEvidenceIfPresent()
+                guard let evidenceBeforeResume else {
+                    throw TestFailure(description: "interrupted finalization lost durable evidence")
+                }
+                let evidenceURL = fixture.storeURL.appendingPathComponent("journal-finalization.json")
+                let mismatchedEvidence = Data(
+                    """
+                    {
+                      "schemaVersion": 1,
+                      "transactionId": "\(evidenceBeforeResume.transactionID.uuidString)",
+                      "journalPhase": "targetVerified",
+                      "expectedActiveProfileId": "\(evidenceBeforeResume.expectedActiveProfileID)",
+                      "expectedActiveAuthSha256": "\(evidenceBeforeResume.expectedActiveAuthSHA256)"
+                    }
+                    """.utf8
+                )
+                let files = DarwinDurableFileOperations()
+                _ = try files.replace(
+                    contents: SensitiveBytes(mismatchedEvidence),
+                    at: evidenceURL,
+                    expecting: files.snapshot(at: evidenceURL)
+                )
+                let blockedApplication = CLIApplication(
+                    provider: LocalCLIDataProvider(
+                        storeURL: fixture.storeURL,
+                        activeAuthURL: fixture.authURL,
+                        processProvider: EmptyProcessSnapshotProvider(),
+                        locateApp: { fixture.descriptor },
+                        runningApplicationPIDs: { _ in [] }
+                    )
+                )
+                let blocked = await blockedApplication.run(arguments: ["recovery", "status"])
+                let journalAfterMismatch = try store.loadJournalIfPresent()
+                let evidenceAfterMismatch = try store.loadJournalFinalizationEvidenceIfPresent()
+                let matchingEvidence = Data(
+                    """
+                    {
+                      "schemaVersion": 1,
+                      "transactionId": "\(evidenceBeforeResume.transactionID.uuidString)",
+                      "journalPhase": "rollbackStarted",
+                      "expectedActiveProfileId": "\(evidenceBeforeResume.expectedActiveProfileID)",
+                      "expectedActiveAuthSha256": "\(evidenceBeforeResume.expectedActiveAuthSHA256)"
+                    }
+                    """.utf8
+                )
+                _ = try files.replace(
+                    contents: SensitiveBytes(matchingEvidence),
+                    at: evidenceURL,
+                    expecting: files.snapshot(at: evidenceURL)
+                )
+                let resumedApplication = CLIApplication(
+                    provider: LocalCLIDataProvider(
+                        storeURL: fixture.storeURL,
+                        activeAuthURL: fixture.authURL,
+                        processProvider: EmptyProcessSnapshotProvider(),
+                        locateApp: { fixture.descriptor },
+                        runningApplicationPIDs: { _ in [301] },
+                        activateApplication: { _ in true }
+                    )
+                )
+                let resumed = await resumedApplication.run(
+                    arguments: ["switch", "--target", fixture.previous.label],
+                    mutationConfirmed: true
+                )
+                let journalAfterResume = try store.loadJournalIfPresent()
+                let evidenceAfterResume = try store.loadJournalFinalizationEvidenceIfPresent()
+
+                try expect(interrupted.exitCode == 1, "interrupted journal unlink returned success")
+                try expect(
+                    journalBeforeResume?.phase == .rollbackFailed,
+                    "interrupted finalization lost its journal"
+                )
+                try expect(
+                    blocked.standardOutput == "recovery=blocked\n"
+                        && journalAfterMismatch == journalBeforeResume
+                        && evidenceAfterMismatch?.journalPhase == .targetVerified,
+                    "phase-mismatched evidence was accepted"
+                )
+                try expect(resumed.exitCode == 0, "shared mutation gate did not resume finalization")
+                try expect(journalAfterResume == nil, "resumed finalization left journal")
+                try expect(evidenceAfterResume == nil, "resumed finalization left evidence")
+            }
         },
         TestCase("CLIApplication reports an incompatible installed application") {
             let provider = StubCLIDataProvider(
@@ -2054,6 +2382,90 @@ private final class ProbeCountRunningPIDs {
     }
 }
 
+private struct ManualRecoveryFixture: Sendable {
+    let storeURL: URL
+    let authURL: URL
+    let targetAuthData: Data
+    let previous: ProfileMetadata
+    let target: ProfileMetadata
+    let descriptor: CodexAppDescriptor
+}
+
+private func makeManualRecoveryFixture(in directory: URL) throws -> ManualRecoveryFixture {
+    let codexHome = directory.appendingPathComponent(".codex", isDirectory: true)
+    try FileManager.default.createDirectory(at: codexHome, withIntermediateDirectories: false)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: codexHome.path)
+    let authURL = codexHome.appendingPathComponent("auth.json", isDirectory: false)
+    let targetData = Data(
+        #"{"auth_mode":"chatgpt","test_account":"b","tokens":{"id_token":"b-id","access_token":"b-access","refresh_token":"b-refresh"}}"#.utf8
+    )
+    let targetCredential = try CredentialBlob(validating: targetData)
+    try targetData.write(to: authURL, options: .withoutOverwriting)
+    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: authURL.path)
+
+    let storeURL = directory.appendingPathComponent("store", isDirectory: true)
+    let store = try SpikeStore.create(at: storeURL)
+    let previous = ProfileMetadata(
+        id: ProfileID(UUID()),
+        label: "A",
+        email: "person@example.invalid",
+        planType: "plus",
+        needsRelogin: false,
+        createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+        updatedAt: Date(timeIntervalSince1970: 1_700_000_000)
+    )
+    let target = ProfileMetadata(
+        id: ProfileID(UUID()),
+        label: "B",
+        email: "b@example.invalid",
+        planType: "plus",
+        needsRelogin: false,
+        createdAt: Date(timeIntervalSince1970: 1_700_000_001),
+        updatedAt: Date(timeIntervalSince1970: 1_700_000_001)
+    )
+    let previousCredential = try CredentialBlob(validating: Data(
+        #"{"auth_mode":"chatgpt","test_account":"a","tokens":{"id_token":"a-id","access_token":"a-access","refresh_token":"a-refresh"}}"#.utf8
+    ))
+    _ = try store.saveCredential(previousCredential, for: previous.id)
+    _ = try store.saveCredential(targetCredential, for: target.id)
+    _ = try store.saveRegistry(
+        ProfileRegistry(activeProfileID: target.id, profiles: [previous, target])
+    )
+    let startedAt = Date(timeIntervalSince1970: 1_700_000_100)
+    _ = try store.createJournalIfAbsent(
+        SwitchJournalRecord(
+            transactionID: UUID(),
+            phase: .rollbackFailed,
+            previousProfileID: previous.id,
+            targetProfileID: target.id,
+            startedAt: startedAt,
+            updatedAt: startedAt
+        )
+    )
+
+    let executable = try makeCaptureAppServer(in: directory, rotateToOtherAccount: false)
+    let bundleURL = directory.appendingPathComponent("ChatGPT.app", isDirectory: true)
+    let descriptor = CodexAppDescriptor(
+        bundleURL: bundleURL,
+        mainExecutableURL: bundleURL.appendingPathComponent("Contents/MacOS/ChatGPT"),
+        bundledCodexURL: executable,
+        bundleIdentifier: "com.openai.codex",
+        version: "26.721.41059",
+        build: "5848",
+        appSigningIdentifier: "com.openai.codex",
+        bundledCodexSigningIdentifier: "codex",
+        teamIdentifier: "2DC432GLL2"
+    )
+    return ManualRecoveryFixture(
+        storeURL: storeURL,
+        authURL: authURL,
+        targetAuthData: targetData,
+        previous: previous,
+        target: target,
+        descriptor: descriptor
+    )
+}
+
 private func withCaptureTemporaryDirectory(
     _ body: (URL) async throws -> Void
 ) async throws {
@@ -2200,8 +2612,8 @@ private actor StubCLIDataProvider: CLIDataProviding {
         return capturedProfile
     }
 
-    func restoreRecoveryProfile(target: String) async throws -> ProfileListItem {
-        capturedProfile
+    func restoreRecoveryProfile(target: String) async throws -> RecoveryRestoreOutcome {
+        .restoredAndLaunched(capturedProfile)
     }
 
 #if SPIKE_FAULT_INJECTION
