@@ -30,6 +30,10 @@ public enum RecoveryCoordinatorFailure: Error, Equatable, Sendable {
     case rollbackFailed
 }
 
+public enum RecoveryTargetVerificationFailure: Error, Equatable, Sendable {
+    case targetUnverified
+}
+
 public actor RecoveryCoordinator {
     private let executor: any RecoveryExecuting
     private let now: @Sendable () -> Date
@@ -102,6 +106,17 @@ private extension RecoveryCoordinator {
         case .commitVerifiedTarget:
             do {
                 try await executor.verifyTargetStillActive(expectedProfileID: snapshot.journal.targetProfileID)
+            } catch let failure as RecoveryTargetVerificationFailure
+                where failure == .targetUnverified
+            {
+                try await executor.revalidateCredentialMutationGate()
+                try await persist(.rollbackStarted, for: snapshot.journal)
+                try await restorePrevious(snapshot, relaunchPrevious: relaunchPrevious)
+                return .completed(.restorePrevious)
+            } catch {
+                throw RecoveryCoordinatorFailure.executionFailed
+            }
+            do {
                 try await executor.commitActiveProfile(snapshot.journal.targetProfileID)
                 try await executor.removeJournalDurably()
                 return .completed(action)
@@ -133,11 +148,13 @@ private extension RecoveryCoordinator {
             return .completed(action)
 
         case .repairCurrentThenCancel:
+            try await persist(.rollbackStarted, for: snapshot.journal)
             do {
                 try await executor.revalidateCredentialMutationGate()
                 try await executor.repairCurrentCredential(snapshot.journal.previousProfileID)
             } catch {
-                throw RecoveryCoordinatorFailure.executionFailed
+                try? await persist(.rollbackFailed, for: snapshot.journal)
+                throw RecoveryCoordinatorFailure.rollbackFailed
             }
             try await finishOnPrevious(snapshot, relaunchPrevious: relaunchPrevious)
             return .completed(action)

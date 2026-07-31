@@ -714,6 +714,21 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
         )
     }
 
+    public func recoverPendingTransaction() async throws -> RecoveryOutcome {
+        guard !switchInProgress else {
+            throw LocalCLIDataProviderFailure.switchAlreadyRunning
+        }
+        guard try openStoreIfPresent() != nil else {
+            return .none
+        }
+        switchInProgress = true
+        defer {
+            switchInProgress = false
+            resetSwitchTransactionState()
+        }
+        return try await RecoveryCoordinator(executor: self).recover(relaunchPrevious: false)
+    }
+
     public func recoveryStatus() async throws -> RecoveryCLIStatus {
         do {
             guard let store = try openStoreIfPresent() else {
@@ -1092,7 +1107,14 @@ extension LocalCLIDataProvider: SwitchTransactionDriving {
     }
 
     public func persistJournal(_ record: SwitchJournalRecord) async throws {
-        _ = try requireSwitchContext().store.updateJournal(record)
+        let context = try requireSwitchContext()
+        guard try context.store.loadRegistry() == context.registry else {
+            throw LocalCLIDataProviderFailure.invalidSwitchState
+        }
+        _ = try context.store.updateJournal(record)
+        guard try context.store.loadRegistry() == context.registry else {
+            throw LocalCLIDataProviderFailure.invalidSwitchState
+        }
     }
 
     public func validatePreparation(
@@ -1175,12 +1197,19 @@ extension LocalCLIDataProvider: SwitchTransactionDriving {
     }
 
     public func revalidateCredentialMutationGate() async throws {
+        let context = try requireSwitchContext()
+        guard try context.store.loadRegistry() == context.registry else {
+            throw LocalCLIDataProviderFailure.invalidSwitchState
+        }
         do {
-            try await requireMutationGate(for: requireSwitchContext().descriptor)
+            try await requireMutationGate(for: context.descriptor)
         } catch let failure as LocalCLIDataProviderFailure
             where failure == .processBlocked || failure == .processSnapshotUnstable
         {
             throw SwitchCoordinatorFailure.processBlocked
+        }
+        guard try context.store.loadRegistry() == context.registry else {
+            throw LocalCLIDataProviderFailure.invalidSwitchState
         }
     }
 
@@ -1332,14 +1361,16 @@ extension LocalCLIDataProvider: SwitchTransactionDriving {
     public func commitActiveProfile(_ profileID: ProfileID) async throws {
         let context = try requireSwitchContext()
         let current = try context.store.loadRegistry()
-        guard current.profiles == context.registry.profiles,
-              current.profiles.contains(where: { $0.id == profileID }),
+        guard current == context.registry,
+              current.profiles.contains(where: { $0.id == profileID && !$0.needsRelogin }),
               let expectedDestination = switchActiveAuthDestination,
               try files.snapshot(at: activeAuthURL) == expectedDestination else {
             throw LocalCLIDataProviderFailure.registryRoundTripFailed
         }
         let updated = try ProfileRegistry(activeProfileID: profileID, profiles: current.profiles)
-        _ = try context.store.saveRegistry(updated)
+        if current != updated {
+            _ = try context.store.saveRegistry(updated)
+        }
         guard try context.store.loadRegistry() == updated,
               try files.snapshot(at: activeAuthURL) == expectedDestination else {
             throw LocalCLIDataProviderFailure.registryRoundTripFailed
@@ -1429,6 +1460,231 @@ extension LocalCLIDataProvider: SwitchTransactionDriving {
     }
 }
 
+extension LocalCLIDataProvider: RecoveryExecuting {
+    public func beginExclusiveRecovery() async throws -> Bool {
+        guard switchLock == nil,
+              captureLock == nil,
+              switchStore == nil,
+              switchDescriptor == nil,
+              switchExpectedRegistry == nil else {
+            throw LocalCLIDataProviderFailure.invalidSwitchState
+        }
+        guard let store = try openStoreIfPresent() else {
+            throw LocalCLIDataProviderFailure.invalidSwitchState
+        }
+        guard let lock = try store.tryAcquireTransactionLock() else {
+            return false
+        }
+        switchStore = store
+        switchLock = lock
+        return true
+    }
+
+    public func endExclusiveRecovery() async {
+        resetSwitchTransactionState()
+    }
+
+    public func loadSnapshot() async throws -> RecoverySnapshot? {
+        guard let store = switchStore, switchLock != nil else {
+            throw LocalCLIDataProviderFailure.invalidSwitchState
+        }
+        if try journalIsDurablyAbsent(in: store) {
+            return nil
+        }
+        guard let journal = try store.loadJournalIfPresent(),
+              try store.loadCaptureProfileIDIfPresent() == nil else {
+            throw LocalCLIDataProviderFailure.pendingRecovery
+        }
+        let registry = try store.loadRegistry()
+        guard let activeProfileID = registry.activeProfileID else {
+            throw LocalCLIDataProviderFailure.activeProfileUnavailable
+        }
+        let knownProfileIDs = Set(registry.profiles.map(\.id))
+        switchExpectedRegistry = registry
+
+        if try store.loadJournalFinalizationEvidenceIfPresent() != nil {
+            return RecoverySnapshot(
+                journal: journal,
+                knownProfileIDs: knownProfileIDs,
+                registryActiveProfileID: activeProfileID,
+                helperChildAlive: false,
+                durabilityUnknown: true,
+                activeCredential: .unreadable
+            )
+        }
+        guard journal.previousProfileID != journal.targetProfileID,
+              knownProfileIDs.contains(journal.previousProfileID),
+              knownProfileIDs.contains(journal.targetProfileID),
+              let previous = registry.profiles.first(where: { $0.id == journal.previousProfileID }),
+              let target = registry.profiles.first(where: { $0.id == journal.targetProfileID }) else {
+            return RecoverySnapshot(
+                journal: journal,
+                knownProfileIDs: knownProfileIDs,
+                registryActiveProfileID: activeProfileID,
+                helperChildAlive: false,
+                durabilityUnknown: false,
+                activeCredential: .unreadable
+            )
+        }
+        let registryMatchesPhase = switch journal.phase {
+        case .targetVerified, .rollbackStarted, .rollbackFailed:
+            activeProfileID == previous.id || activeProfileID == target.id
+        default:
+            activeProfileID == previous.id
+        }
+        guard registryMatchesPhase,
+              !previous.needsRelogin,
+              journal.phase != .targetVerified || !target.needsRelogin else {
+            throw LocalCLIDataProviderFailure.pendingRecovery
+        }
+        if journal.phase == .rollbackFailed {
+            return RecoverySnapshot(
+                journal: journal,
+                knownProfileIDs: knownProfileIDs,
+                registryActiveProfileID: activeProfileID,
+                helperChildAlive: false,
+                durabilityUnknown: false,
+                activeCredential: .unreadable
+            )
+        }
+
+        let descriptor = try await locateApp()
+        guard ApprovedResidentRule.codexCrashpad(for: descriptor) != nil else {
+            throw LocalCLIDataProviderFailure.incompatibleApplication
+        }
+        switchDescriptor = descriptor
+        let activeAuthDestination = try files.snapshot(at: activeAuthURL)
+        switchActiveAuthDestination = activeAuthDestination
+
+        let processBlockerPresent: Bool
+        do {
+            let inventory = try await processInventory(for: descriptor)
+            processBlockerPresent = !inventory.authMutationAllowed
+        } catch {
+            processBlockerPresent = true
+        }
+        if processBlockerPresent || probeChildUnconfirmed {
+            return RecoverySnapshot(
+                journal: journal,
+                knownProfileIDs: knownProfileIDs,
+                registryActiveProfileID: activeProfileID,
+                helperChildAlive: probeChildUnconfirmed,
+                durabilityUnknown: false,
+                activeCredential: .unreadable,
+                processBlockerPresent: processBlockerPresent
+            )
+        }
+
+        if try verificationWorkspaceExists() {
+            try quarantineVerificationHomes(transactionID: journal.transactionID)
+        }
+        let activeCredential = await recoveryActiveCredentialEvidence(
+            journal: journal,
+            registry: registry,
+            descriptor: descriptor,
+            expectedDestination: activeAuthDestination
+        )
+        guard try store.loadRegistry() == registry,
+              try store.loadJournalIfPresent() == journal,
+              try store.loadJournalFinalizationEvidenceIfPresent() == nil,
+              try store.loadCaptureProfileIDIfPresent() == nil,
+              try files.snapshot(at: activeAuthURL) == activeAuthDestination else {
+            throw LocalCLIDataProviderFailure.pendingRecovery
+        }
+        return RecoverySnapshot(
+            journal: journal,
+            knownProfileIDs: knownProfileIDs,
+            registryActiveProfileID: activeProfileID,
+            helperChildAlive: probeChildUnconfirmed,
+            durabilityUnknown: false,
+            activeCredential: activeCredential
+        )
+    }
+
+    public func cleanupTargetWorkspace() async throws {
+        let context = try requireSwitchContext()
+        guard let journal = try context.store.loadJournalIfPresent() else {
+            throw LocalCLIDataProviderFailure.pendingRecovery
+        }
+        try await revalidateCredentialMutationGate()
+        try quarantineVerificationHomes(transactionID: journal.transactionID)
+        guard try !verificationWorkspaceExists() else {
+            throw LocalCLIDataProviderFailure.verificationWorkspaceFailed
+        }
+        try await revalidateCredentialMutationGate()
+    }
+
+    public func repairCurrentCredential(_ profileID: ProfileID) async throws {
+        let context = try requireSwitchContext()
+        guard let profile = context.registry.profiles.first(where: { $0.id == profileID }) else {
+            throw LocalCLIDataProviderFailure.rollbackFailed
+        }
+        do {
+            try await revalidateCredentialMutationGate()
+            switchActiveAuthDestination = .exact(
+                try await verifyActiveCredential(
+                    expectedEmail: profile.email,
+                    descriptor: context.descriptor
+                )
+            )
+            try await revalidateCredentialMutationGate()
+            try await refreshAndSaveCurrent(profile: profile)
+        } catch {
+            if appServerExitIsUnconfirmed(error) {
+                throw error
+            }
+            try await restorePreviousCredential(profileID)
+        }
+    }
+
+    public func verifyPrevious(expectedProfileID: ProfileID) async throws {
+        let context = try requireSwitchContext()
+        guard let journal = try context.store.loadJournalIfPresent(),
+              journal.previousProfileID == expectedProfileID,
+              let profile = context.registry.profiles.first(where: { $0.id == expectedProfileID }) else {
+            throw LocalCLIDataProviderFailure.rollbackFailed
+        }
+        try await revalidateCredentialMutationGate()
+        switchActiveAuthDestination = .exact(
+            try await verifyActiveCredential(
+                expectedEmail: profile.email,
+                descriptor: context.descriptor
+            )
+        )
+        try await revalidateCredentialMutationGate()
+    }
+
+    public func verifyTargetStillActive(expectedProfileID: ProfileID) async throws {
+        let context = try requireSwitchContext()
+        guard let journal = try context.store.loadJournalIfPresent(),
+              journal.targetProfileID == expectedProfileID,
+              let profile = context.registry.profiles.first(where: { $0.id == expectedProfileID }) else {
+            throw LocalCLIDataProviderFailure.rollbackFailed
+        }
+        try await revalidateCredentialMutationGate()
+        let identity: FileIdentity
+        do {
+            identity = try await verifyActiveCredential(
+                expectedEmail: profile.email,
+                descriptor: context.descriptor
+            )
+            let current = try readCurrentCredential()
+            guard current.identity == identity,
+                  current.credential == (try credentialStore.loadCredential(for: expectedProfileID)) else {
+                throw RecoveryTargetVerificationFailure.targetUnverified
+            }
+        } catch let failure as AppServerProbeFailure
+            where failure.childDisposition == .unconfirmed
+        {
+            throw failure
+        } catch {
+            throw RecoveryTargetVerificationFailure.targetUnverified
+        }
+        switchActiveAuthDestination = .exact(identity)
+        try await revalidateCredentialMutationGate()
+    }
+}
+
 extension LocalCLIDataProvider: TargetCredentialValidationDriving {
     public func prepareWorkspace(for profileID: ProfileID) async throws {
         let context = try requireSwitchContext()
@@ -1479,12 +1735,14 @@ extension LocalCLIDataProvider: TargetCredentialValidationDriving {
         _ credential: CredentialBlob,
         for profileID: ProfileID
     ) async throws {
-        _ = try requireSwitchContext()
-        guard targetValidationProfileID == profileID else {
+        let context = try requireSwitchContext()
+        guard targetValidationProfileID == profileID,
+              try context.store.loadRegistry() == context.registry else {
             throw LocalCLIDataProviderFailure.invalidSwitchState
         }
         try credentialStore.saveCredential(credential, for: profileID)
-        guard try credentialStore.loadCredential(for: profileID) == credential else {
+        guard try credentialStore.loadCredential(for: profileID) == credential,
+              try context.store.loadRegistry() == context.registry else {
             throw LocalCLIDataProviderFailure.credentialRoundTripFailed
         }
     }
@@ -1527,6 +1785,60 @@ private extension LocalCLIDataProvider {
     func readCurrentCredential() throws -> (credential: CredentialBlob, identity: FileIdentity) {
         let result = try files.read(at: activeAuthURL)
         return (try CredentialBlob(validating: result.contents.data), result.identity)
+    }
+
+    func recoveryActiveCredentialEvidence(
+        journal: SwitchJournalRecord,
+        registry: ProfileRegistry,
+        descriptor: CodexAppDescriptor,
+        expectedDestination: ExpectedDestination
+    ) async -> ActiveCredentialEvidence {
+        guard case let .exact(expectedIdentity) = expectedDestination,
+              let current = try? readCurrentCredential(),
+              current.identity == expectedIdentity else {
+            return .unreadable
+        }
+        let matchesPrevious = (try? credentialStore.loadCredential(for: journal.previousProfileID))
+            .map { $0 == current.credential } ?? false
+        let matchesTarget = (try? credentialStore.loadCredential(for: journal.targetProfileID))
+            .map { $0 == current.credential } ?? false
+        switch (matchesPrevious, matchesTarget) {
+        case (true, false):
+            return .previous
+        case (false, true):
+            return .target
+        case (true, true):
+            return .other
+        case (false, false):
+            break
+        }
+        guard let previous = registry.profiles.first(where: { $0.id == journal.previousProfileID }),
+              let target = registry.profiles.first(where: { $0.id == journal.targetProfileID }) else {
+            return .other
+        }
+        do {
+            _ = try await validatedCredential(
+                current.credential,
+                expectedEmail: previous.email,
+                descriptor: descriptor
+            )
+            return .previous
+        } catch let failure as ProfileCaptureFailure where failure == .identityMismatch {
+        } catch {
+            return .unreadable
+        }
+        do {
+            _ = try await validatedCredential(
+                current.credential,
+                expectedEmail: target.email,
+                descriptor: descriptor
+            )
+            return .target
+        } catch let failure as ProfileCaptureFailure where failure == .identityMismatch {
+            return .other
+        } catch {
+            return .unreadable
+        }
     }
 
     func processInventory(for descriptor: CodexAppDescriptor?) async throws -> ProcessInventory {

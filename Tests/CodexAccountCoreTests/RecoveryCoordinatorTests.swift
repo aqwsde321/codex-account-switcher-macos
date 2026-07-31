@@ -17,6 +17,27 @@ func recoveryCoordinatorTests() -> [TestCase] {
                 "target commit recovery performed extra effects"
             )
         },
+        TestCase("RecoveryCoordinator rolls back when target verification changes") {
+            let snapshot = recoveryCoordinatorSnapshot(phase: .targetVerified)
+            let executor = RecordingRecoveryExecutor(
+                snapshot: snapshot,
+                failTargetVerification: true
+            )
+            let coordinator = RecoveryCoordinator(executor: executor)
+
+            let outcome = try await coordinator.recover(relaunchPrevious: false)
+            let events = await executor.events
+
+            try expect(outcome == .completed(.restorePrevious), "target mismatch did not roll back")
+            try expect(
+                events == [
+                    "lock", "snapshot", "verifyTarget", "mutationGate", "journal:rollbackStarted",
+                    "mutationGate", "restorePrevious", "verifyPrevious", "commitPrevious",
+                    "removeJournal", "unlock",
+                ],
+                "target mismatch recovery order changed"
+            )
+        },
         TestCase("RecoveryCoordinator restores previous before relaunch after auth replacement") {
             let snapshot = recoveryCoordinatorSnapshot(phase: .authReplaced)
             let executor = RecordingRecoveryExecutor(snapshot: snapshot)
@@ -50,6 +71,27 @@ func recoveryCoordinatorTests() -> [TestCase] {
             try expect(!events.contains("launchPrevious"), "recovery launched after process gate failure")
             try expect(events.contains("journal:rollbackFailed"), "recovery failure was not persisted")
         },
+        TestCase("RecoveryCoordinator makes a failed current repair terminal") {
+            let snapshot = recoveryCoordinatorSnapshot(phase: .refreshingCurrent)
+            let executor = RecordingRecoveryExecutor(snapshot: snapshot, failPrepare: true)
+            let coordinator = RecoveryCoordinator(executor: executor)
+
+            do {
+                _ = try await coordinator.recover(relaunchPrevious: false)
+                throw TestFailure(description: "failed current repair was retried")
+            } catch let failure as RecoveryCoordinatorFailure {
+                try expect(failure == .rollbackFailed, "current repair returned the wrong failure")
+            }
+
+            let events = await executor.events
+            try expect(
+                events == [
+                    "lock", "snapshot", "journal:rollbackStarted", "mutationGate",
+                    "journal:rollbackFailed", "unlock",
+                ],
+                "current repair failure did not become terminal"
+            )
+        },
     ]
 }
 
@@ -57,10 +99,16 @@ private actor RecordingRecoveryExecutor: RecoveryExecuting {
     private(set) var events = [String]()
     let snapshotValue: RecoverySnapshot?
     let failPrepare: Bool
+    let failTargetVerification: Bool
 
-    init(snapshot: RecoverySnapshot?, failPrepare: Bool = false) {
+    init(
+        snapshot: RecoverySnapshot?,
+        failPrepare: Bool = false,
+        failTargetVerification: Bool = false
+    ) {
         snapshotValue = snapshot
         self.failPrepare = failPrepare
+        self.failTargetVerification = failTargetVerification
     }
 
     func beginExclusiveRecovery() async throws -> Bool { events.append("lock"); return true }
@@ -77,7 +125,12 @@ private actor RecordingRecoveryExecutor: RecoveryExecuting {
     func repairCurrentCredential(_ profileID: ProfileID) async throws { events.append("repairCurrent") }
     func restorePreviousCredential(_ profileID: ProfileID) async throws { events.append("restorePrevious") }
     func verifyPrevious(expectedProfileID: ProfileID) async throws { events.append("verifyPrevious") }
-    func verifyTargetStillActive(expectedProfileID: ProfileID) async throws { events.append("verifyTarget") }
+    func verifyTargetStillActive(expectedProfileID: ProfileID) async throws {
+        events.append("verifyTarget")
+        if failTargetVerification {
+            throw RecoveryTargetVerificationFailure.targetUnverified
+        }
+    }
     func commitActiveProfile(_ profileID: ProfileID) async throws {
         if profileID == snapshotValue?.journal.targetProfileID {
             events.append("commitTarget")

@@ -1466,6 +1466,435 @@ func cliApplicationTests() -> [TestCase] {
                 )
             }
         },
+        TestCase("Local provider completes targetVerified relogin after restart") {
+            try await withCaptureTemporaryDirectory { directory in
+                let fixture = try makeReloginFixture(in: directory)
+                let store = try SpikeStore.openExisting(at: fixture.storeURL)
+                let crash = try prepareReloginCrash(
+                    fixture,
+                    phase: .targetVerified
+                )
+                let launches = await MainActor.run { AppLaunchRecorder() }
+                let restarted = LocalCLIDataProvider(
+                    storeURL: fixture.storeURL,
+                    activeAuthURL: fixture.authURL,
+                    processProvider: EmptyProcessSnapshotProvider(),
+                    locateApp: { fixture.descriptor },
+                    runningApplicationPIDs: { _ in [] },
+                    launchApplication: { _ in
+                        await MainActor.run { launches.record() }
+                        return 501
+                    }
+                )
+
+                let pending = try await restarted.recoveryStatus()
+                let registryBeforeRecovery = try store.loadRegistry()
+                let activeBeforeRecovery = try CredentialBlob(validating: Data(contentsOf: fixture.authURL))
+                let journalBeforeRecovery = try store.loadJournalIfPresent()
+                let outcome = try await restarted.recoverPendingTransaction()
+                let status = try await restarted.recoveryStatus()
+                let registry = try store.loadRegistry()
+                let journal = try store.loadJournalIfPresent()
+                let evidence = try store.loadJournalFinalizationEvidenceIfPresent()
+                let active = try CredentialBlob(validating: Data(contentsOf: fixture.authURL))
+                let storedSource = try store.loadCredential(for: fixture.source.id)
+                let storedTarget = try store.loadCredential(for: fixture.target.id)
+                let launchCount = await MainActor.run { launches.count }
+
+                try expect(
+                    pending == .pending(
+                        transactionID: crash.journal.transactionID.uuidString,
+                        phase: .targetVerified,
+                        previousProfileID: fixture.source.id
+                    ),
+                    "read-only status changed targetVerified relogin"
+                )
+                try expect(
+                    registryBeforeRecovery.activeProfileID == fixture.source.id,
+                    "read-only status activated B"
+                )
+                try expect(activeBeforeRecovery == crash.activeTarget, "read-only status changed active auth")
+                try expect(journalBeforeRecovery == crash.journal, "read-only status changed journal")
+                try expect(
+                    outcome == .completed(.commitVerifiedTarget),
+                    "restart chose the wrong targetVerified recovery"
+                )
+                try expect(status == .none, "restart did not finish targetVerified relogin")
+                try expect(registry.activeProfileID == fixture.target.id, "restart did not activate B")
+                try expect(
+                    registry.profiles.first(where: { $0.id == fixture.target.id })?.needsRelogin == false,
+                    "restart restored B marker"
+                )
+                try expect(journal == nil && evidence == nil, "restart left targetVerified evidence")
+                try expect(active == storedTarget, "restart lost exact B auth")
+                try expect(storedSource == fixture.sourceCredential, "restart changed A credential")
+                try expect(storedTarget == crash.activeTarget, "restart changed verified B")
+                try expect(launchCount == 0, "restart launched the app")
+            }
+        },
+        TestCase("Local provider finalizes an already active targetVerified relogin") {
+            try await withCaptureTemporaryDirectory { directory in
+                let fixture = try makeReloginFixture(in: directory)
+                let store = try SpikeStore.openExisting(at: fixture.storeURL)
+                let crash = try prepareReloginCrash(fixture, phase: .targetVerified)
+                let preparedRegistry = try store.loadRegistry()
+                _ = try store.saveRegistry(
+                    ProfileRegistry(
+                        activeProfileID: fixture.target.id,
+                        profiles: preparedRegistry.profiles
+                    )
+                )
+                let sourceBefore = try store.loadCredential(for: fixture.source.id)
+                let targetBefore = try store.loadCredential(for: fixture.target.id)
+                let launches = await MainActor.run { AppLaunchRecorder() }
+                let restarted = LocalCLIDataProvider(
+                    storeURL: fixture.storeURL,
+                    activeAuthURL: fixture.authURL,
+                    processProvider: EmptyProcessSnapshotProvider(),
+                    locateApp: { fixture.descriptor },
+                    runningApplicationPIDs: { _ in [] },
+                    launchApplication: { _ in
+                        await MainActor.run { launches.record() }
+                        return 504
+                    }
+                )
+
+                let outcome = try await restarted.recoverPendingTransaction()
+                let registry = try store.loadRegistry()
+                let status = try await restarted.recoveryStatus()
+                let active = try CredentialBlob(validating: Data(contentsOf: fixture.authURL))
+                let sourceAfter = try store.loadCredential(for: fixture.source.id)
+                let targetAfter = try store.loadCredential(for: fixture.target.id)
+                let journal = try store.loadJournalIfPresent()
+                let evidence = try store.loadJournalFinalizationEvidenceIfPresent()
+                let launchCount = await MainActor.run { launches.count }
+
+                try expect(
+                    outcome == .completed(.commitVerifiedTarget),
+                    "restart did not finish an already committed B"
+                )
+                try expect(registry.activeProfileID == fixture.target.id, "restart moved active B")
+                try expect(status == .none, "restart left committed B recovery pending")
+                try expect(active == crash.activeTarget, "restart changed active B auth")
+                try expect(sourceAfter == sourceBefore, "restart changed configured A")
+                try expect(targetAfter == targetBefore, "restart changed configured B")
+                try expect(journal == nil && evidence == nil, "restart left finalization evidence")
+                try expect(launchCount == 0, "restart launched the app")
+            }
+        },
+        TestCase("Local provider restores A when targetVerified auth changes") {
+            try await withCaptureTemporaryDirectory { directory in
+                let fixture = try makeReloginFixture(in: directory)
+                let store = try SpikeStore.openExisting(at: fixture.storeURL)
+                _ = try prepareReloginCrash(fixture, phase: .targetVerified)
+                let changedTarget = Data(
+                    #"{"auth_mode":"chatgpt","test_account":"b","tokens":{"id_token":"changed-b-id","access_token":"changed-b-access","refresh_token":"changed-b-refresh"}}"#.utf8
+                )
+                let provider = LocalCLIDataProvider(
+                    storeURL: fixture.storeURL,
+                    activeAuthURL: fixture.authURL,
+                    processProvider: MutatingProcessSnapshotProvider(
+                        mutationCall: 2,
+                        url: fixture.authURL,
+                        contents: changedTarget
+                    ),
+                    locateApp: { fixture.descriptor },
+                    runningApplicationPIDs: { _ in [] }
+                )
+
+                let outcome = try await provider.recoverPendingTransaction()
+                let registry = try store.loadRegistry()
+                let active = try CredentialBlob(validating: Data(contentsOf: fixture.authURL))
+                let storedSource = try store.loadCredential(for: fixture.source.id)
+                let journal = try store.loadJournalIfPresent()
+
+                try expect(outcome == .completed(.restorePrevious), "changed B did not roll back")
+                try expect(registry.activeProfileID == fixture.source.id, "changed B activated target")
+                try expect(active == storedSource, "changed B did not restore exact A")
+                try expect(journal == nil, "changed B left recovery pending")
+            }
+        },
+        TestCase("Local provider does not overwrite a concurrent active profile change") {
+            try await withCaptureTemporaryDirectory { directory in
+                let fixture = try makeReloginFixture(in: directory)
+                let store = try SpikeStore.openExisting(at: fixture.storeURL)
+                let crash = try prepareReloginCrash(fixture, phase: .targetVerified)
+                let preparedRegistry = try store.loadRegistry()
+                let profileC = ProfileMetadata(
+                    id: ProfileID(UUID()),
+                    label: "C",
+                    email: "c@example.invalid",
+                    planType: "plus",
+                    needsRelogin: false,
+                    createdAt: Date(timeIntervalSince1970: 1_700_000_002),
+                    updatedAt: Date(timeIntervalSince1970: 1_700_000_002)
+                )
+                let registryA = try ProfileRegistry(
+                    activeProfileID: fixture.source.id,
+                    profiles: preparedRegistry.profiles + [profileC]
+                )
+                let registryC = try ProfileRegistry(
+                    activeProfileID: profileC.id,
+                    profiles: registryA.profiles
+                )
+                _ = try store.saveRegistry(registryA)
+                let provider = LocalCLIDataProvider(
+                    storeURL: fixture.storeURL,
+                    activeAuthURL: fixture.authURL,
+                    processProvider: MutatingProcessSnapshotProvider(
+                        mutationCall: 3,
+                        url: fixture.storeURL.appendingPathComponent("profiles.json"),
+                        contents: try RegistryCodec.encode(registryC)
+                    ),
+                    locateApp: { fixture.descriptor },
+                    runningApplicationPIDs: { _ in [] }
+                )
+
+                do {
+                    _ = try await provider.recoverPendingTransaction()
+                    throw TestFailure(description: "concurrent active profile change was overwritten")
+                } catch let failure as RecoveryCoordinatorFailure {
+                    try expect(failure == .executionFailed, "registry race returned the wrong STOP")
+                }
+
+                let registryAfter = try store.loadRegistry()
+                let activeAfter = try CredentialBlob(validating: Data(contentsOf: fixture.authURL))
+                let journalAfter = try store.loadJournalIfPresent()
+                try expect(registryAfter == registryC, "recovery overwrote concurrent active C")
+                try expect(activeAfter == crash.activeTarget, "registry race changed active auth")
+                try expect(journalAfter == crash.journal, "registry race changed journal")
+            }
+        },
+        TestCase("Local provider stops targetVerified with a relogin marker") {
+            try await withCaptureTemporaryDirectory { directory in
+                let fixture = try makeReloginFixture(in: directory)
+                let store = try SpikeStore.openExisting(at: fixture.storeURL)
+                let crash = try prepareReloginCrash(
+                    fixture,
+                    phase: .targetVerified,
+                    targetPrepared: false
+                )
+                let registryBefore = try store.loadRegistry()
+                let targetBefore = try store.loadCredential(for: fixture.target.id)
+
+                do {
+                    _ = try await LocalCLIDataProvider(
+                        storeURL: fixture.storeURL,
+                        activeAuthURL: fixture.authURL,
+                        processProvider: EmptyProcessSnapshotProvider(),
+                        locateApp: { fixture.descriptor },
+                        runningApplicationPIDs: { _ in [] }
+                    ).recoverPendingTransaction()
+                    throw TestFailure(description: "marked target was committed")
+                } catch let failure as RecoveryCoordinatorFailure {
+                    try expect(failure == .snapshotInvalid, "marked target returned the wrong STOP")
+                }
+
+                let registryAfter = try store.loadRegistry()
+                let activeAfter = try CredentialBlob(validating: Data(contentsOf: fixture.authURL))
+                let targetAfter = try store.loadCredential(for: fixture.target.id)
+                let journalAfter = try store.loadJournalIfPresent()
+                try expect(registryAfter == registryBefore, "marked target changed registry")
+                try expect(activeAfter == crash.activeTarget, "marked target changed active auth")
+                try expect(targetAfter == targetBefore, "marked target changed configured B")
+                try expect(journalAfter == crash.journal, "marked target changed journal")
+            }
+        },
+        TestCase("Local provider stops an early phase with target registry active") {
+            try await withCaptureTemporaryDirectory { directory in
+                let fixture = try makeReloginFixture(in: directory)
+                let store = try SpikeStore.openExisting(at: fixture.storeURL)
+                let crash = try prepareReloginCrash(fixture, phase: .preparing)
+                let preparedRegistry = try store.loadRegistry()
+                let contradictoryRegistry = try ProfileRegistry(
+                    activeProfileID: fixture.target.id,
+                    profiles: preparedRegistry.profiles
+                )
+                _ = try store.saveRegistry(contradictoryRegistry)
+                let sourceData = Data(
+                    #"{"auth_mode":"chatgpt","test_account":"a","tokens":{"id_token":"a-id","access_token":"a-access","refresh_token":"a-refresh"}}"#.utf8
+                )
+                try sourceData.write(to: fixture.authURL)
+                let sourceBefore = try CredentialBlob(validating: sourceData)
+
+                do {
+                    _ = try await LocalCLIDataProvider(
+                        storeURL: fixture.storeURL,
+                        activeAuthURL: fixture.authURL,
+                        processProvider: EmptyProcessSnapshotProvider(),
+                        locateApp: { fixture.descriptor },
+                        runningApplicationPIDs: { _ in [] }
+                    ).recoverPendingTransaction()
+                    throw TestFailure(description: "contradictory registry was repaired")
+                } catch let failure as RecoveryCoordinatorFailure {
+                    try expect(failure == .snapshotInvalid, "registry contradiction returned the wrong STOP")
+                }
+
+                let registryAfter = try store.loadRegistry()
+                let activeAfter = try CredentialBlob(validating: Data(contentsOf: fixture.authURL))
+                let journalAfter = try store.loadJournalIfPresent()
+                try expect(registryAfter == contradictoryRegistry, "registry contradiction was mutated")
+                try expect(activeAfter == sourceBefore, "registry contradiction changed active auth")
+                try expect(journalAfter == crash.journal, "registry contradiction changed journal")
+            }
+        },
+        TestCase("Local provider leaves rollbackFailed recovery untouched") {
+            try await withCaptureTemporaryDirectory { directory in
+                let fixture = try makeManualRecoveryFixture(in: directory)
+                let store = try SpikeStore.openExisting(at: fixture.storeURL)
+                let registryBefore = try store.loadRegistry()
+                let activeBefore = try CredentialBlob(validating: Data(contentsOf: fixture.authURL))
+                let journalBefore = try store.loadJournalIfPresent()
+                let provider = LocalCLIDataProvider(
+                    storeURL: fixture.storeURL,
+                    activeAuthURL: fixture.authURL,
+                    processProvider: EmptyProcessSnapshotProvider(),
+                    locateApp: { throw CodexAppLocatorFailure.notFound },
+                    runningApplicationPIDs: { _ in [] }
+                )
+
+                let outcome = try await provider.recoverPendingTransaction()
+                let registryAfter = try store.loadRegistry()
+                let activeAfter = try CredentialBlob(validating: Data(contentsOf: fixture.authURL))
+                let journalAfter = try store.loadJournalIfPresent()
+
+                try expect(
+                    outcome == .stopped(.rollbackPreviouslyFailed),
+                    "rollbackFailed did not remain terminal"
+                )
+                try expect(registryAfter == registryBefore, "rollbackFailed changed registry")
+                try expect(activeAfter == activeBefore, "rollbackFailed changed active auth")
+                try expect(journalAfter == journalBefore, "rollbackFailed changed journal")
+            }
+        },
+        TestCase("Local provider makes a failed refreshingCurrent recovery terminal") {
+            try await withCaptureTemporaryDirectory { directory in
+                let fixture = try makeReloginFixture(in: directory)
+                let store = try SpikeStore.openExisting(at: fixture.storeURL)
+                _ = try prepareReloginCrash(
+                    fixture,
+                    phase: .refreshingCurrent,
+                    targetPrepared: false
+                )
+                _ = try store.saveCredential(fixture.staleTargetCredential, for: fixture.source.id)
+                let provider = LocalCLIDataProvider(
+                    storeURL: fixture.storeURL,
+                    activeAuthURL: fixture.authURL,
+                    processProvider: EmptyProcessSnapshotProvider(),
+                    locateApp: { fixture.descriptor },
+                    runningApplicationPIDs: { _ in [] }
+                )
+
+                do {
+                    _ = try await provider.recoverPendingTransaction()
+                    throw TestFailure(description: "invalid source repair completed")
+                } catch let failure as RecoveryCoordinatorFailure {
+                    try expect(failure == .rollbackFailed, "source repair returned the wrong failure")
+                }
+                let journalAfterFailure = try store.loadJournalIfPresent()
+                let retry = try await provider.recoverPendingTransaction()
+                let journalAfterRetry = try store.loadJournalIfPresent()
+
+                try expect(journalAfterFailure?.phase == .rollbackFailed, "source repair was not terminal")
+                try expect(
+                    retry == .stopped(.rollbackPreviouslyFailed),
+                    "terminal source repair was retried"
+                )
+                try expect(journalAfterRetry == journalAfterFailure, "terminal retry changed journal")
+            }
+        },
+        TestCase("Local provider rolls validatingTarget relogin back after restart") {
+            try await withCaptureTemporaryDirectory { directory in
+                let fixture = try makeReloginFixture(in: directory)
+                let store = try SpikeStore.openExisting(at: fixture.storeURL)
+                let crash = try prepareReloginCrash(
+                    fixture,
+                    phase: .validatingTarget
+                )
+                let launches = await MainActor.run { AppLaunchRecorder() }
+                let restarted = LocalCLIDataProvider(
+                    storeURL: fixture.storeURL,
+                    activeAuthURL: fixture.authURL,
+                    processProvider: EmptyProcessSnapshotProvider(),
+                    locateApp: { fixture.descriptor },
+                    runningApplicationPIDs: { _ in [] },
+                    launchApplication: { _ in
+                        await MainActor.run { launches.record() }
+                        return 502
+                    }
+                )
+
+                let outcome = try await restarted.recoverPendingTransaction()
+                let status = try await restarted.recoveryStatus()
+                let registry = try store.loadRegistry()
+                let active = try CredentialBlob(validating: Data(contentsOf: fixture.authURL))
+                let storedSource = try store.loadCredential(for: fixture.source.id)
+                let storedTarget = try store.loadCredential(for: fixture.target.id)
+                let journal = try store.loadJournalIfPresent()
+                let evidence = try store.loadJournalFinalizationEvidenceIfPresent()
+                let launchCount = await MainActor.run { launches.count }
+
+                try expect(
+                    outcome == .completed(.cleanupTargetThenRestorePrevious),
+                    "restart chose the wrong validatingTarget recovery"
+                )
+                try expect(status == .none, "restart left validatingTarget recovery pending")
+                try expect(registry.activeProfileID == fixture.source.id, "restart did not restore A")
+                try expect(
+                    registry.profiles.first(where: { $0.id == fixture.target.id })?.needsRelogin == false,
+                    "restart lost the verified B marker"
+                )
+                try expect(active == storedSource, "restart did not restore exact A auth")
+                try expect(storedTarget == crash.activeTarget, "restart discarded verified B")
+                try expect(journal == nil && evidence == nil, "restart left validatingTarget evidence")
+                try expect(launchCount == 0, "restart launched the app")
+            }
+        },
+        TestCase("Local provider identifies unstored relogin auth before restart rollback") {
+            try await withCaptureTemporaryDirectory { directory in
+                let fixture = try makeReloginFixture(in: directory)
+                let store = try SpikeStore.openExisting(at: fixture.storeURL)
+                _ = try prepareReloginCrash(
+                    fixture,
+                    phase: .validatingTarget,
+                    targetPrepared: false
+                )
+                let launches = await MainActor.run { AppLaunchRecorder() }
+                let restarted = LocalCLIDataProvider(
+                    storeURL: fixture.storeURL,
+                    activeAuthURL: fixture.authURL,
+                    processProvider: EmptyProcessSnapshotProvider(),
+                    locateApp: { fixture.descriptor },
+                    runningApplicationPIDs: { _ in [] },
+                    launchApplication: { _ in
+                        await MainActor.run { launches.record() }
+                        return 503
+                    }
+                )
+
+                let outcome = try await restarted.recoverPendingTransaction()
+                let registry = try store.loadRegistry()
+                let active = try CredentialBlob(validating: Data(contentsOf: fixture.authURL))
+                let storedSource = try store.loadCredential(for: fixture.source.id)
+                let storedTarget = try store.loadCredential(for: fixture.target.id)
+                let journal = try store.loadJournalIfPresent()
+                let launchCount = await MainActor.run { launches.count }
+
+                try expect(
+                    outcome == .completed(.cleanupTargetThenRestorePrevious),
+                    "restart did not identify unstored B auth"
+                )
+                try expect(registry.activeProfileID == fixture.source.id, "restart did not restore A")
+                try expect(
+                    registry.profiles.first(where: { $0.id == fixture.target.id })?.needsRelogin == true,
+                    "restart cleared an unverified B marker"
+                )
+                try expect(active == storedSource, "restart did not restore exact A auth")
+                try expect(storedTarget == fixture.staleTargetCredential, "restart overwrote stale B")
+                try expect(journal == nil, "restart left unstored relogin recovery pending")
+                try expect(launchCount == 0, "restart launched the app")
+            }
+        },
         TestCase("Local provider restores A and preserves B after relogin identity mismatch") {
             try await withCaptureTemporaryDirectory { directory in
                 let fixture = try makeReloginFixture(in: directory)
@@ -2847,6 +3276,44 @@ private func makeReloginFixture(
         staleTargetCredential: staleTargetCredential,
         descriptor: descriptor
     )
+}
+
+private func prepareReloginCrash(
+    _ fixture: ReloginFixture,
+    phase: SwitchPhase,
+    targetPrepared: Bool = true
+) throws -> (activeTarget: CredentialBlob, journal: SwitchJournalRecord) {
+    let store = try SpikeStore.openExisting(at: fixture.storeURL)
+    let activeTarget = try CredentialBlob(validating: Data(contentsOf: fixture.authURL))
+    if targetPrepared {
+        let preparedTarget = ProfileMetadata(
+            id: fixture.target.id,
+            label: fixture.target.label,
+            email: fixture.target.email,
+            planType: fixture.target.planType,
+            needsRelogin: false,
+            createdAt: fixture.target.createdAt,
+            updatedAt: fixture.target.updatedAt
+        )
+        _ = try store.saveCredential(activeTarget, for: fixture.target.id)
+        _ = try store.saveRegistry(
+            ProfileRegistry(
+                activeProfileID: fixture.source.id,
+                profiles: [fixture.source, preparedTarget]
+            )
+        )
+    }
+    let now = Date(timeIntervalSince1970: 1_700_000_100)
+    let journal = SwitchJournalRecord(
+        transactionID: UUID(),
+        phase: phase,
+        previousProfileID: fixture.source.id,
+        targetProfileID: fixture.target.id,
+        startedAt: now,
+        updatedAt: now
+    )
+    _ = try store.createJournalIfAbsent(journal)
+    return (activeTarget, journal)
 }
 
 private struct ManualRecoveryFixture: Sendable {

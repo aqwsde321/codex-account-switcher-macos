@@ -4,6 +4,38 @@ import CodexAccountMenuBarModel
 
 func menuBarViewModelTests() -> [TestCase] {
     [
+        TestCase("MenuBarViewModel attempts recovery before loading state") {
+            let provider = MenuBarProviderSpy(profiles: menuBarProfiles())
+            let order = RefreshOrderRecorder()
+            let model = await MainActor.run {
+                MenuBarViewModel(
+                    loadProfiles: {
+                        await order.record("profiles")
+                        return await provider.profiles()
+                    },
+                    loadRecoveryStatus: {
+                        await order.record("status")
+                        return await provider.recoveryStatus()
+                    },
+                    captureProfile: { try await provider.captureProfile(label: $0) },
+                    syncActiveProfile: { try await provider.syncActiveProfile() },
+                    switchProfile: { try await provider.switchProfile(target: $0, onPhaseChange: $1) },
+                    reloginProfile: { try await provider.reloginProfile(target: $0) },
+                    restoreRecoveryProfile: {
+                        try await provider.restoreRecoveryProfile(target: $0, expectedTransactionID: $1)
+                    },
+                    attemptAutomaticRecovery: { await order.record("recovery") }
+                )
+            }
+
+            await model.load()
+            let events = await order.events
+
+            try expect(
+                events == ["recovery", "profiles", "status"],
+                "menu bar loaded stale state before recovery"
+            )
+        },
         TestCase("MenuBarViewModel loads three cards and confirms only inactive selection") {
             let provider = MenuBarProviderSpy(profiles: menuBarProfiles())
             let model = await MainActor.run {
@@ -783,6 +815,14 @@ func menuBarViewModelTests() -> [TestCase] {
             try expect(statusMessage == nil, "wrong outcome ID reported relogin success")
         },
     ]
+}
+
+private actor RefreshOrderRecorder {
+    private(set) var events = [String]()
+
+    func record(_ event: String) {
+        events.append(event)
+    }
 }
 
 private func makeMenuBarModel(

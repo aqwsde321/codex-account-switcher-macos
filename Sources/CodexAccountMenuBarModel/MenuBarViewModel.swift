@@ -19,6 +19,7 @@ public final class MenuBarViewModel: ObservableObject {
     ) async throws -> ProfileListItem
     public typealias ReloginProfile = @Sendable (String) async throws -> ProfileReloginOutcome
     public typealias RestoreRecoveryProfile = @Sendable (String, String) async throws -> RecoveryRestoreOutcome
+    public typealias AttemptAutomaticRecovery = @Sendable () async -> Void
 
     @Published public private(set) var profiles = [ProfileListItem]()
     @Published public private(set) var pendingProfile: ProfileListItem?
@@ -37,6 +38,7 @@ public final class MenuBarViewModel: ObservableObject {
     private let switchProfile: SwitchProfile
     private let reloginProfile: ReloginProfile
     private let restoreRecoveryProfile: RestoreRecoveryProfile
+    private let attemptAutomaticRecovery: AttemptAutomaticRecovery
 
     public init(
         loadProfiles: @escaping LoadProfiles,
@@ -45,7 +47,8 @@ public final class MenuBarViewModel: ObservableObject {
         syncActiveProfile: @escaping SyncActiveProfile,
         switchProfile: @escaping SwitchProfile,
         reloginProfile: @escaping ReloginProfile,
-        restoreRecoveryProfile: @escaping RestoreRecoveryProfile
+        restoreRecoveryProfile: @escaping RestoreRecoveryProfile,
+        attemptAutomaticRecovery: @escaping AttemptAutomaticRecovery = {}
     ) {
         self.loadProfiles = loadProfiles
         self.loadRecoveryStatus = loadRecoveryStatus
@@ -54,6 +57,7 @@ public final class MenuBarViewModel: ObservableObject {
         self.switchProfile = switchProfile
         self.reloginProfile = reloginProfile
         self.restoreRecoveryProfile = restoreRecoveryProfile
+        self.attemptAutomaticRecovery = attemptAutomaticRecovery
     }
 
     public func load() async {
@@ -442,6 +446,7 @@ public final class MenuBarViewModel: ObservableObject {
 
     private func refreshState() async throws {
         recoveryStatus = .blocked
+        await attemptAutomaticRecovery()
         let loadedProfiles = try await loadProfiles()
         let loadedRecoveryStatus = try await loadRecoveryStatus()
         profiles = loadedProfiles

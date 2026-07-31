@@ -71,6 +71,10 @@ struct CodexAccountMenuBarApp: App {
                         target: target,
                         expectedTransactionID: transactionID
                     )
+                },
+                attemptAutomaticRecovery: {
+                    guard let provider else { return }
+                    _ = try? await provider.recoverPendingTransaction()
                 }
             )
         )
