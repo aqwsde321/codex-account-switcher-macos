@@ -74,6 +74,11 @@ public enum RecoveryRestoreOutcome: Equatable, Sendable {
     case journalFinalizationUncertain
 }
 
+public enum ProfileReloginOutcome: Equatable, Sendable {
+    case activated(ProfileListItem)
+    case journalFinalizationUncertain
+}
+
 #if SPIKE_FAULT_INJECTION
 public enum PostLaunchRollbackTestFailure: Error, Equatable, Sendable {
     case injectionNotTriggered

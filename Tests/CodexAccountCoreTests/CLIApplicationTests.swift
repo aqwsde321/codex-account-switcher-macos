@@ -1423,6 +1423,257 @@ func cliApplicationTests() -> [TestCase] {
                 try expect(journal == nil, "identity failure left recovery pending")
             }
         },
+        TestCase("Local provider activates an exactly verified relogin target") {
+            try await withCaptureTemporaryDirectory { directory in
+                let fixture = try makeReloginFixture(in: directory)
+                let store = try SpikeStore.openExisting(at: fixture.storeURL)
+                let provider = LocalCLIDataProvider(
+                    storeURL: fixture.storeURL,
+                    activeAuthURL: fixture.authURL,
+                    processProvider: EmptyProcessSnapshotProvider(),
+                    locateApp: { fixture.descriptor },
+                    runningApplicationPIDs: { _ in [] }
+                )
+
+                let outcome = try await provider.reloginProfile(target: fixture.target.id.description)
+                guard case let .activated(activated) = outcome else {
+                    throw TestFailure(description: "durable relogin reported uncertain finalization")
+                }
+                let registry = try store.loadRegistry()
+                let active = try CredentialBlob(validating: Data(contentsOf: fixture.authURL))
+                let storedSource = try store.loadCredential(for: fixture.source.id)
+                let storedTarget = try store.loadCredential(for: fixture.target.id)
+                let journal = try store.loadJournalIfPresent()
+                let evidence = try store.loadJournalFinalizationEvidenceIfPresent()
+                let marker = try store.loadCaptureProfileIDIfPresent()
+
+                try expect(activated.id == fixture.target.id && activated.active, "B was not returned active")
+                try expect(!activated.needsRelogin, "B kept its relogin marker")
+                try expect(registry.activeProfileID == fixture.target.id, "registry did not activate B")
+                try expect(
+                    registry.profiles.first(where: { $0.id == fixture.target.id })?.needsRelogin == false,
+                    "registry did not clear B relogin state"
+                )
+                try expect(active == storedTarget, "active B and configured B differ")
+                try expect(storedTarget != fixture.staleTargetCredential, "stale B credential was preserved")
+                try expect(storedSource == fixture.sourceCredential, "relogin changed A credential")
+                try expect(journal == nil && evidence == nil && marker == nil, "relogin left recovery artifacts")
+                try expect(
+                    !FileManager.default.fileExists(
+                        atPath: fixture.storeURL.appendingPathComponent("credential-verification-workspace").path
+                    ),
+                    "relogin left a verification workspace"
+                )
+            }
+        },
+        TestCase("Local provider restores A and preserves B after relogin identity mismatch") {
+            try await withCaptureTemporaryDirectory { directory in
+                let fixture = try makeReloginFixture(in: directory)
+                let store = try SpikeStore.openExisting(at: fixture.storeURL)
+                let wrongActive = Data(
+                    #"{"auth_mode":"chatgpt","test_account":"a","tokens":{"id_token":"wrong-id","access_token":"wrong-access","refresh_token":"wrong-refresh"}}"#.utf8
+                )
+                try wrongActive.write(to: fixture.authURL)
+                let registryBefore = try store.loadRegistry()
+                let targetBefore = try store.loadCredential(for: fixture.target.id)
+                let provider = LocalCLIDataProvider(
+                    storeURL: fixture.storeURL,
+                    activeAuthURL: fixture.authURL,
+                    processProvider: EmptyProcessSnapshotProvider(),
+                    locateApp: { fixture.descriptor },
+                    runningApplicationPIDs: { _ in [] }
+                )
+
+                do {
+                    _ = try await provider.reloginProfile(target: fixture.target.id.description)
+                    throw TestFailure(description: "wrong relogin identity was accepted")
+                } catch is ProfileCaptureFailure {
+                }
+
+                let registryAfter = try store.loadRegistry()
+                let sourceAfter = try store.loadCredential(for: fixture.source.id)
+                let targetAfter = try store.loadCredential(for: fixture.target.id)
+                let authAfter = try CredentialBlob(validating: Data(contentsOf: fixture.authURL))
+                let journalAfter = try store.loadJournalIfPresent()
+                try expect(registryAfter == registryBefore, "identity mismatch changed registry")
+                try expect(targetAfter == targetBefore, "identity mismatch changed B")
+                try expect(authAfter == sourceAfter, "identity mismatch did not restore A")
+                try expect(journalAfter == nil, "identity mismatch created a journal")
+            }
+        },
+        TestCase("Local provider gates relogin on processes and recovery") {
+            try await withCaptureTemporaryDirectory { directory in
+                let fixture = try makeReloginFixture(in: directory)
+                let store = try SpikeStore.openExisting(at: fixture.storeURL)
+                let registryBefore = try store.loadRegistry()
+                let targetBefore = try store.loadCredential(for: fixture.target.id)
+                let runningPIDs = await MainActor.run { RunningPIDSequence([[], [42]]) }
+                let processBlockedProvider = LocalCLIDataProvider(
+                    storeURL: fixture.storeURL,
+                    activeAuthURL: fixture.authURL,
+                    processProvider: EmptyProcessSnapshotProvider(),
+                    locateApp: { fixture.descriptor },
+                    runningApplicationPIDs: { _ in runningPIDs.next() }
+                )
+
+                do {
+                    _ = try await processBlockedProvider.reloginProfile(target: fixture.target.id.description)
+                    throw TestFailure(description: "process race did not block relogin")
+                } catch let failure as SwitchCoordinatorFailure {
+                    try expect(failure == .processBlocked, "process race returned the wrong failure")
+                }
+                let journalAfterProcessGate = try store.loadJournalIfPresent()
+                try expect(journalAfterProcessGate == nil, "process gate created a journal")
+
+                let now = Date(timeIntervalSince1970: 1_700_000_010)
+                let pending = SwitchJournalRecord(
+                    transactionID: UUID(),
+                    phase: .preparing,
+                    previousProfileID: fixture.source.id,
+                    targetProfileID: fixture.target.id,
+                    startedAt: now,
+                    updatedAt: now
+                )
+                _ = try store.createJournalIfAbsent(pending)
+                let recoveryBlockedProvider = LocalCLIDataProvider(
+                    storeURL: fixture.storeURL,
+                    activeAuthURL: fixture.authURL,
+                    processProvider: EmptyProcessSnapshotProvider(),
+                    locateApp: { fixture.descriptor },
+                    runningApplicationPIDs: { _ in [] }
+                )
+                do {
+                    _ = try await recoveryBlockedProvider.reloginProfile(target: fixture.target.id.description)
+                    throw TestFailure(description: "pending recovery did not block relogin")
+                } catch let failure as LocalCLIDataProviderFailure {
+                    try expect(failure == .pendingRecovery, "recovery gate returned the wrong failure")
+                }
+
+                let registryAfter = try store.loadRegistry()
+                let targetAfter = try store.loadCredential(for: fixture.target.id)
+                let journalAfter = try store.loadJournalIfPresent()
+                try expect(registryAfter == registryBefore, "relogin gate changed registry")
+                try expect(targetAfter == targetBefore, "relogin gate changed B credential")
+                try expect(journalAfter == pending, "relogin gate changed pending recovery")
+            }
+        },
+        TestCase("Local provider journals relogin before an unconfirmed verifier") {
+            try await withCaptureTemporaryDirectory { directory in
+                let fixture = try makeReloginFixture(in: directory, holdVerifierPipesOpen: true)
+                let store = try SpikeStore.openExisting(at: fixture.storeURL)
+                let provider = LocalCLIDataProvider(
+                    storeURL: fixture.storeURL,
+                    activeAuthURL: fixture.authURL,
+                    processProvider: EmptyProcessSnapshotProvider(),
+                    locateApp: { fixture.descriptor },
+                    runningApplicationPIDs: { _ in [] }
+                )
+
+                do {
+                    _ = try await provider.reloginProfile(target: fixture.target.id.description)
+                    throw TestFailure(description: "unconfirmed verifier completed relogin")
+                } catch let failure as LocalCLIDataProviderFailure {
+                    try expect(failure == .pendingRecovery, "unconfirmed verifier returned the wrong failure")
+                }
+                let journal = try store.loadJournalIfPresent()
+                let recovery = try await provider.recoveryStatus()
+
+                try expect(journal?.phase == .validatingTarget, "unconfirmed verifier lost relogin intent")
+                try expect(
+                    recovery == .pending(
+                        transactionID: journal?.transactionID.uuidString ?? "",
+                        phase: .validatingTarget,
+                        previousProfileID: fixture.source.id
+                    ),
+                    "unconfirmed verifier did not preserve recoverable state"
+                )
+            }
+        },
+        TestCase("Local provider rolls relogin back to A before target verification") {
+            try await withCaptureTemporaryDirectory { directory in
+                let fixture = try makeReloginFixture(in: directory, rotateActiveToOtherAccount: true)
+                let store = try SpikeStore.openExisting(at: fixture.storeURL)
+                let provider = LocalCLIDataProvider(
+                    storeURL: fixture.storeURL,
+                    activeAuthURL: fixture.authURL,
+                    processProvider: EmptyProcessSnapshotProvider(),
+                    locateApp: { fixture.descriptor },
+                    runningApplicationPIDs: { _ in [] }
+                )
+
+                do {
+                    _ = try await provider.reloginProfile(target: fixture.target.id.description)
+                    throw TestFailure(description: "changed refreshed identity was accepted")
+                } catch is ProfileCaptureFailure {
+                }
+                let registry = try store.loadRegistry()
+                let active = try CredentialBlob(validating: Data(contentsOf: fixture.authURL))
+                let storedSource = try store.loadCredential(for: fixture.source.id)
+                let storedTarget = try store.loadCredential(for: fixture.target.id)
+                let journal = try store.loadJournalIfPresent()
+
+                try expect(registry.activeProfileID == fixture.source.id, "failed relogin did not keep A active")
+                try expect(
+                    registry.profiles.first(where: { $0.id == fixture.target.id })?.needsRelogin == true,
+                    "failed relogin cleared B marker"
+                )
+                try expect(active == storedSource, "failed relogin did not restore A auth")
+                try expect(
+                    storedTarget == fixture.staleTargetCredential,
+                    "failed refreshed identity overwrote B before exact verification"
+                )
+                try expect(journal == nil, "successful rollback left a journal")
+            }
+        },
+        TestCase("Local provider exposes uncertain relogin finalization without retry") {
+            try await withCaptureTemporaryDirectory { directory in
+                let fixture = try makeReloginFixture(in: directory)
+                let store = try SpikeStore.openExisting(at: fixture.storeURL)
+                let syncFailure = DurableFileFailure(
+                    mutation: .remove,
+                    stage: .syncParent,
+                    errno: EIO,
+                    certainty: .durabilityUnknown
+                )
+                let finalizationGate = FinalizationSyncFailureGate(
+                    storeURL: fixture.storeURL,
+                    failure: syncFailure
+                )
+                let provider = LocalCLIDataProvider(
+                    storeURL: fixture.storeURL,
+                    activeAuthURL: fixture.authURL,
+                    processProvider: EmptyProcessSnapshotProvider(),
+                    locateApp: { fixture.descriptor },
+                    runningApplicationPIDs: { _ in [] },
+                    removeJournalFile: finalizationGate.removeJournal,
+                    syncStoreDirectory: finalizationGate.sync
+                )
+
+                let outcome = try await provider.reloginProfile(target: fixture.target.id.description)
+                let blocked = try await provider.recoveryStatus()
+                let registry = try store.loadRegistry()
+                let active = try CredentialBlob(validating: Data(contentsOf: fixture.authURL))
+                let storedTarget = try store.loadCredential(for: fixture.target.id)
+                let evidence = try store.loadJournalFinalizationEvidenceIfPresent()
+                let restarted = LocalCLIDataProvider(
+                    storeURL: fixture.storeURL,
+                    activeAuthURL: fixture.authURL,
+                    processProvider: EmptyProcessSnapshotProvider(),
+                    locateApp: { fixture.descriptor },
+                    runningApplicationPIDs: { _ in [] }
+                )
+                let reconciled = try await restarted.recoveryStatus()
+                let evidenceAfterReconciliation = try store.loadJournalFinalizationEvidenceIfPresent()
+
+                try expect(outcome == .journalFinalizationUncertain, "uncertain unlink reported success")
+                try expect(blocked == .blocked, "uncertain finalization did not stop mutations")
+                try expect(registry.activeProfileID == fixture.target.id, "uncertain finalization lost B commit")
+                try expect(active == storedTarget, "uncertain finalization lost verified B")
+                try expect(evidence != nil, "uncertain finalization left no durable evidence")
+                try expect(reconciled == .none, "restart did not reconcile exact B finalization")
+                try expect(evidenceAfterReconciliation == nil, "reconciled finalization evidence remained")
+            }
+        },
         TestCase("CLI sync-active validates and stores only the registered active profile") {
             try await withCaptureTemporaryDirectory { directory in
                 let codexHome = directory.appendingPathComponent(".codex", isDirectory: true)
@@ -2415,6 +2666,30 @@ private final class MutatingProcessSnapshotProvider: ProcessSnapshotProviding, @
     }
 }
 
+private final class FinalizationSyncFailureGate: @unchecked Sendable {
+    private let storeURL: URL
+    private let failure: DurableFileFailure
+    private let lock = NSLock()
+    private var shouldFailSync = false
+
+    init(storeURL: URL, failure: DurableFileFailure) {
+        self.storeURL = storeURL
+        self.failure = failure
+    }
+
+    func removeJournal() throws -> DurableRemoval {
+        _ = try SpikeStore.openExisting(at: storeURL).removeJournal()
+        lock.withLock { shouldFailSync = true }
+        throw failure
+    }
+
+    func sync() throws {
+        if lock.withLock({ shouldFailSync }) {
+            throw failure
+        }
+    }
+}
+
 @MainActor
 private final class RootExitDuringSnapshotPIDs {
     private let processes: TerminableProcessSnapshotProvider
@@ -2487,6 +2762,91 @@ private final class ProbeCountRunningPIDs {
         }
         return [42]
     }
+}
+
+private struct ReloginFixture: Sendable {
+    let storeURL: URL
+    let authURL: URL
+    let source: ProfileMetadata
+    let target: ProfileMetadata
+    let sourceCredential: CredentialBlob
+    let staleTargetCredential: CredentialBlob
+    let descriptor: CodexAppDescriptor
+}
+
+private func makeReloginFixture(
+    in directory: URL,
+    rotateActiveToOtherAccount: Bool = false,
+    holdVerifierPipesOpen: Bool = false
+) throws -> ReloginFixture {
+    let codexHome = directory.appendingPathComponent(".codex", isDirectory: true)
+    try FileManager.default.createDirectory(at: codexHome, withIntermediateDirectories: false)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: codexHome.path)
+    let authURL = codexHome.appendingPathComponent("auth.json", isDirectory: false)
+    let activeB = Data(
+        #"{"auth_mode":"chatgpt","test_account":"b","tokens":{"id_token":"current-b-id","access_token":"current-b-access","refresh_token":"current-b-refresh"}}"#.utf8
+    )
+    try activeB.write(to: authURL, options: .withoutOverwriting)
+    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: authURL.path)
+
+    let storeURL = directory.appendingPathComponent("store", isDirectory: true)
+    let store = try SpikeStore.create(at: storeURL)
+    let source = ProfileMetadata(
+        id: ProfileID(UUID()),
+        label: "A",
+        email: "person@example.invalid",
+        planType: "plus",
+        needsRelogin: false,
+        createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+        updatedAt: Date(timeIntervalSince1970: 1_700_000_000)
+    )
+    let target = ProfileMetadata(
+        id: ProfileID(UUID()),
+        label: "B",
+        email: "b@example.invalid",
+        planType: "plus",
+        needsRelogin: true,
+        createdAt: Date(timeIntervalSince1970: 1_700_000_001),
+        updatedAt: Date(timeIntervalSince1970: 1_700_000_001)
+    )
+    let sourceCredential = try CredentialBlob(validating: Data(
+        #"{"auth_mode":"chatgpt","test_account":"a","tokens":{"id_token":"a-id","access_token":"a-access","refresh_token":"a-refresh"}}"#.utf8
+    ))
+    let staleTargetCredential = try CredentialBlob(validating: Data(
+        #"{"auth_mode":"chatgpt","test_account":"b","tokens":{"id_token":"stale-b-id","access_token":"stale-b-access","refresh_token":"stale-b-refresh"}}"#.utf8
+    ))
+    _ = try store.saveCredential(sourceCredential, for: source.id)
+    _ = try store.saveCredential(staleTargetCredential, for: target.id)
+    _ = try store.saveRegistry(ProfileRegistry(activeProfileID: source.id, profiles: [source, target]))
+
+    let executable = try makeCaptureAppServer(
+        in: directory,
+        rotateToOtherAccount: rotateActiveToOtherAccount,
+        rotateToOtherAccountHomeURL: rotateActiveToOtherAccount ? codexHome : nil,
+        requiredJournalURL: storeURL.appendingPathComponent("switch-journal.json"),
+        holdPipesOpen: holdVerifierPipesOpen
+    )
+    let bundleURL = directory.appendingPathComponent("ChatGPT.app", isDirectory: true)
+    let descriptor = CodexAppDescriptor(
+        bundleURL: bundleURL,
+        mainExecutableURL: bundleURL.appendingPathComponent("Contents/MacOS/ChatGPT"),
+        bundledCodexURL: executable,
+        bundleIdentifier: "com.openai.codex",
+        version: "26.721.41059",
+        build: "5848",
+        appSigningIdentifier: "com.openai.codex",
+        bundledCodexSigningIdentifier: "codex",
+        teamIdentifier: "2DC432GLL2"
+    )
+    return ReloginFixture(
+        storeURL: storeURL,
+        authURL: authURL,
+        source: source,
+        target: target,
+        sourceCredential: sourceCredential,
+        staleTargetCredential: staleTargetCredential,
+        descriptor: descriptor
+    )
 }
 
 private struct ManualRecoveryFixture: Sendable {

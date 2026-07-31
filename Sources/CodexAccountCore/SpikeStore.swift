@@ -130,6 +130,17 @@ public struct SpikeStore {
     }
 
     public func updateJournal(_ journal: SwitchJournalRecord) throws -> FileIdentity {
+        try updateJournal(journal, allowingVerifiedReloginShortcut: false)
+    }
+
+    func updateVerifiedReloginJournal(_ journal: SwitchJournalRecord) throws -> FileIdentity {
+        try updateJournal(journal, allowingVerifiedReloginShortcut: true)
+    }
+
+    private func updateJournal(
+        _ journal: SwitchJournalRecord,
+        allowingVerifiedReloginShortcut: Bool
+    ) throws -> FileIdentity {
         let data = try JournalCodec.encode(journal)
         let normalizedJournal = try JournalCodec.decode(data)
         let expected = try files.snapshot(at: journalURL)
@@ -148,13 +159,20 @@ public struct SpikeStore {
               normalizedJournal.updatedAt >= existingJournal.updatedAt else {
             throw SpikeStoreError.invalidJournalUpdate
         }
-        do {
-            try SwitchStateMachine.validateTransition(
-                from: existingJournal.phase,
-                to: normalizedJournal.phase
-            )
-        } catch {
-            throw SpikeStoreError.invalidJournalUpdate
+        if allowingVerifiedReloginShortcut {
+            guard existingJournal.phase == .validatingTarget,
+                  normalizedJournal.phase == .targetVerified else {
+                throw SpikeStoreError.invalidJournalUpdate
+            }
+        } else {
+            do {
+                try SwitchStateMachine.validateTransition(
+                    from: existingJournal.phase,
+                    to: normalizedJournal.phase
+                )
+            } catch {
+                throw SpikeStoreError.invalidJournalUpdate
+            }
         }
         return try files.replace(
             contents: SensitiveBytes(data),

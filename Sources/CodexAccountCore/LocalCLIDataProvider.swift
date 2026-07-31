@@ -224,6 +224,156 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
         try await switchProfile(target: value, onPhaseChange: { _ in })
     }
 
+    public func reloginProfile(target value: String) async throws -> ProfileReloginOutcome {
+        guard !switchInProgress else {
+            throw LocalCLIDataProviderFailure.switchAlreadyRunning
+        }
+        switchInProgress = true
+        defer {
+            switchInProgress = false
+            resetSwitchTransactionState()
+        }
+
+        guard let requestedUUID = UUID(uuidString: value),
+              value == requestedUUID.uuidString,
+              let store = try openStoreIfPresent() else {
+            throw LocalCLIDataProviderFailure.targetProfileUnavailable
+        }
+        let registry = try store.loadRegistry()
+        let requestedID = ProfileID(requestedUUID)
+        guard let sourceID = registry.activeProfileID,
+              let source = registry.profiles.first(where: { $0.id == sourceID }),
+              !source.needsRelogin,
+              let target = registry.profiles.first(where: { $0.id == requestedID }),
+              target.id != source.id,
+              target.needsRelogin else {
+            throw LocalCLIDataProviderFailure.targetProfileUnavailable
+        }
+
+        let descriptor = try await locateApp()
+        guard ApprovedResidentRule.codexCrashpad(for: descriptor) != nil else {
+            throw LocalCLIDataProviderFailure.incompatibleApplication
+        }
+        switchDescriptor = descriptor
+        switchExpectedRegistry = registry
+        guard try await beginExclusiveTransaction() else {
+            throw LocalCLIDataProviderFailure.lockBusy
+        }
+        guard try await locateApp() == descriptor,
+              try store.loadRegistry() == registry,
+              try await !pendingRecoveryExists() else {
+            throw LocalCLIDataProviderFailure.pendingRecovery
+        }
+
+        try await revalidateCredentialMutationGate()
+        let current = try readCurrentCredential()
+        guard try store.loadRegistry() == registry,
+              try journalIsDurablyAbsent(in: store),
+              try store.loadCaptureProfileIDIfPresent() == nil,
+              try !verificationWorkspaceExists(),
+              try files.snapshot(at: activeAuthURL) == .exact(current.identity) else {
+            throw LocalCLIDataProviderFailure.pendingRecovery
+        }
+        switchActiveAuthDestination = .exact(current.identity)
+
+        let startedAt = Date(timeIntervalSince1970: Date().timeIntervalSince1970.rounded(.down))
+        var journal = SwitchJournalRecord(
+            transactionID: UUID(),
+            phase: .validatingTarget,
+            previousProfileID: source.id,
+            targetProfileID: target.id,
+            startedAt: startedAt,
+            updatedAt: startedAt
+        )
+        guard try store.createJournalIfAbsent(journal) != nil else {
+            throw LocalCLIDataProviderFailure.pendingRecovery
+        }
+
+        do {
+            _ = try await validatedCredential(
+                current.credential,
+                expectedEmail: target.email,
+                descriptor: descriptor
+            )
+            try await revalidateCredentialMutationGate()
+            guard try store.loadRegistry() == registry,
+                  try store.loadJournalIfPresent() == journal,
+                  try !verificationWorkspaceExists(),
+                  try files.snapshot(at: activeAuthURL) == .exact(current.identity) else {
+                throw LocalCLIDataProviderFailure.activeAuthChanged
+            }
+            let account = try await probeAccount(
+                descriptor: descriptor,
+                codexHomeURL: activeAuthURL.deletingLastPathComponent(),
+                homePolicy: .ownerControlled,
+                refreshToken: true
+            )
+            do {
+                try AccountIdentityValidator.validate(expectedEmail: target.email, account: account)
+            } catch {
+                throw ProfileCaptureFailure.identityMismatch
+            }
+            let refreshed = try readCurrentCredential()
+            switchActiveAuthDestination = .exact(refreshed.identity)
+            let verifiedIdentity = try await verifyActiveCredential(
+                expectedEmail: target.email,
+                descriptor: descriptor
+            )
+            guard verifiedIdentity == refreshed.identity else {
+                throw LocalCLIDataProviderFailure.activeAuthChanged
+            }
+            switchActiveAuthDestination = .exact(verifiedIdentity)
+            let verified = refreshed
+            try await revalidateCredentialMutationGate()
+            guard try store.loadRegistry() == registry,
+                  try store.loadJournalIfPresent() == journal,
+                  try files.snapshot(at: activeAuthURL) == .exact(verified.identity) else {
+                throw LocalCLIDataProviderFailure.activeAuthChanged
+            }
+            try credentialStore.saveCredential(verified.credential, for: target.id)
+            guard try credentialStore.loadCredential(for: target.id) == verified.credential,
+                  try files.snapshot(at: activeAuthURL) == .exact(verified.identity) else {
+                throw LocalCLIDataProviderFailure.credentialRoundTripFailed
+            }
+
+            try await revalidateCredentialMutationGate()
+            guard try readCurrentCredential() == verified,
+                  try credentialStore.loadCredential(for: target.id) == verified.credential,
+                  try store.loadRegistry() == registry else {
+                throw LocalCLIDataProviderFailure.activeAuthChanged
+            }
+            let preparedTarget = try prepareReloginProfile(
+                target,
+                account: account,
+                journal: journal,
+                in: store
+            )
+            journal = try markReloginTargetVerified(journal, in: store)
+
+            let activated = try commitReloginProfile(
+                preparedTarget,
+                journal: journal,
+                in: store
+            )
+            do {
+                try await removeJournalDurably()
+            } catch let failure as DurableFileFailure
+                where failure.certainty != .destinationUnchanged
+            {
+                return .journalFinalizationUncertain
+            }
+            return .activated(activated)
+        } catch {
+            if journal.phase == .targetVerified || reloginChildExitIsUnconfirmed(error) {
+                throw LocalCLIDataProviderFailure.pendingRecovery
+            }
+            guard await rollbackRelogin(journal, sourceProfileID: source.id) else {
+                throw LocalCLIDataProviderFailure.rollbackFailed
+            }
+            throw error
+        }
+    }
+
     public func switchProfile(
         target value: String,
         onPhaseChange: @escaping @Sendable (SwitchPhase) async -> Void
@@ -1476,6 +1626,155 @@ private extension LocalCLIDataProvider {
             throw LocalCLIDataProviderFailure.invalidSwitchState
         }
         return (store, descriptor, registry)
+    }
+
+    func markReloginTargetVerified(
+        _ journal: SwitchJournalRecord,
+        in store: SpikeStore
+    ) throws -> SwitchJournalRecord {
+        let updated = SwitchJournalRecord(
+            transactionID: journal.transactionID,
+            phase: .targetVerified,
+            previousProfileID: journal.previousProfileID,
+            targetProfileID: journal.targetProfileID,
+            startedAt: journal.startedAt,
+            updatedAt: Date(timeIntervalSince1970: Date().timeIntervalSince1970.rounded(.down))
+        )
+        _ = try store.updateVerifiedReloginJournal(updated)
+        return updated
+    }
+
+    func commitReloginProfile(
+        _ target: ProfileMetadata,
+        journal: SwitchJournalRecord,
+        in store: SpikeStore
+    ) throws -> ProfileListItem {
+        let context = try requireSwitchContext()
+        let current = try store.loadRegistry()
+        guard context.store.rootURL == store.rootURL,
+              current == context.registry,
+              current.activeProfileID != target.id,
+              !target.needsRelogin,
+              current.profiles.contains(target),
+              try store.loadJournalIfPresent() == journal,
+              journal.phase == .targetVerified,
+              journal.targetProfileID == target.id,
+              case let .exact(activeIdentity) = switchActiveAuthDestination,
+              try files.snapshot(at: activeAuthURL) == .exact(activeIdentity),
+              try credentialStore.loadCredential(for: target.id) == readCurrentCredential().credential else {
+            throw LocalCLIDataProviderFailure.registryRoundTripFailed
+        }
+        let updated = try ProfileRegistry(activeProfileID: target.id, profiles: current.profiles)
+        _ = try store.saveRegistry(updated)
+        switchExpectedRegistry = updated
+        guard try store.loadRegistry() == updated,
+              try store.loadJournalIfPresent() == journal,
+              try files.snapshot(at: activeAuthURL) == .exact(activeIdentity),
+              try credentialStore.loadCredential(for: target.id) == readCurrentCredential().credential else {
+            throw LocalCLIDataProviderFailure.registryRoundTripFailed
+        }
+        return ProfileListItem(
+            id: target.id,
+            label: target.label,
+            email: target.email,
+            active: true,
+            needsRelogin: false
+        )
+    }
+
+    func prepareReloginProfile(
+        _ target: ProfileMetadata,
+        account: AppServerAccountRead,
+        journal: SwitchJournalRecord,
+        in store: SpikeStore
+    ) throws -> ProfileMetadata {
+        let context = try requireSwitchContext()
+        let current = try store.loadRegistry()
+        guard context.store.rootURL == store.rootURL,
+              current == context.registry,
+              current.activeProfileID != target.id,
+              target.needsRelogin,
+              try store.loadJournalIfPresent() == journal,
+              journal.phase == .validatingTarget,
+              journal.targetProfileID == target.id,
+              case let .exact(activeIdentity) = switchActiveAuthDestination,
+              try files.snapshot(at: activeAuthURL) == .exact(activeIdentity),
+              try credentialStore.loadCredential(for: target.id) == readCurrentCredential().credential else {
+            throw LocalCLIDataProviderFailure.registryRoundTripFailed
+        }
+        let refreshedPlanType: String? = if case let .chatGPT(_, planType, _) = account {
+            planType
+        } else {
+            nil
+        }
+        let updatedTarget = ProfileMetadata(
+            id: target.id,
+            label: target.label,
+            email: target.email,
+            planType: refreshedPlanType ?? target.planType,
+            needsRelogin: false,
+            createdAt: target.createdAt,
+            updatedAt: Date(timeIntervalSince1970: Date().timeIntervalSince1970.rounded(.down))
+        )
+        let updated = try ProfileRegistry(
+            activeProfileID: current.activeProfileID,
+            profiles: current.profiles.map { $0.id == target.id ? updatedTarget : $0 }
+        )
+        _ = try store.saveRegistry(updated)
+        switchExpectedRegistry = updated
+        guard try store.loadRegistry() == updated,
+              try store.loadJournalIfPresent() == journal,
+              try files.snapshot(at: activeAuthURL) == .exact(activeIdentity),
+              try credentialStore.loadCredential(for: target.id) == readCurrentCredential().credential else {
+            throw LocalCLIDataProviderFailure.registryRoundTripFailed
+        }
+        return updatedTarget
+    }
+
+    func rollbackRelogin(
+        _ journal: SwitchJournalRecord,
+        sourceProfileID: ProfileID
+    ) async -> Bool {
+        let rollback = SwitchJournalRecord(
+            transactionID: journal.transactionID,
+            phase: .rollbackStarted,
+            previousProfileID: journal.previousProfileID,
+            targetProfileID: journal.targetProfileID,
+            startedAt: journal.startedAt,
+            updatedAt: Date(timeIntervalSince1970: Date().timeIntervalSince1970.rounded(.down))
+        )
+        do {
+            let context = try requireSwitchContext()
+            guard let source = context.registry.profiles.first(where: { $0.id == sourceProfileID }) else {
+                throw LocalCLIDataProviderFailure.rollbackFailed
+            }
+            try await persistJournal(rollback)
+            try await revalidateCredentialMutationGate()
+            try await restorePreviousCredential(sourceProfileID)
+            try await verifyPrevious(expectedEmail: source.email)
+            try await revalidateCredentialMutationGate()
+            try await commitActiveProfile(sourceProfileID)
+            try await removeJournalDurably()
+            return true
+        } catch {
+            let failed = SwitchJournalRecord(
+                transactionID: rollback.transactionID,
+                phase: .rollbackFailed,
+                previousProfileID: rollback.previousProfileID,
+                targetProfileID: rollback.targetProfileID,
+                startedAt: rollback.startedAt,
+                updatedAt: Date(timeIntervalSince1970: Date().timeIntervalSince1970.rounded(.down))
+            )
+            try? await persistJournal(failed)
+            return false
+        }
+    }
+
+    func reloginChildExitIsUnconfirmed(_ error: Error) -> Bool {
+        if let failure = error as? TargetValidationFailure {
+            return failure == .childStillAlive
+        }
+        return appServerExitIsUnconfirmed(error)
     }
 
     func appServerExitIsUnconfirmed(_ error: Error) -> Bool {
