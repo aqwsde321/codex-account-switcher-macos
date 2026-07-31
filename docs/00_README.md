@@ -167,7 +167,7 @@ Swift CLI Core의 비파괴 기반 구현은 저장소 루트에 있다. 빌드�
 
 1. 완료: SwiftPM Core/CLI/test harness
 2. 완료: credential/file/journal/lock, App Server, bundle/process, 상태 머신
-3. 완료: custom async harness의 fake fixture 99개 테스트와 `inspect`/`profiles list`/`profile capture`/`profile sync-active`/`switch`/`recovery status`/`recovery restore`
+3. 완료: custom async harness의 fake fixture 102개 테스트와 `inspect`/`profiles list`/`profile capture`/`profile sync-active`/`switch`/`recovery status`/`recovery restore`
 4. 완료: 공식 ChatGPT 앱의 OS signature와 고정 build 검증
 5. 완료: 최대 3개 registration coordinator, 추가 등록 후 기존 활성 프로필 자동 복귀, 외부 Terminal confirmation gate
 6. 개발 승인: 사용자 확인상 동일 task 기능 왕복 완료, `07_test_acceptance.md` §16 형식 증거는 릴리스 게이트로 유지
@@ -179,7 +179,8 @@ Swift CLI Core의 비파괴 기반 구현은 저장소 루트에 있다. 빌드�
 12. 완료: 메뉴바 pending phase·정확한 이전 프로필·blocked recovery 상태 표시
 13. 완료: 수동 복구 완전 성공·앱 실행 미확인·journal 완료 불확실 typed outcome, phase/expected-active finalization evidence와 공통 재개 gate
 14. 완료: 메뉴바 exact transaction/previous-profile 수동 복구, 명시 확인, typed outcome별 성공·launch 미확인·STOP 처리
-15. 다음: 메뉴바 재로그인 동작과 세부 진행 단계 연결
+15. 완료: durable journal phase 직후 callback과 메뉴바 실시간 전환 진행 문구 연결
+16. 다음: 메뉴바 재로그인 동작 정의·연결
 
 구현 상세와 각 단계 검증은 `08_implementation_handoff.md`에 있다.
 
@@ -188,7 +189,7 @@ Swift CLI Core의 비파괴 기반 구현은 저장소 루트에 있다. 빌드�
 ```text
 `docs/00_README.md`부터 연결된 문서를 읽어.
 `02_decision_record.md`의 ADR-027과 기존 안전 결정을 유지하고,
-`08_implementation_handoff.md` Step 9의 재로그인·세부 진행 UI를 구현해.
+`08_implementation_handoff.md` Step 9의 재로그인 동작을 정의하고 구현해.
 검증된 Core를 재사용하고 실제 Codex 앱 종료와 auth.json 교체는
 외부 Terminal 실행 게이트로 남겨둬. B-010 정식 증거는 릴리스 전 확보해.
 ```

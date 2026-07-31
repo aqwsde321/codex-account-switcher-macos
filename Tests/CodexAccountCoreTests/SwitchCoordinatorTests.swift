@@ -3,41 +3,87 @@ import CodexAccountCore
 
 func switchCoordinatorTests() -> [TestCase] {
     [
-        TestCase("SwitchCoordinator persists each phase before its side effect") {
+        TestCase("SwitchCoordinator emits each durable canonical phase before its side effect") {
             let driver = RecordingSwitchDriver()
             let coordinator = SwitchCoordinator(
                 driver: driver,
+                onPhaseChange: { phase in await driver.recordPhase(phase) },
                 now: { Date(timeIntervalSince1970: 1_700_000_000) }
             )
             let request = switchRequest()
 
             let outcome = try await coordinator.switchAccount(request)
             let events = await driver.events
+            let phases = await driver.phases
 
             try expect(outcome == .switched, "switch did not complete")
+            try expect(
+                phases == SwitchStateMachine.canonicalPhases,
+                "emitted phases differ from the canonical order"
+            )
             try expect(
                 events == [
                     "lock",
                     "recoveryGate",
-                    "journal:preparing", "validate",
-                    "journal:quitRequested", "quit", "quiescent",
-                    "journal:quiescent", "verifySource",
-                    "journal:refreshingCurrent", "mutationGate", "refreshCurrent",
-                    "journal:currentSaved",
-                    "journal:validatingTarget", "validateTarget",
-                    "journal:targetValidated", "mutationGate", "replaceAuth",
-                    "journal:authReplaced", "launchTarget",
-                    "journal:targetLaunched",
-                    "journal:verifyingTarget", "verifyTarget",
-                    "journal:targetVerified", "commit", "removeJournal",
+                    "journal:preparing", "phase:preparing", "validate",
+                    "journal:quitRequested", "phase:quitRequested", "quit", "quiescent",
+                    "journal:quiescent", "phase:quiescent", "verifySource",
+                    "journal:refreshingCurrent", "phase:refreshingCurrent", "mutationGate", "refreshCurrent",
+                    "journal:currentSaved", "phase:currentSaved",
+                    "journal:validatingTarget", "phase:validatingTarget", "validateTarget",
+                    "journal:targetValidated", "phase:targetValidated", "mutationGate", "replaceAuth",
+                    "journal:authReplaced", "phase:authReplaced", "launchTarget",
+                    "journal:targetLaunched", "phase:targetLaunched",
+                    "journal:verifyingTarget", "phase:verifyingTarget", "verifyTarget",
+                    "journal:targetVerified", "phase:targetVerified", "commit", "removeJournal",
                     "unlock",
                 ],
                 "switch event order differs from durable phase contract"
             )
         },
+        TestCase("SwitchCoordinator preserves the trailing now closure API") {
+            let driver = RecordingSwitchDriver()
+            let fixedDate = Date(timeIntervalSince1970: 1_700_000_123)
+            let coordinator = SwitchCoordinator(driver: driver) { fixedDate }
+
+            _ = try await coordinator.switchAccount(switchRequest())
+
+            let journalDates = await driver.journalDates
+            let phases = await driver.phases
+            try expect(
+                !journalDates.isEmpty && journalDates.allSatisfy { $0 == fixedDate },
+                "trailing closure no longer supplies deterministic journal timestamps"
+            )
+            try expect(phases.isEmpty, "trailing now closure was treated as a phase callback")
+        },
+        TestCase("SwitchCoordinator never emits a phase for a failed journal write") {
+            for (failurePoint, expectedPhases) in [
+                ("journal:preparing", [SwitchPhase]()),
+                ("journal:quitRequested", [.preparing]),
+            ] {
+                let driver = RecordingSwitchDriver(failAt: failurePoint)
+                let coordinator = SwitchCoordinator(
+                    driver: driver,
+                    onPhaseChange: { phase in await driver.recordPhase(phase) }
+                )
+
+                do {
+                    _ = try await coordinator.switchAccount(switchRequest())
+                    throw TestFailure(description: "failed journal write completed")
+                } catch let failure as SwitchCoordinatorFailure {
+                    try expect(failure == .operationFailed, "journal write failure returned the wrong status")
+                }
+
+                let phases = await driver.phases
+                try expect(phases == expectedPhases, "failed journal phase was emitted")
+            }
+        },
         TestCase("SwitchCoordinator rolls back in the documented order after active replacement") {
             let driver = RecordingSwitchDriver(failAt: "verifyTarget")
-            let coordinator = SwitchCoordinator(driver: driver)
+            let coordinator = SwitchCoordinator(
+                driver: driver,
+                onPhaseChange: { phase in await driver.recordPhase(phase) }
+            )
 
             do {
                 _ = try await coordinator.switchAccount(switchRequest())
@@ -47,13 +93,18 @@ func switchCoordinatorTests() -> [TestCase] {
             }
 
             let events = await driver.events
+            let phases = await driver.phases
+            try expect(
+                phases == Array(SwitchStateMachine.canonicalPhases.dropLast()) + [.rollbackStarted],
+                "rollback phase sequence differs from the durable journal order"
+            )
             guard let rollbackIndex = events.firstIndex(of: "journal:rollbackStarted") else {
                 throw TestFailure(description: "rollbackStarted was not persisted")
             }
             let rollbackTail = Array(events[rollbackIndex...])
             try expect(
                 rollbackTail == [
-                    "journal:rollbackStarted", "quit", "quiescent", "mutationGate",
+                    "journal:rollbackStarted", "phase:rollbackStarted", "quit", "quiescent", "mutationGate",
                     "restorePrevious", "verifyPrevious",
                     "mutationGate", "commit", "removeJournal", "launchPrevious", "unlock",
                 ],
@@ -96,7 +147,10 @@ func switchCoordinatorTests() -> [TestCase] {
         },
         TestCase("SwitchCoordinator locks the already-active profile path") {
             let driver = RecordingSwitchDriver()
-            let coordinator = SwitchCoordinator(driver: driver)
+            let coordinator = SwitchCoordinator(
+                driver: driver,
+                onPhaseChange: { phase in await driver.recordPhase(phase) }
+            )
             let request = switchRequest()
             let sameProfile = SwitchRequest(
                 source: request.source,
@@ -106,8 +160,10 @@ func switchCoordinatorTests() -> [TestCase] {
 
             let outcome = try await coordinator.switchAccount(sameProfile)
             let events = await driver.events
+            let phases = await driver.phases
 
             try expect(outcome == .activatedExisting, "existing application was not activated")
+            try expect(phases.isEmpty, "same-profile activation emitted a switch phase")
             try expect(
                 events == ["lock", "recoveryGate", "activate", "unlock"],
                 "same-profile path bypassed recovery gate"
@@ -137,7 +193,10 @@ func switchCoordinatorTests() -> [TestCase] {
                 failAt: "verifyTarget",
                 failDuringRollbackAt: "quiescent"
             )
-            let coordinator = SwitchCoordinator(driver: driver)
+            let coordinator = SwitchCoordinator(
+                driver: driver,
+                onPhaseChange: { phase in await driver.recordPhase(phase) }
+            )
 
             do {
                 _ = try await coordinator.switchAccount(switchRequest())
@@ -147,9 +206,15 @@ func switchCoordinatorTests() -> [TestCase] {
             }
 
             let events = await driver.events
+            let phases = await driver.phases
             try expect(!events.contains("restorePrevious"), "auth was restored with a live writer")
             try expect(!events.contains("launchPrevious"), "previous app launched after rollback gate failure")
             try expect(events.contains("journal:rollbackFailed"), "rollback failure was not persisted")
+            try expect(
+                phases == Array(SwitchStateMachine.canonicalPhases.dropLast())
+                    + [.rollbackStarted, .rollbackFailed],
+                "rollback failure phases were not emitted in durable order"
+            )
         },
         TestCase("SwitchCoordinator never overwrites a pending recovery journal") {
             let driver = RecordingSwitchDriver(pendingRecovery: true)
@@ -186,6 +251,8 @@ func switchCoordinatorTests() -> [TestCase] {
 
 private actor RecordingSwitchDriver: SwitchTransactionDriving {
     private(set) var events = [String]()
+    private(set) var phases = [SwitchPhase]()
+    private(set) var journalDates = [Date]()
     private let failAt: String?
     private let failDuringRollbackAt: String?
     private let pendingRecovery: Bool
@@ -218,12 +285,19 @@ private actor RecordingSwitchDriver: SwitchTransactionDriving {
     }
 
     func createJournalIfAbsent(_ record: SwitchJournalRecord) async throws -> Bool {
-        events.append("journal:\(record.phase.rawValue)")
+        journalDates.append(record.updatedAt)
+        try self.record("journal:\(record.phase.rawValue)")
         return true
     }
 
     func persistJournal(_ record: SwitchJournalRecord) async throws {
-        events.append("journal:\(record.phase.rawValue)")
+        journalDates.append(record.updatedAt)
+        try self.record("journal:\(record.phase.rawValue)")
+    }
+
+    func recordPhase(_ phase: SwitchPhase) {
+        phases.append(phase)
+        events.append("phase:\(phase.rawValue)")
     }
 
     func validatePreparation(source: ProfileMetadata, target: ProfileMetadata) async throws {

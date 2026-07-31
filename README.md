@@ -32,10 +32,11 @@
 - 메뉴바의 명시적 현재 활성 인증 저장, 실행 전 수동 종료 확인, 성공·복구 차단 상태 표시
 - 메뉴바 recovery pending phase와 journal의 정확한 이전 프로필 표시, blocked 상태의 fail-closed 안내
 - 메뉴바 `rollbackFailed` transaction+이전 프로필에 묶인 수동 복구, 명시 확인, launch 미확인 재시도 금지, journal 불확실 STOP
+- 메뉴바 전환의 durable journal phase 기반 실시간 진행 문구와 완료·실패 후 상태 정리
 
 아직 구현·노출하지 않음:
 
-- 메뉴바 재로그인 동작과 세부 진행 단계
+- 메뉴바 재로그인 동작
 - 잔존 앱 프로세스 2차 종료 확인과 서명된 앱의 실제 Keychain 검증
 - 5시간·주간 사용량 표시
 

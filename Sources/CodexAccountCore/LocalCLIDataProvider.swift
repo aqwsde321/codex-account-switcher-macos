@@ -221,6 +221,13 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
     }
 
     public func switchProfile(target value: String) async throws -> ProfileListItem {
+        try await switchProfile(target: value, onPhaseChange: { _ in })
+    }
+
+    public func switchProfile(
+        target value: String,
+        onPhaseChange: @escaping @Sendable (SwitchPhase) async -> Void
+    ) async throws -> ProfileListItem {
         guard !switchInProgress else {
             throw LocalCLIDataProviderFailure.switchAlreadyRunning
         }
@@ -260,7 +267,10 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
         switchDescriptor = descriptor
         switchExpectedRegistry = registry
 
-        _ = try await SwitchCoordinator(driver: self).switchAccount(
+        _ = try await SwitchCoordinator(
+            driver: self,
+            onPhaseChange: onPhaseChange
+        ).switchAccount(
             SwitchRequest(
                 source: source,
                 target: target,

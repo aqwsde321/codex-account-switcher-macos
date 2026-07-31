@@ -12,13 +12,18 @@ public final class MenuBarViewModel: ObservableObject {
     public typealias LoadRecoveryStatus = @Sendable () async throws -> RecoveryCLIStatus
     public typealias CaptureProfile = @Sendable (String) async throws -> ProfileListItem
     public typealias SyncActiveProfile = @Sendable () async throws -> ProfileListItem
-    public typealias SwitchProfile = @Sendable (String) async throws -> ProfileListItem
+    public typealias SwitchProgress = @Sendable (SwitchPhase) async -> Void
+    public typealias SwitchProfile = @Sendable (
+        String,
+        @escaping SwitchProgress
+    ) async throws -> ProfileListItem
     public typealias RestoreRecoveryProfile = @Sendable (String, String) async throws -> RecoveryRestoreOutcome
 
     @Published public private(set) var profiles = [ProfileListItem]()
     @Published public private(set) var pendingProfile: ProfileListItem?
     @Published public private(set) var pendingRecoveryConfirmation: RecoveryConfirmation?
     @Published public private(set) var recoveryStatus = RecoveryCLIStatus.blocked
+    @Published public private(set) var switchPhase: SwitchPhase?
     @Published public private(set) var isWorking = false
     @Published public private(set) var errorMessage: String?
     @Published public private(set) var statusMessage: String?
@@ -207,6 +212,40 @@ public final class MenuBarViewModel: ObservableObject {
         recoveryStatus != .none
     }
 
+    public var switchProgressMessage: String? {
+        guard let switchPhase else { return nil }
+        return Self.switchProgressMessage(for: switchPhase)
+    }
+
+    package static func switchProgressMessage(for phase: SwitchPhase) -> String {
+        switch phase {
+        case .preparing:
+            return "전환 준비 중…"
+        case .quitRequested:
+            return "Codex 앱 종료 및 프로세스 확인 중…"
+        case .quiescent:
+            return "현재 계정 확인 중…"
+        case .refreshingCurrent:
+            return "현재 계정 인증 갱신 중…"
+        case .currentSaved:
+            return "대상 계정 준비 중…"
+        case .validatingTarget:
+            return "대상 계정 인증 확인 중…"
+        case .targetValidated:
+            return "대상 계정 인증 적용 중…"
+        case .authReplaced:
+            return "Codex 앱 실행 중…"
+        case .targetLaunched, .verifyingTarget:
+            return "대상 계정 확인 중…"
+        case .targetVerified:
+            return "전환 완료 처리 중…"
+        case .rollbackStarted:
+            return "문제가 발생해 이전 계정 복구 중…"
+        case .rollbackFailed:
+            return "자동 복구 실패. 앱을 열지 말고 복구하세요."
+        }
+    }
+
     private var recoveryCandidate: (transactionID: String, profile: ProfileListItem)? {
         guard case let .pending(transactionID, .rollbackFailed, previousProfileID) = recoveryStatus,
               let profile = profiles.first(where: { $0.id == previousProfileID }),
@@ -223,9 +262,15 @@ public final class MenuBarViewModel: ObservableObject {
             return
         }
         isWorking = true
-        defer { isWorking = false }
+        switchPhase = nil
+        defer {
+            switchPhase = nil
+            isWorking = false
+        }
         do {
-            _ = try await switchProfile(profile.id.description)
+            _ = try await switchProfile(profile.id.description) { [weak self] phase in
+                await self?.setSwitchPhase(phase)
+            }
             try await refreshState()
             errorMessage = recoveryRequired ? recoveryErrorMessage : nil
         } catch {
@@ -282,6 +327,10 @@ public final class MenuBarViewModel: ObservableObject {
         recoveryStatus == .none
             && profiles.filter(\.active).count == 1
             && profiles.contains { $0.id == profileID && $0.active && !$0.needsRelogin }
+    }
+
+    private func setSwitchPhase(_ phase: SwitchPhase) {
+        switchPhase = phase
     }
 
     private var recoveryErrorMessage: String {

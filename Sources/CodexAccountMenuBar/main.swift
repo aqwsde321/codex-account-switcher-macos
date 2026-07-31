@@ -48,11 +48,14 @@ struct CodexAccountMenuBarApp: App {
                     }
                     return try await provider.syncActiveProfile()
                 },
-                switchProfile: {
+                switchProfile: { target, onPhaseChange in
                     guard let provider else {
                         throw MenuBarStartupFailure.credentialStoreConfiguration
                     }
-                    return try await provider.switchProfile(target: $0)
+                    return try await provider.switchProfile(
+                        target: target,
+                        onPhaseChange: onPhaseChange
+                    )
                 },
                 restoreRecoveryProfile: { target, transactionID in
                     guard let provider else {
@@ -110,6 +113,13 @@ private struct AccountMenuView: View {
                             || (profile.needsRelogin && !profile.active)
                     )
                 }
+            }
+
+            if let progressMessage = model.switchProgressMessage {
+                Text(progressMessage)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel("전환 상태: \(progressMessage)")
             }
 
             if !isRegistering,

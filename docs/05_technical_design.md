@@ -536,6 +536,8 @@ ADR-027의 개발 승인에 따라 다음 최소 기능만 추가한다.
 - `rollbackFailed` journal의 exact transaction ID와 previous profile을 확인 snapshot에 묶고, Core lock 안에서 둘 다 재검증한 뒤에만 수동 복구
 - 복구 성공·앱 launch 미확인·journal finalization 불확실을 typed outcome으로 구분하고 마지막 두 분기에서 auth 복구 재시도 금지
 
+전환 진행 표시는 `SwitchCoordinator`가 각 journal create/update의 내구 성공 직후 내보내는 `SwitchPhase` callback만 사용한다. UI는 이를 현재 단계 문구로 매핑하며 퍼센트·예상 시간·실행 중 취소를 추정하지 않는다. 이미 활성인 프로필의 무변경 경로는 journal phase를 만들지 않으므로 진행 callback도 내보내지 않는다.
+
 후속 범위:
 
 - `account/rateLimits/read` 기반 5시간·주간 사용량

@@ -58,6 +58,7 @@ public protocol SwitchTransactionDriving: Sendable {
 public actor SwitchCoordinator {
     private let driver: any SwitchTransactionDriving
     private let now: @Sendable () -> Date
+    private let onPhaseChange: @Sendable (SwitchPhase) async -> Void
     private var activeTransactionID: UUID?
 
     public init(
@@ -66,6 +67,17 @@ public actor SwitchCoordinator {
     ) {
         self.driver = driver
         self.now = now
+        self.onPhaseChange = { _ in }
+    }
+
+    public init(
+        driver: any SwitchTransactionDriving,
+        onPhaseChange: @escaping @Sendable (SwitchPhase) async -> Void,
+        now: @escaping @Sendable () -> Date = Date.init
+    ) {
+        self.driver = driver
+        self.now = now
+        self.onPhaseChange = onPhaseChange
     }
 
     public func switchAccount(_ request: SwitchRequest) async throws -> SwitchOutcome {
@@ -146,6 +158,7 @@ public actor SwitchCoordinator {
             activeTransactionID = nil
             throw SwitchCoordinatorFailure.recoveryRequired
         }
+        await onPhaseChange(.preparing)
 
         var phase: SwitchPhase? = .preparing
         do {
@@ -278,6 +291,7 @@ private extension SwitchCoordinator {
                 updatedAt: now()
             )
         )
+        await onPhaseChange(phase)
     }
 
     func recover(

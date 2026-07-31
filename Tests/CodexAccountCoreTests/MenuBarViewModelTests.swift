@@ -12,7 +12,7 @@ func menuBarViewModelTests() -> [TestCase] {
                     loadRecoveryStatus: { await provider.recoveryStatus() },
                     captureProfile: { try await provider.captureProfile(label: $0) },
                     syncActiveProfile: { try await provider.syncActiveProfile() },
-                    switchProfile: { try await provider.switchProfile(target: $0) },
+                    switchProfile: { try await provider.switchProfile(target: $0, onPhaseChange: $1) },
                     restoreRecoveryProfile: {
                         try await provider.restoreRecoveryProfile(target: $0, expectedTransactionID: $1)
                     }
@@ -32,29 +32,40 @@ func menuBarViewModelTests() -> [TestCase] {
             await model.select(active)
             let targetsAfterActive = await provider.targets
             let eventsAfterActive = await provider.events
+            let phasesAfterActive = await provider.switchPhases
             let mutationsAfterActive = await provider.mutationCount
             let pendingAfterActive = await MainActor.run { model.pendingProfile }
             try expect(targetsAfterActive == [active.id.description], "active selection did not reach Core once")
             try expect(eventsAfterActive == ["activate"], "running active selection did not only activate the app")
+            try expect(phasesAfterActive.isEmpty, "active selection emitted switch phases")
             try expect(mutationsAfterActive == 0, "running active selection mutated account state")
             try expect(pendingAfterActive == nil, "active selection requested switch confirmation")
 
             await model.select(inactive)
             let targetsBeforeConfirmation = await provider.targets
+            let phasesBeforeConfirmation = await provider.switchPhases
             let pendingBeforeConfirmation = await MainActor.run { model.pendingProfile }
             try expect(targetsBeforeConfirmation == targetsAfterActive, "inactive selection mutated before confirmation")
+            try expect(phasesBeforeConfirmation.isEmpty, "inactive selection emitted progress before confirmation")
             try expect(pendingBeforeConfirmation?.id == inactive.id, "inactive confirmation target changed")
 
             await MainActor.run { model.cancelSwitch() }
             await model.confirmSwitch(pendingBeforeConfirmation)
             let targetsAfterConfirmation = await provider.targets
+            let phasesAfterConfirmation = await provider.switchPhases
             let mutationsAfterConfirmation = await provider.mutationCount
             let finalProfiles = await MainActor.run { model.profiles }
+            let finalSwitchPhase = await MainActor.run { model.switchPhase }
             try expect(
                 targetsAfterConfirmation == [active.id.description, inactive.id.description],
                 "confirmed inactive selection did not reach Core once"
             )
             try expect(mutationsAfterConfirmation == 1, "confirmed inactive selection mutation count changed")
+            try expect(
+                phasesAfterConfirmation == SwitchStateMachine.canonicalPhases,
+                "confirmed switch did not forward canonical progress phases"
+            )
+            try expect(finalSwitchPhase == nil, "completed switch left stale progress visible")
             try expect(finalProfiles.first(where: { $0.id == inactive.id })?.active == true, "selected card did not become active")
             try expect(finalProfiles.filter(\.active).count == 1, "confirmation produced multiple active cards")
 
@@ -68,7 +79,7 @@ func menuBarViewModelTests() -> [TestCase] {
                     loadRecoveryStatus: { await closedProvider.recoveryStatus() },
                     captureProfile: { try await closedProvider.captureProfile(label: $0) },
                     syncActiveProfile: { try await closedProvider.syncActiveProfile() },
-                    switchProfile: { try await closedProvider.switchProfile(target: $0) },
+                    switchProfile: { try await closedProvider.switchProfile(target: $0, onPhaseChange: $1) },
                     restoreRecoveryProfile: {
                         try await closedProvider.restoreRecoveryProfile(target: $0, expectedTransactionID: $1)
                     }
@@ -83,6 +94,50 @@ func menuBarViewModelTests() -> [TestCase] {
             let closedMutations = await closedProvider.mutationCount
             try expect(closedEvents == ["verify", "launch"], "closed active selection did not verify then launch")
             try expect(closedMutations == 0, "closed active selection mutated account state")
+
+            let failureProvider = MenuBarProviderSpy(
+                profiles: menuBarProfiles(),
+                switchFailureAfterProgress: true
+            )
+            let failureModel = await makeMenuBarModel(provider: failureProvider)
+            await failureModel.load()
+            guard let failingTarget = await MainActor.run(body: {
+                failureModel.profiles.first(where: { !$0.active })
+            }) else {
+                throw TestFailure(description: "failure fixture has no inactive profile")
+            }
+            await failureModel.select(failingTarget)
+            await failureModel.confirmSwitch()
+            let failedSwitchPhase = await MainActor.run { failureModel.switchPhase }
+            let failedSwitchMessage = await MainActor.run { failureModel.errorMessage }
+            try expect(failedSwitchPhase == nil, "failed switch left stale progress visible")
+            try expect(
+                failedSwitchMessage == "계정 작업을 완료하지 못했습니다.",
+                "failed switch did not replace progress with a safe error"
+            )
+        },
+        TestCase("MenuBarViewModel maps durable switch phases to safe progress text") {
+            let messages = await MainActor.run {
+                SwitchPhase.allCases.map(MenuBarViewModel.switchProgressMessage(for:))
+            }
+            try expect(
+                messages == [
+                    "전환 준비 중…",
+                    "Codex 앱 종료 및 프로세스 확인 중…",
+                    "현재 계정 확인 중…",
+                    "현재 계정 인증 갱신 중…",
+                    "대상 계정 준비 중…",
+                    "대상 계정 인증 확인 중…",
+                    "대상 계정 인증 적용 중…",
+                    "Codex 앱 실행 중…",
+                    "대상 계정 확인 중…",
+                    "대상 계정 확인 중…",
+                    "전환 완료 처리 중…",
+                    "문제가 발생해 이전 계정 복구 중…",
+                    "자동 복구 실패. 앱을 열지 말고 복구하세요.",
+                ],
+                "switch phase progress text changed"
+            )
         },
         TestCase("MenuBarViewModel registers the current login and reloads profiles") {
             let provider = MenuBarProviderSpy(profiles: [])
@@ -92,7 +147,7 @@ func menuBarViewModelTests() -> [TestCase] {
                     loadRecoveryStatus: { await provider.recoveryStatus() },
                     captureProfile: { try await provider.captureProfile(label: $0) },
                     syncActiveProfile: { try await provider.syncActiveProfile() },
-                    switchProfile: { try await provider.switchProfile(target: $0) },
+                    switchProfile: { try await provider.switchProfile(target: $0, onPhaseChange: $1) },
                     restoreRecoveryProfile: {
                         try await provider.restoreRecoveryProfile(target: $0, expectedTransactionID: $1)
                     }
@@ -135,7 +190,7 @@ func menuBarViewModelTests() -> [TestCase] {
                     loadRecoveryStatus: { await launchFailureProvider.recoveryStatus() },
                     captureProfile: { try await launchFailureProvider.captureProfile(label: $0) },
                     syncActiveProfile: { try await launchFailureProvider.syncActiveProfile() },
-                    switchProfile: { try await launchFailureProvider.switchProfile(target: $0) },
+                    switchProfile: { try await launchFailureProvider.switchProfile(target: $0, onPhaseChange: $1) },
                     restoreRecoveryProfile: {
                         try await launchFailureProvider.restoreRecoveryProfile(
                             target: $0,
@@ -165,7 +220,7 @@ func menuBarViewModelTests() -> [TestCase] {
                     loadRecoveryStatus: { await partialFailureProvider.recoveryStatus() },
                     captureProfile: { try await partialFailureProvider.captureProfile(label: $0) },
                     syncActiveProfile: { try await partialFailureProvider.syncActiveProfile() },
-                    switchProfile: { try await partialFailureProvider.switchProfile(target: $0) },
+                    switchProfile: { try await partialFailureProvider.switchProfile(target: $0, onPhaseChange: $1) },
                     restoreRecoveryProfile: {
                         try await partialFailureProvider.restoreRecoveryProfile(
                             target: $0,
@@ -207,7 +262,7 @@ func menuBarViewModelTests() -> [TestCase] {
                     loadRecoveryStatus: { await provider.recoveryStatus() },
                     captureProfile: { try await provider.captureProfile(label: $0) },
                     syncActiveProfile: { try await provider.syncActiveProfile() },
-                    switchProfile: { try await provider.switchProfile(target: $0) },
+                    switchProfile: { try await provider.switchProfile(target: $0, onPhaseChange: $1) },
                     restoreRecoveryProfile: {
                         try await provider.restoreRecoveryProfile(target: $0, expectedTransactionID: $1)
                     }
@@ -244,7 +299,7 @@ func menuBarViewModelTests() -> [TestCase] {
                     loadRecoveryStatus: { await failureProvider.recoveryStatus() },
                     captureProfile: { try await failureProvider.captureProfile(label: $0) },
                     syncActiveProfile: { try await failureProvider.syncActiveProfile() },
-                    switchProfile: { try await failureProvider.switchProfile(target: $0) },
+                    switchProfile: { try await failureProvider.switchProfile(target: $0, onPhaseChange: $1) },
                     restoreRecoveryProfile: {
                         try await failureProvider.restoreRecoveryProfile(
                             target: $0,
@@ -291,7 +346,7 @@ func menuBarViewModelTests() -> [TestCase] {
                     loadRecoveryStatus: { await provider.recoveryStatus() },
                     captureProfile: { try await provider.captureProfile(label: $0) },
                     syncActiveProfile: { try await provider.syncActiveProfile() },
-                    switchProfile: { try await provider.switchProfile(target: $0) },
+                    switchProfile: { try await provider.switchProfile(target: $0, onPhaseChange: $1) },
                     restoreRecoveryProfile: {
                         try await provider.restoreRecoveryProfile(target: $0, expectedTransactionID: $1)
                     }
@@ -321,7 +376,7 @@ func menuBarViewModelTests() -> [TestCase] {
                     loadRecoveryStatus: { await interruptedProvider.recoveryStatus() },
                     captureProfile: { try await interruptedProvider.captureProfile(label: $0) },
                     syncActiveProfile: { try await interruptedProvider.syncActiveProfile() },
-                    switchProfile: { try await interruptedProvider.switchProfile(target: $0) },
+                    switchProfile: { try await interruptedProvider.switchProfile(target: $0, onPhaseChange: $1) },
                     restoreRecoveryProfile: {
                         try await interruptedProvider.restoreRecoveryProfile(
                             target: $0,
@@ -516,7 +571,7 @@ private func makeMenuBarModel(provider: MenuBarProviderSpy) async -> MenuBarView
             loadRecoveryStatus: { await provider.recoveryStatus() },
             captureProfile: { try await provider.captureProfile(label: $0) },
             syncActiveProfile: { try await provider.syncActiveProfile() },
-            switchProfile: { try await provider.switchProfile(target: $0) },
+            switchProfile: { try await provider.switchProfile(target: $0, onPhaseChange: $1) },
             restoreRecoveryProfile: {
                 try await provider.restoreRecoveryProfile(target: $0, expectedTransactionID: $1)
             }
@@ -540,6 +595,7 @@ private actor MenuBarProviderSpy {
     private let captureFailureAfterMutation: Bool
     private let captureRecoveryStatusAfterFailure: RecoveryCLIStatus
     private let syncFailureAfterMutation: Bool
+    private let switchFailureAfterProgress: Bool
     private let restoreOutcome: RecoveryRestoreOutcome?
     private let recoveryStatusAfterRestore: RecoveryCLIStatus
     private var storedRecoveryStatus: RecoveryCLIStatus
@@ -549,6 +605,7 @@ private actor MenuBarProviderSpy {
     private(set) var targets = [String]()
     private(set) var events = [String]()
     private(set) var capturedLabels = [String]()
+    private(set) var switchPhases = [SwitchPhase]()
     private(set) var restoreTargets = [String]()
     private(set) var restoreTransactionIDs = [String]()
     private(set) var mutationCount = 0
@@ -565,6 +622,7 @@ private actor MenuBarProviderSpy {
             )
         ),
         syncFailureAfterMutation: Bool = false,
+        switchFailureAfterProgress: Bool = false,
         recoveryStatus: RecoveryCLIStatus = .none,
         restoreOutcome: RecoveryRestoreOutcome? = nil,
         recoveryStatusAfterRestore: RecoveryCLIStatus = .none
@@ -574,6 +632,7 @@ private actor MenuBarProviderSpy {
         self.captureFailureAfterMutation = captureFailureAfterMutation
         self.captureRecoveryStatusAfterFailure = captureRecoveryStatusAfterFailure
         self.syncFailureAfterMutation = syncFailureAfterMutation
+        self.switchFailureAfterProgress = switchFailureAfterProgress
         self.restoreOutcome = restoreOutcome
         self.recoveryStatusAfterRestore = recoveryStatusAfterRestore
         storedRecoveryStatus = recoveryStatus
@@ -625,7 +684,10 @@ private actor MenuBarProviderSpy {
         return active
     }
 
-    func switchProfile(target: String) throws -> ProfileListItem {
+    func switchProfile(
+        target: String,
+        onPhaseChange: @Sendable (SwitchPhase) async -> Void
+    ) async throws -> ProfileListItem {
         targets.append(target)
         guard let selected = storedProfiles.first(where: { $0.id.description == target }) else {
             throw MenuBarProviderSpyFailure.missingProfile
@@ -638,6 +700,13 @@ private actor MenuBarProviderSpy {
                 events.append("launch")
             }
             return selected
+        }
+        for phase in SwitchStateMachine.canonicalPhases {
+            switchPhases.append(phase)
+            await onPhaseChange(phase)
+        }
+        if switchFailureAfterProgress {
+            throw MenuBarProviderSpyFailure.switchFailed
         }
         mutationCount += 1
         storedProfiles = storedProfiles.map { profile in
@@ -686,6 +755,7 @@ private enum MenuBarProviderSpyFailure: Error {
     case missingProfile
     case captureFailed
     case syncFailed
+    case switchFailed
     case recoveryFailed
 }
 
