@@ -48,14 +48,14 @@ ADR-027과 기존 안전 결정을 유지한 채 Step 9 메뉴바 MVP를 구현�
 - credential backend 경계, CLI private file store 명시 연결, Keychain generic-password CRUD와 plaintext fallback 금지 구현
 - 메뉴바 앱의 fake provider 제거, 실제 `LocalCLIDataProvider`·Keychain 주입, Spike와 분리된 제품 metadata 경로 연결
 - 메뉴바 현재 로그인 등록, 추가 등록 상태 재조회, startup/실패 recovery gate 구현
-- fake credential만 사용하는 89개 debug 테스트 통과
+- 메뉴바 현재 활성 인증의 명시적 수동 동기화와 성공·복구 차단 상태 구현
+- fake credential만 사용하는 90개 debug 테스트 통과
 - 실제 read-only inspect에서 사용자 auth와 helper store 무변경 확인
 - `rollbackFailed` 수동 복구 CLI와 실환경 A 복구 2회 완료
 - debug 전용 B-011 실패 주입에서 source 자동 롤백과 최종 A 복귀 확인
 
 미완료:
 
-- 메뉴바 활성 인증 동기화
 - 상세 진행 단계·수동 복구·재로그인 동작 UI
 - 잔존 앱 프로세스 2차 종료 확인과 서명된 앱의 실제 Keychain CRUD·접근 정책 검증
 - MVP 완료·배포 전 `07_test_acceptance.md` §16 형식의 동일 task 왕복 증거 보존
@@ -319,7 +319,7 @@ cd codex-account-switcher-spike
 
 ADR-027의 개발 승인에 따라 시작한다. B-010 정식 증거 공백은 릴리스 게이트로 남긴다.
 
-현재 1~3, 4의 실제 provider 주입과 등록, 5의 recovery mutation gate까지 완료됐다. 4의 상세 확인·단계·안전 오류와 5의 수동 복구·재로그인 동작 연결이 다음 작업이다.
+현재 1~3, 4의 실제 provider 주입·등록·활성 인증 동기화, 5의 recovery mutation gate까지 완료됐다. 4의 상세 단계·안전 오류와 5의 수동 복구·재로그인 동작 연결이 다음 작업이다.
 
 구현 순서:
 
@@ -367,6 +367,15 @@ registration slice의 완료 기준:
 - capture가 durable commit 뒤 실패해도 profile 목록을 다시 읽어 중복 재시도를 막는다.
 - 추가 등록 commit 뒤 앱 launch만 실패하고 recovery가 없으면 새 profile ID를 등록 완료로 판정하고 폼을 닫되 launch 실패를 알린다.
 - 테스트는 fake provider만 사용하며 실제 홈·Keychain·공식 앱을 건드리지 않는다.
+
+active credential sync slice의 완료 기준:
+
+- active 프로필과 recovery none 상태에서만 명시적 확인 뒤 Core `syncActiveProfile()`을 호출한다.
+- 공식 앱과 독립 Codex 프로세스를 사용자가 먼저 종료해야 하며 자동 종료·앱 재실행은 하지 않는다.
+- 현재 `auth.json` 이메일이 active 프로필과 완전 일치할 때만 해당 Keychain 저장본을 교체한다.
+- 성공을 token refresh나 재로그인 완료로 표시하지 않고 현재 인증 저장 완료로만 알린다.
+- 성공·실패 뒤 profile과 recovery를 다시 읽으며 pending/blocked면 sync·등록·전환을 모두 중단한다.
+- 테스트는 fake provider로 명시 호출·성공 재조회·recovery 차단만 검증하고 실제 Keychain 동기화는 배포 검증에 남긴다.
 
 ## 8. 실제 switch를 이 task 안에서 실행하면 안 되는 이유
 

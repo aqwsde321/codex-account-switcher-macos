@@ -11,6 +11,7 @@ func menuBarViewModelTests() -> [TestCase] {
                     loadProfiles: { await provider.profiles() },
                     loadRecoveryStatus: { await provider.recoveryStatus() },
                     captureProfile: { try await provider.captureProfile(label: $0) },
+                    syncActiveProfile: { try await provider.syncActiveProfile() },
                     switchProfile: { try await provider.switchProfile(target: $0) }
                 )
             }
@@ -63,6 +64,7 @@ func menuBarViewModelTests() -> [TestCase] {
                     loadProfiles: { await closedProvider.profiles() },
                     loadRecoveryStatus: { await closedProvider.recoveryStatus() },
                     captureProfile: { try await closedProvider.captureProfile(label: $0) },
+                    syncActiveProfile: { try await closedProvider.syncActiveProfile() },
                     switchProfile: { try await closedProvider.switchProfile(target: $0) }
                 )
             }
@@ -83,6 +85,7 @@ func menuBarViewModelTests() -> [TestCase] {
                     loadProfiles: { await provider.profiles() },
                     loadRecoveryStatus: { await provider.recoveryStatus() },
                     captureProfile: { try await provider.captureProfile(label: $0) },
+                    syncActiveProfile: { try await provider.syncActiveProfile() },
                     switchProfile: { try await provider.switchProfile(target: $0) }
                 )
             }
@@ -122,6 +125,7 @@ func menuBarViewModelTests() -> [TestCase] {
                     loadProfiles: { await launchFailureProvider.profiles() },
                     loadRecoveryStatus: { await launchFailureProvider.recoveryStatus() },
                     captureProfile: { try await launchFailureProvider.captureProfile(label: $0) },
+                    syncActiveProfile: { try await launchFailureProvider.syncActiveProfile() },
                     switchProfile: { try await launchFailureProvider.switchProfile(target: $0) }
                 )
             }
@@ -145,6 +149,7 @@ func menuBarViewModelTests() -> [TestCase] {
                     loadProfiles: { await partialFailureProvider.profiles() },
                     loadRecoveryStatus: { await partialFailureProvider.recoveryStatus() },
                     captureProfile: { try await partialFailureProvider.captureProfile(label: $0) },
+                    syncActiveProfile: { try await partialFailureProvider.syncActiveProfile() },
                     switchProfile: { try await partialFailureProvider.switchProfile(target: $0) }
                 )
             }
@@ -173,6 +178,73 @@ func menuBarViewModelTests() -> [TestCase] {
             try expect(labelsAfterBlockedRetry == ["회사"], "recovery gate retried registration")
             try expect(targetsAfterBlockedRetry.isEmpty, "recovery gate allowed profile selection")
         },
+        TestCase("MenuBarViewModel syncs the active credential and stops on recovery") {
+            let provider = MenuBarProviderSpy(profiles: menuBarProfiles())
+            let model = await MainActor.run {
+                MenuBarViewModel(
+                    loadProfiles: { await provider.profiles() },
+                    loadRecoveryStatus: { await provider.recoveryStatus() },
+                    captureProfile: { try await provider.captureProfile(label: $0) },
+                    syncActiveProfile: { try await provider.syncActiveProfile() },
+                    switchProfile: { try await provider.switchProfile(target: $0) }
+                )
+            }
+
+            await model.load()
+            let syncCountAfterLoad = await provider.syncCount
+            try expect(syncCountAfterLoad == 0, "active credential synced automatically during load")
+            await model.syncActive()
+            let syncMessage = await MainActor.run { model.statusMessage }
+            let syncError = await MainActor.run { model.errorMessage }
+            let isWorkingAfterSync = await MainActor.run { model.isWorking }
+            let syncCount = await provider.syncCount
+            let profileLoadCount = await provider.profileLoadCount
+            let recoveryLoadCount = await provider.recoveryLoadCount
+            try expect(syncCount == 1, "active credential sync did not reach Core once")
+            try expect(profileLoadCount == 2, "profiles were not reloaded after active sync")
+            try expect(recoveryLoadCount == 2, "recovery was not reloaded after active sync")
+            try expect(
+                syncMessage == "현재 인증을 활성 프로필 저장본에 반영했습니다.",
+                "active sync success was not reported"
+            )
+            try expect(syncError == nil, "active sync success left an error")
+            try expect(!isWorkingAfterSync, "menu bar remained busy after active sync")
+
+            let failureProvider = MenuBarProviderSpy(
+                profiles: menuBarProfiles(),
+                syncFailureAfterMutation: true
+            )
+            let failureModel = await MainActor.run {
+                MenuBarViewModel(
+                    loadProfiles: { await failureProvider.profiles() },
+                    loadRecoveryStatus: { await failureProvider.recoveryStatus() },
+                    captureProfile: { try await failureProvider.captureProfile(label: $0) },
+                    syncActiveProfile: { try await failureProvider.syncActiveProfile() },
+                    switchProfile: { try await failureProvider.switchProfile(target: $0) }
+                )
+            }
+            await failureModel.load()
+            await failureModel.syncActive()
+            let recoveryRequired = await MainActor.run { failureModel.recoveryRequired }
+            let failureMessage = await MainActor.run { failureModel.errorMessage }
+            try expect(recoveryRequired, "active sync failure did not reload recovery state")
+            try expect(
+                failureMessage == "복구가 필요합니다. 계정 작업을 중단했습니다.",
+                "active sync recovery error was not safe"
+            )
+
+            await failureModel.syncActive()
+            _ = await failureModel.register(label: "재시도")
+            if let active = await MainActor.run(body: { failureModel.profiles.first(where: \.active) }) {
+                await failureModel.select(active)
+            }
+            let syncCountAfterBlockedRetry = await failureProvider.syncCount
+            let labelsAfterBlockedRetry = await failureProvider.capturedLabels
+            let targetsAfterBlockedRetry = await failureProvider.targets
+            try expect(syncCountAfterBlockedRetry == 1, "recovery gate retried active sync")
+            try expect(labelsAfterBlockedRetry.isEmpty, "recovery gate allowed registration after active sync failure")
+            try expect(targetsAfterBlockedRetry.isEmpty, "recovery gate allowed selection after active sync failure")
+        },
     ]
 }
 
@@ -181,7 +253,11 @@ private actor MenuBarProviderSpy {
     private let applicationIsRunning: Bool
     private let captureFailureAfterMutation: Bool
     private let captureRecoveryStatusAfterFailure: RecoveryCLIStatus
+    private let syncFailureAfterMutation: Bool
     private var storedRecoveryStatus: RecoveryCLIStatus
+    private(set) var profileLoadCount = 0
+    private(set) var recoveryLoadCount = 0
+    private(set) var syncCount = 0
     private(set) var targets = [String]()
     private(set) var events = [String]()
     private(set) var capturedLabels = [String]()
@@ -195,21 +271,25 @@ private actor MenuBarProviderSpy {
             transactionID: "00000000-0000-0000-0000-000000000001",
             phase: .rollbackFailed
         ),
+        syncFailureAfterMutation: Bool = false,
         recoveryStatus: RecoveryCLIStatus = .none
     ) {
         storedProfiles = profiles
         self.applicationIsRunning = applicationIsRunning
         self.captureFailureAfterMutation = captureFailureAfterMutation
         self.captureRecoveryStatusAfterFailure = captureRecoveryStatusAfterFailure
+        self.syncFailureAfterMutation = syncFailureAfterMutation
         storedRecoveryStatus = recoveryStatus
     }
 
     func profiles() -> [ProfileListItem] {
-        storedProfiles
+        profileLoadCount += 1
+        return storedProfiles
     }
 
     func recoveryStatus() -> RecoveryCLIStatus {
-        storedRecoveryStatus
+        recoveryLoadCount += 1
+        return storedRecoveryStatus
     }
 
     func captureProfile(label: String) throws -> ProfileListItem {
@@ -230,6 +310,18 @@ private actor MenuBarProviderSpy {
             throw MenuBarProviderSpyFailure.captureFailed
         }
         return profile
+    }
+
+    func syncActiveProfile() throws -> ProfileListItem {
+        syncCount += 1
+        guard let active = storedProfiles.first(where: \.active) else {
+            throw MenuBarProviderSpyFailure.missingProfile
+        }
+        if syncFailureAfterMutation {
+            storedRecoveryStatus = .blocked
+            throw MenuBarProviderSpyFailure.syncFailed
+        }
+        return active
     }
 
     func switchProfile(target: String) throws -> ProfileListItem {
@@ -266,6 +358,7 @@ private actor MenuBarProviderSpy {
 private enum MenuBarProviderSpyFailure: Error {
     case missingProfile
     case captureFailed
+    case syncFailed
 }
 
 private func menuBarProfiles() -> [ProfileListItem] {

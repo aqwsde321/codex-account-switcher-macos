@@ -6,6 +6,7 @@ public final class MenuBarViewModel: ObservableObject {
     public typealias LoadProfiles = @Sendable () async throws -> [ProfileListItem]
     public typealias LoadRecoveryStatus = @Sendable () async throws -> RecoveryCLIStatus
     public typealias CaptureProfile = @Sendable (String) async throws -> ProfileListItem
+    public typealias SyncActiveProfile = @Sendable () async throws -> ProfileListItem
     public typealias SwitchProfile = @Sendable (String) async throws -> ProfileListItem
 
     @Published public private(set) var profiles = [ProfileListItem]()
@@ -13,21 +14,25 @@ public final class MenuBarViewModel: ObservableObject {
     @Published public private(set) var recoveryStatus = RecoveryCLIStatus.blocked
     @Published public private(set) var isWorking = false
     @Published public private(set) var errorMessage: String?
+    @Published public private(set) var statusMessage: String?
 
     private let loadProfiles: LoadProfiles
     private let loadRecoveryStatus: LoadRecoveryStatus
     private let captureProfile: CaptureProfile
+    private let syncActiveProfile: SyncActiveProfile
     private let switchProfile: SwitchProfile
 
     public init(
         loadProfiles: @escaping LoadProfiles,
         loadRecoveryStatus: @escaping LoadRecoveryStatus,
         captureProfile: @escaping CaptureProfile,
+        syncActiveProfile: @escaping SyncActiveProfile,
         switchProfile: @escaping SwitchProfile
     ) {
         self.loadProfiles = loadProfiles
         self.loadRecoveryStatus = loadRecoveryStatus
         self.captureProfile = captureProfile
+        self.syncActiveProfile = syncActiveProfile
         self.switchProfile = switchProfile
     }
 
@@ -44,6 +49,7 @@ public final class MenuBarViewModel: ObservableObject {
     }
 
     public func select(_ profile: ProfileListItem) async {
+        statusMessage = nil
         guard !isWorking, !recoveryRequired else {
             if recoveryRequired { errorMessage = recoveryErrorMessage }
             return
@@ -72,6 +78,7 @@ public final class MenuBarViewModel: ObservableObject {
 
     @discardableResult
     public func register(label: String) async -> Bool {
+        statusMessage = nil
         guard !isWorking, !recoveryRequired else {
             if recoveryRequired { errorMessage = recoveryErrorMessage }
             return false
@@ -103,11 +110,37 @@ public final class MenuBarViewModel: ObservableObject {
         }
     }
 
+    public func syncActive() async {
+        statusMessage = nil
+        guard !isWorking, !recoveryRequired else {
+            if recoveryRequired { errorMessage = recoveryErrorMessage }
+            return
+        }
+        isWorking = true
+        defer { isWorking = false }
+        do {
+            _ = try await syncActiveProfile()
+            try await refreshState()
+            guard !recoveryRequired else {
+                errorMessage = recoveryErrorMessage
+                return
+            }
+            errorMessage = nil
+            statusMessage = "현재 인증을 활성 프로필 저장본에 반영했습니다."
+        } catch {
+            await refreshAfterMutationFailure()
+            errorMessage = recoveryRequired
+                ? recoveryErrorMessage
+                : "현재 인증을 동기화하지 못했습니다."
+        }
+    }
+
     public var recoveryRequired: Bool {
         recoveryStatus != .none
     }
 
     private func performSwitch(to profile: ProfileListItem) async {
+        statusMessage = nil
         guard !recoveryRequired else {
             errorMessage = recoveryErrorMessage
             return

@@ -136,6 +136,8 @@ Unit/Integration test는 실제 `~/.codex/auth.json`을 읽거나 쓰지 않는�
 | U-030 | 메뉴바 현재 로그인 등록 | label 원문으로 Core capture 1회, 완료 뒤 profile·active 상태 재조회 | 예 |
 | U-031 | 메뉴바 등록 partial failure와 pending recovery | durable profile 재조회, 등록·전환 추가 mutation 0회 | 예 |
 | U-032 | 추가 등록 commit 뒤 앱 launch 실패, recovery 없음 | 새 profile 재조회, 등록 완료·launch 실패 안내, 등록 폼 닫힘 | 예 |
+| U-033 | 메뉴바 활성 인증 수동 동기화 | startup 자동 호출 0회, Core sync 1회, profile·recovery 재조회, 성공 안내 | 예 |
+| U-034 | 메뉴바 활성 인증 sync 뒤 recovery blocked | STOP 안내, sync·등록·전환 추가 mutation 0회 | 예 |
 
 ## 6. Integration 테스트 매트릭스
 

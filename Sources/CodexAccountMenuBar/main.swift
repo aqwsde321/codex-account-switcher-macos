@@ -42,6 +42,12 @@ struct CodexAccountMenuBarApp: App {
                     }
                     return try await provider.captureProfile(label: $0)
                 },
+                syncActiveProfile: {
+                    guard let provider else {
+                        throw MenuBarStartupFailure.credentialStoreConfiguration
+                    }
+                    return try await provider.syncActiveProfile()
+                },
                 switchProfile: {
                     guard let provider else {
                         throw MenuBarStartupFailure.credentialStoreConfiguration
@@ -63,6 +69,7 @@ struct CodexAccountMenuBarApp: App {
 private struct AccountMenuView: View {
     @ObservedObject var model: MenuBarViewModel
     @State private var isRegistering = false
+    @State private var isSyncConfirmationPresented = false
     @State private var registrationLabel = ""
 
     var body: some View {
@@ -96,6 +103,27 @@ private struct AccountMenuView: View {
                 }
             }
 
+            if !isRegistering,
+               !model.recoveryRequired,
+               model.profiles.contains(where: \.active) {
+                Button("현재 인증 동기화…") {
+                    isSyncConfirmationPresented = true
+                }
+                .disabled(model.isWorking)
+                .confirmationDialog(
+                    "현재 인증을 저장할까요?",
+                    isPresented: $isSyncConfirmationPresented,
+                    titleVisibility: .visible
+                ) {
+                    Button("동기화") {
+                        Task { await model.syncActive() }
+                    }
+                    Button("취소", role: .cancel) {}
+                } message: {
+                    Text("공식 앱과 독립 Codex 프로세스를 먼저 종료하세요. 현재 로그인 이메일이 활성 프로필과 같을 때만 저장합니다.")
+                }
+            }
+
             if isRegistering {
                 VStack(alignment: .leading, spacing: 8) {
                     TextField("계정 이름", text: $registrationLabel)
@@ -125,7 +153,8 @@ private struct AccountMenuView: View {
                         )
                     }
                 }
-            } else if !model.recoveryRequired,
+            } else if !isSyncConfirmationPresented,
+                      !model.recoveryRequired,
                       model.profiles.count < ProfileRegistry.maximumProfileCount {
                 Button("계정 등록") {
                     isRegistering = true
@@ -138,6 +167,11 @@ private struct AccountMenuView: View {
                     .font(.caption)
                     .foregroundStyle(.red)
                     .accessibilityLabel("오류: \(errorMessage)")
+            } else if let statusMessage = model.statusMessage {
+                Text(statusMessage)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel("상태: \(statusMessage)")
             }
 
             Divider()
