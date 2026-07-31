@@ -160,7 +160,19 @@ public final class MenuBarViewModel: ObservableObject {
     }
 
     private var recoveryErrorMessage: String {
-        "복구가 필요합니다. 계정 작업을 중단했습니다."
+        switch recoveryStatus {
+        case .none:
+            return "복구가 필요합니다. 계정 작업을 중단했습니다."
+        case let .pending(_, .rollbackFailed, previousProfileID):
+            if let profile = profiles.first(where: { $0.id == previousProfileID }) {
+                return "자동 복구에 실패했습니다. \(profile.label) 계정 복구가 필요합니다."
+            }
+            return "자동 복구에 실패했습니다. 이전 계정 복구가 필요합니다."
+        case let .pending(_, phase, _):
+            return "중단된 계정 작업 복구가 필요합니다. 단계: \(phase.rawValue)"
+        case .blocked:
+            return "복구 상태가 불명확합니다. 계정 작업을 중단했습니다."
+        }
     }
 
     private func refreshState() async throws {

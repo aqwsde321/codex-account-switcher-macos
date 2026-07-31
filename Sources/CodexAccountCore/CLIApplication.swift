@@ -64,7 +64,7 @@ public struct ProfileListItem: Equatable, Sendable {
 
 public enum RecoveryCLIStatus: Equatable, Sendable {
     case none
-    case pending(transactionID: String, phase: SwitchPhase)
+    case pending(transactionID: String, phase: SwitchPhase, previousProfileID: ProfileID)
     case blocked
 }
 
@@ -274,7 +274,7 @@ private extension CLIApplication {
         switch status {
         case .none:
             return "recovery=none\n"
-        case let .pending(transactionID, phase):
+        case let .pending(transactionID, phase, _):
             return "recovery=pending transaction_id=\(safeField(transactionID)) phase=\(phase.rawValue)\n"
         case .blocked:
             return "recovery=blocked\n"

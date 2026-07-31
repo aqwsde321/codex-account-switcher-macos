@@ -160,7 +160,7 @@ func menuBarViewModelTests() -> [TestCase] {
             let isWorkingAfterFailure = await MainActor.run { failureModel.isWorking }
             try expect(!failed, "failed registration reported success")
             try expect(
-                failureMessage == "복구가 필요합니다. 계정 작업을 중단했습니다.",
+                failureMessage == "자동 복구에 실패했습니다. 이전 계정 복구가 필요합니다.",
                 "registration recovery error was not safe"
             )
             try expect(
@@ -229,7 +229,7 @@ func menuBarViewModelTests() -> [TestCase] {
             let failureMessage = await MainActor.run { failureModel.errorMessage }
             try expect(recoveryRequired, "active sync failure did not reload recovery state")
             try expect(
-                failureMessage == "복구가 필요합니다. 계정 작업을 중단했습니다.",
+                failureMessage == "복구 상태가 불명확합니다. 계정 작업을 중단했습니다.",
                 "active sync recovery error was not safe"
             )
 
@@ -244,6 +244,57 @@ func menuBarViewModelTests() -> [TestCase] {
             try expect(syncCountAfterBlockedRetry == 1, "recovery gate retried active sync")
             try expect(labelsAfterBlockedRetry.isEmpty, "recovery gate allowed registration after active sync failure")
             try expect(targetsAfterBlockedRetry.isEmpty, "recovery gate allowed selection after active sync failure")
+        },
+        TestCase("MenuBarViewModel identifies the previous profile in recovery status") {
+            let previous = menuBarProfiles()[0]
+            let provider = MenuBarProviderSpy(
+                profiles: menuBarProfiles(),
+                recoveryStatus: .pending(
+                    transactionID: "00000000-0000-0000-0000-000000000010",
+                    phase: .rollbackFailed,
+                    previousProfileID: previous.id
+                )
+            )
+            let model = await MainActor.run {
+                MenuBarViewModel(
+                    loadProfiles: { await provider.profiles() },
+                    loadRecoveryStatus: { await provider.recoveryStatus() },
+                    captureProfile: { try await provider.captureProfile(label: $0) },
+                    syncActiveProfile: { try await provider.syncActiveProfile() },
+                    switchProfile: { try await provider.switchProfile(target: $0) }
+                )
+            }
+
+            await model.load()
+            let rollbackMessage = await MainActor.run { model.errorMessage }
+            try expect(
+                rollbackMessage == "자동 복구에 실패했습니다. 개인 계정 복구가 필요합니다.",
+                "rollback recovery did not identify the exact previous profile"
+            )
+
+            let interruptedProvider = MenuBarProviderSpy(
+                profiles: menuBarProfiles(),
+                recoveryStatus: .pending(
+                    transactionID: "00000000-0000-0000-0000-000000000011",
+                    phase: .currentSaved,
+                    previousProfileID: previous.id
+                )
+            )
+            let interruptedModel = await MainActor.run {
+                MenuBarViewModel(
+                    loadProfiles: { await interruptedProvider.profiles() },
+                    loadRecoveryStatus: { await interruptedProvider.recoveryStatus() },
+                    captureProfile: { try await interruptedProvider.captureProfile(label: $0) },
+                    syncActiveProfile: { try await interruptedProvider.syncActiveProfile() },
+                    switchProfile: { try await interruptedProvider.switchProfile(target: $0) }
+                )
+            }
+            await interruptedModel.load()
+            let interruptedMessage = await MainActor.run { interruptedModel.errorMessage }
+            try expect(
+                interruptedMessage == "중단된 계정 작업 복구가 필요합니다. 단계: currentSaved",
+                "pending recovery phase was not shown safely"
+            )
         },
     ]
 }
@@ -269,7 +320,10 @@ private actor MenuBarProviderSpy {
         captureFailureAfterMutation: Bool = false,
         captureRecoveryStatusAfterFailure: RecoveryCLIStatus = .pending(
             transactionID: "00000000-0000-0000-0000-000000000001",
-            phase: .rollbackFailed
+            phase: .rollbackFailed,
+            previousProfileID: ProfileID(
+                UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+            )
         ),
         syncFailureAfterMutation: Bool = false,
         recoveryStatus: RecoveryCLIStatus = .none

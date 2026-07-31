@@ -49,14 +49,15 @@ ADR-027과 기존 안전 결정을 유지한 채 Step 9 메뉴바 MVP를 구현�
 - 메뉴바 앱의 fake provider 제거, 실제 `LocalCLIDataProvider`·Keychain 주입, Spike와 분리된 제품 metadata 경로 연결
 - 메뉴바 현재 로그인 등록, 추가 등록 상태 재조회, startup/실패 recovery gate 구현
 - 메뉴바 현재 활성 인증의 명시적 수동 동기화와 성공·복구 차단 상태 구현
-- fake credential만 사용하는 90개 debug 테스트 통과
+- 메뉴바 recovery pending phase·journal previous profile·blocked STOP 표시 구현
+- fake credential만 사용하는 92개 debug 테스트 통과
 - 실제 read-only inspect에서 사용자 auth와 helper store 무변경 확인
 - `rollbackFailed` 수동 복구 CLI와 실환경 A 복구 2회 완료
 - debug 전용 B-011 실패 주입에서 source 자동 롤백과 최종 A 복귀 확인
 
 미완료:
 
-- 상세 진행 단계·수동 복구·재로그인 동작 UI
+- 수동 복구 typed outcome·재로그인 동작·세부 진행 단계 UI
 - 잔존 앱 프로세스 2차 종료 확인과 서명된 앱의 실제 Keychain CRUD·접근 정책 검증
 - MVP 완료·배포 전 `07_test_acceptance.md` §16 형식의 동일 task 왕복 증거 보존
 
@@ -319,7 +320,7 @@ cd codex-account-switcher-spike
 
 ADR-027의 개발 승인에 따라 시작한다. B-010 정식 증거 공백은 릴리스 게이트로 남긴다.
 
-현재 1~3, 4의 실제 provider 주입·등록·활성 인증 동기화, 5의 recovery mutation gate까지 완료됐다. 4의 상세 단계·안전 오류와 5의 수동 복구·재로그인 동작 연결이 다음 작업이다.
+현재 1~3, 4의 실제 provider 주입·등록·활성 인증 동기화, 5의 recovery mutation gate와 read-only 상세 표시까지 완료됐다. 수동 복구 typed outcome, 재로그인 동작, 세부 진행 단계 연결이 다음 작업이다.
 
 구현 순서:
 
@@ -376,6 +377,14 @@ active credential sync slice의 완료 기준:
 - 성공을 token refresh나 재로그인 완료로 표시하지 않고 현재 인증 저장 완료로만 알린다.
 - 성공·실패 뒤 profile과 recovery를 다시 읽으며 pending/blocked면 sync·등록·전환을 모두 중단한다.
 - 테스트는 fake provider로 명시 호출·성공 재조회·recovery 차단만 검증하고 실제 Keychain 동기화는 배포 검증에 남긴다.
+
+read-only recovery status slice의 완료 기준:
+
+- `RecoveryCLIStatus.pending`은 journal의 `previousProfileID`를 typed field로 제공하고 CLI 출력 형식은 바꾸지 않는다.
+- `rollbackFailed`는 현재 active나 label을 추측하지 않고 exact previous ID에 해당하는 프로필을 표시한다.
+- 다른 pending은 persisted phase를 표시하고 blocked는 상태 불명확 STOP을 표시한다.
+- 모든 recovery required 상태에서 등록·sync·전환 mutation 차단을 유지한다.
+- 수동 restore UI는 Core가 journal 내구성 불확실과 복구 완료 뒤 앱 launch 실패를 typed outcome으로 구분할 때까지 연결하지 않는다.
 
 ## 8. 실제 switch를 이 task 안에서 실행하면 안 되는 이유
 

@@ -527,7 +527,8 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
             if let journal = try store.loadJournalIfPresent() {
                 return .pending(
                     transactionID: journal.transactionID.uuidString,
-                    phase: journal.phase
+                    phase: journal.phase,
+                    previousProfileID: journal.previousProfileID
                 )
             }
             guard try store.loadCaptureProfileIDIfPresent() == nil,

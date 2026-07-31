@@ -47,6 +47,33 @@ func cliApplicationTests() -> [TestCase] {
             try expect(!result.standardError.contains("secret-error-canary"), "raw error leaked")
             try expect(result.standardError == "error=operation_failed\n", "error output is not allow-listed")
         },
+        TestCase("CLIApplication keeps recovery status output stable") {
+            let previousProfileID = ProfileID(
+                UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+            )
+            let provider = StubCLIDataProvider(
+                profiles: [],
+                recoveryStatus: .pending(
+                    transactionID: "00000000-0000-0000-0000-000000000010",
+                    phase: .rollbackFailed,
+                    previousProfileID: previousProfileID
+                )
+            )
+            let application = CLIApplication(provider: provider)
+
+            let result = await application.run(arguments: ["recovery", "status"])
+
+            try expect(result.exitCode == 0, "recovery status failed")
+            try expect(
+                result.standardOutput
+                    == "recovery=pending transaction_id=00000000-0000-0000-0000-000000000010 phase=rollbackFailed\n",
+                "recovery CLI output changed"
+            )
+            try expect(
+                !result.standardOutput.contains(previousProfileID.description),
+                "menu-only previous profile ID leaked into CLI output"
+            )
+        },
         TestCase("CLIApplication reports an incompatible installed application") {
             let provider = StubCLIDataProvider(
                 profiles: [],
@@ -2105,6 +2132,7 @@ private actor StubCLIDataProvider: CLIDataProviding {
     let capturedProfile: ProfileListItem
     let captureFailure: LocalCLIDataProviderFailure?
     let switchFailure: CodexAppLocatorFailure?
+    let recoveryStatusValue: RecoveryCLIStatus
     private(set) var capturedLabels = [String]()
     private(set) var switchedTargets = [String]()
 #if SPIKE_FAULT_INJECTION
@@ -2116,7 +2144,8 @@ private actor StubCLIDataProvider: CLIDataProviding {
         failureCanary: String? = nil,
         capturedProfile: ProfileListItem? = nil,
         captureFailure: LocalCLIDataProviderFailure? = nil,
-        switchFailure: CodexAppLocatorFailure? = nil
+        switchFailure: CodexAppLocatorFailure? = nil,
+        recoveryStatus: RecoveryCLIStatus = .none
     ) {
         profilesValue = profiles
         self.failureCanary = failureCanary
@@ -2129,6 +2158,7 @@ private actor StubCLIDataProvider: CLIDataProviding {
         )
         self.captureFailure = captureFailure
         self.switchFailure = switchFailure
+        recoveryStatusValue = recoveryStatus
     }
 
     func inspect() async throws -> InspectionReport {
@@ -2182,7 +2212,7 @@ private actor StubCLIDataProvider: CLIDataProviding {
 #endif
 
     func recoveryStatus() async throws -> RecoveryCLIStatus {
-        .none
+        recoveryStatusValue
     }
 }
 
