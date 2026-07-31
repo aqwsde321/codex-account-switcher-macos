@@ -57,6 +57,12 @@ struct CodexAccountMenuBarApp: App {
                         onPhaseChange: onPhaseChange
                     )
                 },
+                reloginProfile: { target in
+                    guard let provider else {
+                        throw MenuBarStartupFailure.credentialStoreConfiguration
+                    }
+                    return try await provider.reloginProfile(target: target)
+                },
                 restoreRecoveryProfile: { target, transactionID in
                     guard let provider else {
                         throw MenuBarStartupFailure.credentialStoreConfiguration
@@ -110,7 +116,6 @@ private struct AccountMenuView: View {
                     .disabled(
                         model.isWorking
                             || model.recoveryRequired
-                            || (profile.needsRelogin && !profile.active)
                     )
                 }
             }
@@ -238,6 +243,21 @@ private struct AccountMenuView: View {
         } message: { profile in
             Text("\(profile.label) 계정으로 전환합니다.")
         }
+        .confirmationDialog(
+            "\(model.pendingReloginProfile?.label ?? "선택한") 계정의 재로그인을 반영할까요?",
+            isPresented: reloginConfirmationPresented,
+            titleVisibility: .visible,
+            presenting: model.pendingReloginProfile
+        ) { profile in
+            Button("재로그인 반영") {
+                Task { await model.confirmRelogin(profile) }
+            }
+            Button("취소", role: .cancel) {
+                model.cancelRelogin()
+            }
+        } message: { profile in
+            Text("먼저 공식 Codex 앱에서 \(profile.label) 계정으로 로그인하세요. 앱과 독립 Codex 프로세스를 모두 종료한 뒤 진행하세요. 완료 후 앱은 직접 열어야 합니다.")
+        }
     }
 
     private var confirmationPresented: Binding<Bool> {
@@ -257,6 +277,17 @@ private struct AccountMenuView: View {
             set: { presented in
                 if !presented {
                     model.cancelRecovery()
+                }
+            }
+        )
+    }
+
+    private var reloginConfirmationPresented: Binding<Bool> {
+        Binding(
+            get: { model.pendingReloginProfile != nil },
+            set: { presented in
+                if !presented {
+                    model.cancelRelogin()
                 }
             }
         )
@@ -311,7 +342,11 @@ private struct ProfileCard: View {
         .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(profile.label), \(profile.email)")
-        .accessibilityValue(profile.active ? "활성 계정" : "비활성 계정")
+        .accessibilityValue(
+            profile.needsRelogin
+                ? "재로그인 필요"
+                : (profile.active ? "활성 계정" : "비활성 계정")
+        )
     }
 }
 

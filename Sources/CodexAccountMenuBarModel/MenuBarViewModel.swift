@@ -17,10 +17,12 @@ public final class MenuBarViewModel: ObservableObject {
         String,
         @escaping SwitchProgress
     ) async throws -> ProfileListItem
+    public typealias ReloginProfile = @Sendable (String) async throws -> ProfileReloginOutcome
     public typealias RestoreRecoveryProfile = @Sendable (String, String) async throws -> RecoveryRestoreOutcome
 
     @Published public private(set) var profiles = [ProfileListItem]()
     @Published public private(set) var pendingProfile: ProfileListItem?
+    @Published public private(set) var pendingReloginProfile: ProfileListItem?
     @Published public private(set) var pendingRecoveryConfirmation: RecoveryConfirmation?
     @Published public private(set) var recoveryStatus = RecoveryCLIStatus.blocked
     @Published public private(set) var switchPhase: SwitchPhase?
@@ -33,6 +35,7 @@ public final class MenuBarViewModel: ObservableObject {
     private let captureProfile: CaptureProfile
     private let syncActiveProfile: SyncActiveProfile
     private let switchProfile: SwitchProfile
+    private let reloginProfile: ReloginProfile
     private let restoreRecoveryProfile: RestoreRecoveryProfile
 
     public init(
@@ -41,6 +44,7 @@ public final class MenuBarViewModel: ObservableObject {
         captureProfile: @escaping CaptureProfile,
         syncActiveProfile: @escaping SyncActiveProfile,
         switchProfile: @escaping SwitchProfile,
+        reloginProfile: @escaping ReloginProfile,
         restoreRecoveryProfile: @escaping RestoreRecoveryProfile
     ) {
         self.loadProfiles = loadProfiles
@@ -48,6 +52,7 @@ public final class MenuBarViewModel: ObservableObject {
         self.captureProfile = captureProfile
         self.syncActiveProfile = syncActiveProfile
         self.switchProfile = switchProfile
+        self.reloginProfile = reloginProfile
         self.restoreRecoveryProfile = restoreRecoveryProfile
     }
 
@@ -71,6 +76,8 @@ public final class MenuBarViewModel: ObservableObject {
         }
         if profile.active {
             await performSwitch(to: profile)
+        } else if profile.needsRelogin {
+            pendingReloginProfile = profile
         } else {
             // ponytail: first slice confirms every inactive selection; add typed app-running state before skipping confirmation.
             pendingProfile = profile
@@ -89,6 +96,86 @@ public final class MenuBarViewModel: ObservableObject {
 
     public func cancelSwitch() {
         pendingProfile = nil
+    }
+
+    public func confirmRelogin(_ confirmedProfile: ProfileListItem? = nil) async {
+        guard !isWorking, !recoveryRequired,
+              let profile = confirmedProfile ?? pendingReloginProfile else {
+            cancelRelogin()
+            if recoveryRequired { errorMessage = recoveryErrorMessage }
+            return
+        }
+        cancelRelogin()
+        isWorking = true
+        defer { isWorking = false }
+        var reloginStarted = false
+        var reloginOutcome: ProfileReloginOutcome?
+        do {
+            try await refreshState()
+            guard !recoveryRequired,
+                  let current = profiles.first(where: { $0.id == profile.id }),
+                  !current.active,
+                  current.needsRelogin else {
+                errorMessage = recoveryRequired
+                    ? recoveryErrorMessage
+                    : "재로그인 상태가 변경되었습니다. 계정 정보를 다시 확인하세요."
+                return
+            }
+            reloginStarted = true
+            let outcome = try await reloginProfile(current.id.description)
+            reloginOutcome = outcome
+            try await refreshState()
+            if case let .activated(activated) = outcome, activated.id != current.id {
+                recoveryStatus = .blocked
+            }
+            guard profileIsSoleActive(current.id) else {
+                if recoveryRequired {
+                    errorMessage = recoveryErrorMessage
+                } else {
+                    recoveryStatus = .blocked
+                    errorMessage = "재로그인 결과를 확인하지 못했습니다. 계정 작업을 중단했습니다."
+                }
+                return
+            }
+            errorMessage = nil
+            statusMessage = if outcome == .journalFinalizationUncertain {
+                "\(current.label) 계정 재로그인을 재확인했습니다. Codex 앱을 직접 여세요."
+            } else {
+                "\(current.label) 계정 재로그인을 반영했습니다. Codex 앱을 직접 여세요."
+            }
+        } catch {
+            await refreshAfterMutationFailure()
+            guard reloginStarted else {
+                errorMessage = recoveryRequired ? recoveryErrorMessage : "계정 재로그인을 완료하지 못했습니다."
+                return
+            }
+            if case let .activated(activated) = reloginOutcome, activated.id != profile.id {
+                recoveryStatus = .blocked
+                errorMessage = "재로그인 결과를 확인하지 못했습니다. 계정 작업을 중단했습니다."
+                return
+            }
+            guard profileIsSoleActive(profile.id) else {
+                if recoveryRequired {
+                    errorMessage = recoveryErrorMessage
+                } else if reloginOutcome != nil {
+                    recoveryStatus = .blocked
+                    errorMessage = "재로그인 결과를 확인하지 못했습니다. 계정 작업을 중단했습니다."
+                } else {
+                    errorMessage = "계정 재로그인을 완료하지 못했습니다."
+                }
+                return
+            }
+            errorMessage = nil
+            statusMessage = if reloginOutcome == .journalFinalizationUncertain {
+                "\(profile.label) 계정 재로그인을 재확인했습니다. Codex 앱을 직접 여세요."
+            } else {
+                "\(profile.label) 계정 재로그인을 반영했습니다. Codex 앱을 직접 여세요."
+            }
+        }
+    }
+
+    public func cancelRelogin() {
+        pendingReloginProfile = nil
     }
 
     public var recoveryProfile: ProfileListItem? {
@@ -275,9 +362,13 @@ public final class MenuBarViewModel: ObservableObject {
             errorMessage = recoveryRequired ? recoveryErrorMessage : nil
         } catch {
             await refreshAfterMutationFailure()
-            errorMessage = recoveryRequired
-                ? recoveryErrorMessage
-                : "계정 작업을 완료하지 못했습니다."
+            if recoveryRequired {
+                errorMessage = recoveryErrorMessage
+            } else if profiles.contains(where: { $0.id == profile.id && $0.needsRelogin }) {
+                errorMessage = "\(profile.label) 계정은 재로그인이 필요합니다."
+            } else {
+                errorMessage = "계정 작업을 완료하지 못했습니다."
+            }
         }
     }
 
@@ -292,7 +383,7 @@ public final class MenuBarViewModel: ObservableObject {
             }
             switch outcome {
             case let .restoredAndLaunched(restored):
-                guard restored.id == profile.id, restoredProfileIsActive(profile.id) else {
+                guard restored.id == profile.id, profileIsSoleActive(profile.id) else {
                     recoveryStatus = .blocked
                     errorMessage = "복구 결과를 확인하지 못했습니다. 계정 작업을 중단했습니다."
                     return
@@ -300,14 +391,14 @@ public final class MenuBarViewModel: ObservableObject {
                 errorMessage = nil
                 statusMessage = "\(profile.label) 계정을 복구하고 Codex 앱을 열었습니다."
             case let .restoredButLaunchUnconfirmed(restored):
-                guard restored.id == profile.id, restoredProfileIsActive(profile.id) else {
+                guard restored.id == profile.id, profileIsSoleActive(profile.id) else {
                     recoveryStatus = .blocked
                     errorMessage = "복구 결과를 확인하지 못했습니다. 계정 작업을 중단했습니다."
                     return
                 }
                 errorMessage = "\(profile.label) 계정은 복구했지만 Codex 앱 실행을 확인하지 못했습니다. 복구를 다시 시도하지 말고 앱만 직접 여세요."
             case .journalFinalizationUncertain:
-                guard restoredProfileIsActive(profile.id) else {
+                guard profileIsSoleActive(profile.id) else {
                     recoveryStatus = .blocked
                     errorMessage = "복구 완료 여부가 불명확합니다. 앱을 열거나 계정 작업을 하지 마세요."
                     return
@@ -323,7 +414,7 @@ public final class MenuBarViewModel: ObservableObject {
         }
     }
 
-    private func restoredProfileIsActive(_ profileID: ProfileID) -> Bool {
+    private func profileIsSoleActive(_ profileID: ProfileID) -> Bool {
         recoveryStatus == .none
             && profiles.filter(\.active).count == 1
             && profiles.contains { $0.id == profileID && $0.active && !$0.needsRelogin }
@@ -360,6 +451,7 @@ public final class MenuBarViewModel: ObservableObject {
     private func refreshAfterMutationFailure() async {
         try? await refreshState()
         pendingProfile = nil
+        cancelRelogin()
         cancelRecovery()
     }
 }
