@@ -1340,6 +1340,89 @@ func cliApplicationTests() -> [TestCase] {
                 try expect(launchCountAfterRejection == launchCountAfterCapture, "fourth capture launched the app")
             }
         },
+        TestCase("CLI marks an identity-invalid switch target for relogin") {
+            try await withCaptureTemporaryDirectory { directory in
+                let codexHome = directory.appendingPathComponent(".codex", isDirectory: true)
+                try FileManager.default.createDirectory(at: codexHome, withIntermediateDirectories: false)
+                try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: codexHome.path)
+                let authURL = codexHome.appendingPathComponent("auth.json", isDirectory: false)
+                let activeA = Data(
+                    #"{"auth_mode":"chatgpt","test_account":"a","tokens":{"id_token":"a-id","access_token":"a-access","refresh_token":"a-refresh"}}"#.utf8
+                )
+                try activeA.write(to: authURL, options: .withoutOverwriting)
+                try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: authURL.path)
+
+                let storeURL = directory.appendingPathComponent("store", isDirectory: true)
+                let store = try SpikeStore.create(at: storeURL)
+                let profileA = ProfileMetadata(
+                    id: ProfileID(UUID()),
+                    label: "A",
+                    email: "person@example.invalid",
+                    planType: "plus",
+                    needsRelogin: false,
+                    createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+                    updatedAt: Date(timeIntervalSince1970: 1_700_000_000)
+                )
+                let profileB = ProfileMetadata(
+                    id: ProfileID(UUID()),
+                    label: "B",
+                    email: "b@example.invalid",
+                    planType: "plus",
+                    needsRelogin: false,
+                    createdAt: Date(timeIntervalSince1970: 1_700_000_001),
+                    updatedAt: Date(timeIntervalSince1970: 1_700_000_001)
+                )
+                let invalidB = try CredentialBlob(validating: Data(
+                    #"{"auth_mode":"chatgpt","test_account":"a","tokens":{"id_token":"stale-id","access_token":"stale-access","refresh_token":"stale-refresh"}}"#.utf8
+                ))
+                _ = try store.saveCredential(try CredentialBlob(validating: activeA), for: profileA.id)
+                _ = try store.saveCredential(invalidB, for: profileB.id)
+                _ = try store.saveRegistry(
+                    ProfileRegistry(activeProfileID: profileA.id, profiles: [profileA, profileB])
+                )
+
+                let executable = try makeCaptureAppServer(in: directory, rotateToOtherAccount: false)
+                let bundleURL = directory.appendingPathComponent("ChatGPT.app", isDirectory: true)
+                let descriptor = CodexAppDescriptor(
+                    bundleURL: bundleURL,
+                    mainExecutableURL: bundleURL.appendingPathComponent("Contents/MacOS/ChatGPT"),
+                    bundledCodexURL: executable,
+                    bundleIdentifier: "com.openai.codex",
+                    version: "26.721.41059",
+                    build: "5848",
+                    appSigningIdentifier: "com.openai.codex",
+                    bundledCodexSigningIdentifier: "codex",
+                    teamIdentifier: "2DC432GLL2"
+                )
+                let provider = LocalCLIDataProvider(
+                    storeURL: storeURL,
+                    activeAuthURL: authURL,
+                    processProvider: EmptyProcessSnapshotProvider(),
+                    locateApp: { descriptor },
+                    runningApplicationPIDs: { _ in [] }
+                )
+
+                let result = await CLIApplication(provider: provider).run(
+                    arguments: ["switch", "--target", "B"],
+                    mutationConfirmed: true
+                )
+                let registry = try store.loadRegistry()
+                let active = try CredentialBlob(validating: Data(contentsOf: authURL))
+                let storedA = try store.loadCredential(for: profileA.id)
+                let storedB = try store.loadCredential(for: profileB.id)
+                let journal = try store.loadJournalIfPresent()
+
+                try expect(result.standardError == "error=operation_failed\n", "identity failure changed")
+                try expect(registry.activeProfileID == profileA.id, "identity failure activated B")
+                try expect(
+                    registry.profiles.first(where: { $0.id == profileB.id })?.needsRelogin == true,
+                    "identity-invalid B was not marked for relogin"
+                )
+                try expect(storedB == invalidB, "invalid B was overwritten")
+                try expect(active == storedA, "active A was not recovered")
+                try expect(journal == nil, "identity failure left recovery pending")
+            }
+        },
         TestCase("CLI sync-active validates and stores only the registered active profile") {
             try await withCaptureTemporaryDirectory { directory in
                 let codexHome = directory.appendingPathComponent(".codex", isDirectory: true)

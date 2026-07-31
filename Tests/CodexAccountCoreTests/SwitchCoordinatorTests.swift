@@ -242,9 +242,40 @@ func switchCoordinatorTests() -> [TestCase] {
             }
 
             let events = await driver.events
+            try expect(!events.contains("markRelogin"), "unconfirmed child marked the target invalid")
             try expect(!events.contains("verifyPrevious"), "source verification ran with a live child")
             try expect(!events.contains("removeJournal"), "live child recovery evidence was deleted")
             try expect(!events.contains("launchPrevious"), "app launched with a live child")
+        },
+        TestCase("SwitchCoordinator marks only an identity-invalid target for relogin") {
+            for (failure, shouldMark) in [
+                (TargetValidationFailure.identity, true),
+                (.probe, false),
+            ] {
+                let driver = RecordingSwitchDriver(targetValidationFailure: failure)
+                let coordinator = SwitchCoordinator(driver: driver)
+
+                do {
+                    _ = try await coordinator.switchAccount(switchRequest())
+                    throw TestFailure(description: "invalid target completed")
+                } catch let error as SwitchCoordinatorFailure {
+                    try expect(error == .operationFailed, "invalid target returned the wrong status")
+                }
+
+                let events = await driver.events
+                try expect(
+                    events.contains("markRelogin") == shouldMark,
+                    "target relogin marker did not match the validation failure"
+                )
+                if shouldMark {
+                    guard let validation = events.firstIndex(of: "validateTarget"),
+                          let marker = events.firstIndex(of: "markRelogin"),
+                          let recovery = events.firstIndex(of: "verifyPrevious") else {
+                        throw TestFailure(description: "identity failure recovery events are missing")
+                    }
+                    try expect(validation < marker && marker < recovery, "target was marked outside recovery order")
+                }
+            }
         },
     ]
 }
@@ -257,17 +288,20 @@ private actor RecordingSwitchDriver: SwitchTransactionDriving {
     private let failDuringRollbackAt: String?
     private let pendingRecovery: Bool
     private let targetChildUnconfirmed: Bool
+    private let targetValidationFailure: TargetValidationFailure?
 
     init(
         failAt: String? = nil,
         failDuringRollbackAt: String? = nil,
         pendingRecovery: Bool = false,
-        targetChildUnconfirmed: Bool = false
+        targetChildUnconfirmed: Bool = false,
+        targetValidationFailure: TargetValidationFailure? = nil
     ) {
         self.failAt = failAt
         self.failDuringRollbackAt = failDuringRollbackAt
         self.pendingRecovery = pendingRecovery
         self.targetChildUnconfirmed = targetChildUnconfirmed
+        self.targetValidationFailure = targetValidationFailure
     }
 
     func beginExclusiveTransaction() async throws -> Bool {
@@ -314,7 +348,11 @@ private actor RecordingSwitchDriver: SwitchTransactionDriving {
         if targetChildUnconfirmed {
             throw TargetValidationFailure.childStillAlive
         }
+        if let targetValidationFailure {
+            throw targetValidationFailure
+        }
     }
+    func markTargetNeedsRelogin(_ profileID: ProfileID) async throws { try record("markRelogin") }
     func replaceActiveAuth(with profileID: ProfileID) async throws { try record("replaceAuth") }
     func launchTarget() async throws { try record("launchTarget") }
     func verifyLaunchedTarget(expectedEmail: String) async throws { try record("verifyTarget") }

@@ -1085,6 +1085,46 @@ extension LocalCLIDataProvider: SwitchTransactionDriving {
         try await TargetCredentialValidator(driver: self).validate(profile: profile)
     }
 
+    public func markTargetNeedsRelogin(_ profileID: ProfileID) async throws {
+        let context = try requireSwitchContext()
+        try await revalidateCredentialMutationGate()
+        let current = try context.store.loadRegistry()
+        let journal = try context.store.loadJournalIfPresent()
+        guard current == context.registry,
+              current.activeProfileID != profileID,
+              let target = current.profiles.first(where: { $0.id == profileID }),
+              !target.needsRelogin,
+              journal?.phase == .validatingTarget,
+              journal?.previousProfileID == current.activeProfileID,
+              journal?.targetProfileID == profileID,
+              targetValidationProfileID == nil,
+              try !verificationWorkspaceExists(),
+              let expectedDestination = switchActiveAuthDestination,
+              try files.snapshot(at: activeAuthURL) == expectedDestination else {
+            throw LocalCLIDataProviderFailure.invalidSwitchState
+        }
+        let updatedTarget = ProfileMetadata(
+            id: target.id,
+            label: target.label,
+            email: target.email,
+            planType: target.planType,
+            needsRelogin: true,
+            createdAt: target.createdAt,
+            updatedAt: Date(timeIntervalSince1970: Date().timeIntervalSince1970.rounded(.down))
+        )
+        let updated = try ProfileRegistry(
+            activeProfileID: current.activeProfileID,
+            profiles: current.profiles.map { $0.id == profileID ? updatedTarget : $0 }
+        )
+        _ = try context.store.saveRegistry(updated)
+        switchExpectedRegistry = updated
+        guard try context.store.loadRegistry() == updated,
+              try context.store.loadJournalIfPresent() == journal,
+              try files.snapshot(at: activeAuthURL) == expectedDestination else {
+            throw LocalCLIDataProviderFailure.registryRoundTripFailed
+        }
+    }
+
     public func replaceActiveAuth(with profileID: ProfileID) async throws {
         let context = try requireSwitchContext()
         try await revalidateCredentialMutationGate()

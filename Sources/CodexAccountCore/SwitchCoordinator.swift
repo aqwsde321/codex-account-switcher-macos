@@ -44,6 +44,7 @@ public protocol SwitchTransactionDriving: Sendable {
     func verifyActiveSource(expectedEmail: String) async throws
     func refreshAndSaveCurrent(profile: ProfileMetadata) async throws
     func validateAndSaveTarget(profile: ProfileMetadata) async throws
+    func markTargetNeedsRelogin(_ profileID: ProfileID) async throws
     func replaceActiveAuth(with profileID: ProfileID) async throws
     func launchTarget() async throws
     func verifyLaunchedTarget(expectedEmail: String) async throws
@@ -208,7 +209,12 @@ public actor SwitchCoordinator {
                 startedAt: startedAt
             )
             phase = .validatingTarget
-            try await driver.validateAndSaveTarget(profile: request.target)
+            do {
+                try await driver.validateAndSaveTarget(profile: request.target)
+            } catch let failure as TargetValidationFailure where failure == .identity {
+                try await driver.markTargetNeedsRelogin(request.target.id)
+                throw failure
+            }
 
             try await persist(
                 .targetValidated,
