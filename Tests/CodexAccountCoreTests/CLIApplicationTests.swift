@@ -696,14 +696,6 @@ func cliApplicationTests() -> [TestCase] {
                     executablePath: descriptor.mainExecutableURL.path,
                     nameHint: "ChatGPT"
                 )
-                let faultLateTargetChild = ProcessRecord(
-                    identity: ProcessIdentity(pid: 106, startSeconds: 305, startMicroseconds: 1),
-                    parentPID: faultTargetRoot.identity.pid,
-                    executablePath: bundleURL
-                        .appendingPathComponent("Contents/Helpers/late-target-worker")
-                        .path,
-                    nameHint: "late-target-worker"
-                )
                 let faultSourceRoot = ProcessRecord(
                     identity: ProcessIdentity(pid: 104, startSeconds: 303, startMicroseconds: 1),
                     parentPID: 1,
@@ -737,9 +729,6 @@ func cliApplicationTests() -> [TestCase] {
                         confirmAppOwnedTermination: faultConfirmations.confirm,
                         requestProcessTermination: { process in
                             faultProcesses.terminate(process)
-                            if process.identity == faultTargetRoot.identity {
-                                faultProcesses.install(faultLateTargetChild)
-                            }
                         },
                         normalTerminationGracePolls: 0,
                         quiescenceSleep: { _ in },
@@ -778,13 +767,13 @@ func cliApplicationTests() -> [TestCase] {
                 try expect(faultRegistryAfter == faultRegistryBefore, "B-011 changed active registry")
                 try expect(faultRecovery.standardOutput == "recovery=none\n", "B-011 left recovery state")
                 try expect(faultLaunchCount == 2, "B-011 did not launch target and restored source")
-                try expect(faultConfirmations.counts == [1, 1], "late target child was not confirmed separately")
+                try expect(faultConfirmations.counts == [1], "rollback survivor confirmation changed")
                 try expect(!faultProcesses.contains(pid: faultTargetRoot.identity.pid), "target app remained running")
-                try expect(!faultProcesses.contains(pid: faultLateTargetChild.identity.pid), "late target child remained running")
                 try expect(faultProcesses.contains(pid: faultSourceRoot.identity.pid), "source app was not relaunched")
 #endif
 
                 let independentProcesses = TerminableProcessSnapshotProvider()
+                let independentConfirmations = TerminationConfirmationRecorder()
                 let independentAppRoot = ProcessRecord(
                     identity: ProcessIdentity(pid: 87, startSeconds: 199, startMicroseconds: 1),
                     parentPID: 1,
@@ -813,6 +802,7 @@ func cliApplicationTests() -> [TestCase] {
                             independentProcesses.install(independentCodex)
                             return [independentAppRoot.identity.pid]
                         },
+                        confirmAppOwnedTermination: independentConfirmations.confirm,
                         requestProcessTermination: { independentProcesses.terminate($0) },
                         normalTerminationGracePolls: 0,
                         quiescenceSleep: { _ in }
@@ -828,7 +818,46 @@ func cliApplicationTests() -> [TestCase] {
                 let blockedRegistryAfter = try store.loadRegistry()
                 let blockedRecovery = await blockedApplication.run(arguments: ["recovery", "status"])
 
+                let newlyDiscoveredProcesses = TerminableProcessSnapshotProvider()
+                let newlyDiscoveredConfirmations = TerminationConfirmationRecorder()
+                let newlyDiscoveredAppProcess = ProcessRecord(
+                    identity: ProcessIdentity(pid: 90, startSeconds: 202, startMicroseconds: 1),
+                    parentPID: 1,
+                    executablePath: bundleURL.appendingPathComponent("Contents/Helpers/late-worker").path,
+                    nameHint: "late-worker"
+                )
+                let newlyDiscoveredApplication = CLIApplication(
+                    provider: LocalCLIDataProvider(
+                        storeURL: storeURL,
+                        activeAuthURL: authURL,
+                        processProvider: newlyDiscoveredProcesses,
+                        locateApp: { descriptor },
+                        runningApplicationPIDs: { _ in [] },
+                        requestApplicationTermination: { _ in
+                            newlyDiscoveredProcesses.install(newlyDiscoveredAppProcess)
+                            return []
+                        },
+                        confirmAppOwnedTermination: newlyDiscoveredConfirmations.confirm,
+                        requestProcessTermination: { newlyDiscoveredProcesses.terminate($0) },
+                        normalTerminationGracePolls: 0,
+                        quiescenceSleep: { _ in },
+                        launchApplication: { _ in 42 }
+                    )
+                )
+                let newlyDiscoveredAuthBefore = try Data(contentsOf: authURL)
+                let newlyDiscoveredRegistryBefore = try store.loadRegistry()
+                let newlyDiscoveredSwitch = await newlyDiscoveredApplication.run(
+                    arguments: ["switch", "--target", "A"],
+                    mutationConfirmed: true
+                )
+                let newlyDiscoveredAuthAfter = try Data(contentsOf: authURL)
+                let newlyDiscoveredRegistryAfter = try store.loadRegistry()
+                let newlyDiscoveredRecovery = await newlyDiscoveredApplication.run(
+                    arguments: ["recovery", "status"]
+                )
+
                 let declinedProcesses = TerminableProcessSnapshotProvider()
+                let declinedConfirmations = AsyncTerminationConfirmationRecorder(result: false)
                 declinedProcesses.install(
                     ProcessRecord(
                         identity: ProcessIdentity(pid: 89, startSeconds: 201, startMicroseconds: 1),
@@ -845,7 +874,9 @@ func cliApplicationTests() -> [TestCase] {
                         locateApp: { descriptor },
                         runningApplicationPIDs: { _ in [] },
                         requestApplicationTermination: { _ in [] },
-                        confirmAppOwnedTermination: { _ in false },
+                        confirmAppOwnedTermination: { count in
+                            await declinedConfirmations.confirm(count)
+                        },
                         requestProcessTermination: { declinedProcesses.terminate($0) },
                         normalTerminationGracePolls: 0,
                         quiescenceSleep: { _ in }
@@ -860,6 +891,7 @@ func cliApplicationTests() -> [TestCase] {
                 let declinedAuthAfter = try Data(contentsOf: authURL)
                 let declinedRegistryAfter = try store.loadRegistry()
                 let declinedRecovery = await declinedApplication.run(arguments: ["recovery", "status"])
+                let declinedConfirmationCounts = await declinedConfirmations.counts
 
                 let snapshotRacePIDs = await MainActor.run {
                     RunningPIDSequence([[], [42], []])
@@ -963,11 +995,37 @@ func cliApplicationTests() -> [TestCase] {
                     "confirmed switch did not SIGTERM the captured app-owned survivor"
                 )
                 try expect(blockedSwitch.standardError == "error=process_blocked\n", "independent Codex was not blocked")
+                try expect(independentConfirmations.counts.isEmpty, "independent Codex requested SIGTERM approval")
                 try expect(independentProcesses.terminatedPIDs.isEmpty, "independent Codex received SIGTERM")
                 try expect(blockedAuthAfter == blockedAuthBefore, "blocked switch changed active auth")
                 try expect(blockedRegistryAfter == blockedRegistryBefore, "blocked switch changed the registry")
                 try expect(blockedRecovery.standardOutput == "recovery=none\n", "blocked switch left recovery state")
+                try expect(
+                    newlyDiscoveredSwitch.standardError == "error=process_blocked\n",
+                    "new app-owned process was not blocked"
+                )
+                try expect(
+                    newlyDiscoveredConfirmations.counts.isEmpty,
+                    "new app-owned process requested SIGTERM approval"
+                )
+                try expect(
+                    newlyDiscoveredProcesses.terminatedPIDs.isEmpty,
+                    "new app-owned process received SIGTERM"
+                )
+                try expect(
+                    newlyDiscoveredAuthAfter == newlyDiscoveredAuthBefore,
+                    "new app-owned process changed active auth"
+                )
+                try expect(
+                    newlyDiscoveredRegistryAfter == newlyDiscoveredRegistryBefore,
+                    "new app-owned process changed the registry"
+                )
+                try expect(
+                    newlyDiscoveredRecovery.standardOutput == "recovery=none\n",
+                    "new app-owned process left recovery state"
+                )
                 try expect(declinedSwitch.standardError == "error=process_blocked\n", "declined SIGTERM was not blocked")
+                try expect(declinedConfirmationCounts == [1], "declined SIGTERM did not await one confirmation")
                 try expect(declinedProcesses.terminatedPIDs.isEmpty, "declined SIGTERM still killed a process")
                 try expect(declinedAuthAfter == declinedAuthBefore, "declined SIGTERM changed active auth")
                 try expect(declinedRegistryAfter == declinedRegistryBefore, "declined SIGTERM changed the registry")
@@ -3067,6 +3125,21 @@ private final class TerminationConfirmationRecorder: @unchecked Sendable {
     func confirm(_ count: Int) -> Bool {
         lock.withLock { recordedCounts.append(count) }
         return true
+    }
+}
+
+private actor AsyncTerminationConfirmationRecorder {
+    private let result: Bool
+    private(set) var counts = [Int]()
+
+    init(result: Bool) {
+        self.result = result
+    }
+
+    func confirm(_ count: Int) async -> Bool {
+        counts.append(count)
+        await Task.yield()
+        return result
     }
 }
 

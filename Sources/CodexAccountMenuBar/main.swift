@@ -20,7 +20,12 @@ struct CodexAccountMenuBarApp: App {
             activeAuthURL: authURL,
             credentialStore: KeychainCredentialStore(
                 service: "CodexAccountSwitcher.credentials.v1"
-            )
+            ),
+            confirmAppOwnedTermination: { count in
+                await MainActor.run {
+                    confirmAppOwnedTermination(count: count)
+                }
+            }
         )
         _model = StateObject(
             wrappedValue: MenuBarViewModel(
@@ -356,4 +361,17 @@ private struct ProfileCard: View {
 
 private enum MenuBarStartupFailure: Error, Sendable {
     case credentialStoreConfiguration
+}
+
+@MainActor
+private func confirmAppOwnedTermination(count: Int) -> Bool {
+    let alert = NSAlert()
+    alert.alertStyle = .warning
+    alert.messageText = "잔존 앱 프로세스를 종료할까요?"
+    alert.informativeText = "정상 종료 뒤에도 ChatGPT 앱 소유 프로세스 \(count)개가 남았습니다. 종료 전 확인한 동일 프로세스에만 SIGTERM을 한 번 보냅니다. 독립 Codex 프로세스는 종료하지 않습니다."
+    let cancel = alert.addButton(withTitle: "취소")
+    cancel.keyEquivalent = "\u{1b}"
+    let terminate = alert.addButton(withTitle: "SIGTERM 전송")
+    terminate.hasDestructiveAction = true
+    return alert.runModal() == .alertSecondButtonReturn
 }

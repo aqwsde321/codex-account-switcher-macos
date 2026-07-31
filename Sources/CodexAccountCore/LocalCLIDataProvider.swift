@@ -42,7 +42,7 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
     private let locateApp: @MainActor @Sendable () throws -> CodexAppDescriptor
     private let runningApplicationPIDs: @MainActor @Sendable (CodexAppDescriptor) throws -> [Int32]
     private let requestApplicationTermination: @MainActor @Sendable (CodexAppDescriptor) throws -> [Int32]
-    private let confirmAppOwnedTermination: @Sendable (Int) -> Bool
+    private let confirmAppOwnedTermination: @Sendable (Int) async -> Bool
     private let requestProcessTermination: @Sendable (ProcessRecord) throws -> Void
     private let normalTerminationGracePolls: Int
     private let quiescenceSleep: @Sendable (Duration) async throws -> Void
@@ -81,7 +81,7 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
         activeAuthURL: URL,
         credentialStore: any CredentialStoring,
         processProvider: any ProcessSnapshotProviding = LibprocSnapshotProvider(),
-        confirmAppOwnedTermination: @escaping @Sendable (Int) -> Bool = { _ in false }
+        confirmAppOwnedTermination: @escaping @Sendable (Int) async -> Bool = { _ in false }
     ) {
         self.storeURL = storeURL
         self.credentialStore = credentialStore
@@ -123,7 +123,7 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
             descriptor in
             try CodexAppLifecycle().requestNormalTermination(descriptor)
         },
-        confirmAppOwnedTermination: @escaping @Sendable (Int) -> Bool = { _ in false },
+        confirmAppOwnedTermination: @escaping @Sendable (Int) async -> Bool = { _ in false },
         requestProcessTermination: @escaping @Sendable (ProcessRecord) throws -> Void = sendSIGTERM,
         normalTerminationGracePolls: Int = 4,
         quiescenceSleep: @escaping @Sendable (Duration) async throws -> Void = {
@@ -1169,23 +1169,15 @@ extension LocalCLIDataProvider: SwitchTransactionDriving {
                 $0.disposition.blocksAuthMutation
                     && switchAppOwnedTerminationCandidates[$0.record.identity] == nil
             }
-            guard newlyDiscovered.allSatisfy({
-                $0.disposition == .appOwnedBlocker && $0.record.executablePath != nil
-            }) else {
+            guard newlyDiscovered.isEmpty else {
                 throw SwitchCoordinatorFailure.processBlocked
-            }
-            if !newlyDiscovered.isEmpty {
-                for process in newlyDiscovered {
-                    switchAppOwnedTerminationCandidates[process.record.identity] = process.record
-                }
-                switchSentSIGTERM = false
             }
             let survivors = try capturedAppOwnedSurvivors(in: inventory)
             if survivors.isEmpty {
                 return
             }
             if poll >= normalTerminationGracePolls, !switchSentSIGTERM {
-                guard confirmAppOwnedTermination(survivors.count) else {
+                guard await confirmAppOwnedTermination(survivors.count) else {
                     throw SwitchCoordinatorFailure.processBlocked
                 }
                 try terminateCapturedAppOwnedProcesses(survivors)
