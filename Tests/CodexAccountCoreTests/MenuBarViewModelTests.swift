@@ -246,7 +246,7 @@ func menuBarViewModelTests() -> [TestCase] {
             try expect(targetsAfterBlockedRetry.isEmpty, "recovery gate allowed selection after active sync failure")
         },
         TestCase("MenuBarViewModel identifies the previous profile in recovery status") {
-            let previous = menuBarProfiles()[0]
+            let previous = menuBarProfiles()[1]
             let provider = MenuBarProviderSpy(
                 profiles: menuBarProfiles(),
                 recoveryStatus: .pending(
@@ -268,7 +268,7 @@ func menuBarViewModelTests() -> [TestCase] {
             await model.load()
             let rollbackMessage = await MainActor.run { model.errorMessage }
             try expect(
-                rollbackMessage == "자동 복구에 실패했습니다. 개인 계정 복구가 필요합니다.",
+                rollbackMessage == "자동 복구에 실패했습니다. 회사 계정 복구가 필요합니다.",
                 "rollback recovery did not identify the exact previous profile"
             )
 
