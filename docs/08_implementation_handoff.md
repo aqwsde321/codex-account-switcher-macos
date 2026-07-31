@@ -1,7 +1,7 @@
 # 구현 인수인계
 
-- 상태: CLI Spike 검증 완료, ADR-027에 따라 메뉴바 MVP 개발 승인
-- 기준일: 2026-07-30
+- 상태: CLI Spike 검증 완료, 메뉴바 재로그인·시작 자동 복구 slice 완료
+- 기준일: 2026-07-31
 - 코드: 저장소 루트 `.`
 - 중요: 외부 Terminal에서 A↔B 기능 왕복 3회, 수동 A 복구 2회, B-011 자동 롤백을 완료했다. B-010 형식 증거는 보존하지 않았으며 ADR-027에 따라 개발에는 수용하고 MVP 완료·배포 전 게이트로 유지한다.
 
@@ -21,7 +21,7 @@
 
 ```text
 `docs/00_README.md`부터 문서 세트를 읽고,
-ADR-027과 기존 안전 결정을 유지한 채 Step 9 메뉴바 MVP를 구현해줘.
+ADR-027·ADR-029와 기존 안전 결정을 유지한 채 Step 9 메뉴바 MVP의 남은 2차 종료 확인 UI를 구현해줘.
 검증된 CodexAccountCore를 재사용하고 먼저 UI adapter 성공 기준을 대조해.
 실제 auth.json 교체와 Codex 앱 종료는 외부 Terminal 실행 게이트 전까지 하지 마.
 ```
@@ -53,15 +53,18 @@ ADR-027과 기존 안전 결정을 유지한 채 Step 9 메뉴바 MVP를 구현�
 - 수동 복구 완전 성공·앱 실행 미확인·journal 완료 불확실 typed outcome과 phase/expected-active finalization evidence 공통 재개 gate 구현
 - 메뉴바 exact transaction/previous-profile 수동 복구, 명시 확인, typed outcome별 성공·launch 미확인·STOP 처리 구현
 - durable journal 성공 직후 `SwitchPhase` callback과 메뉴바 실시간 전환 진행 문구 구현
-- fake credential만 사용하는 102개 debug 테스트 통과
+- inactive `needsRelogin` exact-ID 확인, B credential 갱신·marker 해제·B 활성화, 불확실 결과 재조정, 앱 수동 실행 안내 구현
+- 메뉴바 상태 조회 전 production startup recovery, STOP/terminal guard, 앱 자동 실행 금지 구현
+- fake credential만 사용하는 128개 debug 테스트 통과
 - 실제 read-only inspect에서 사용자 auth와 helper store 무변경 확인
 - `rollbackFailed` 수동 복구 CLI와 실환경 A 복구 2회 완료
 - debug 전용 B-011 실패 주입에서 source 자동 롤백과 최종 A 복귀 확인
 
 미완료:
 
-- 메뉴바 재로그인 동작
+- 실제 재부팅 뒤 production startup recovery Black-box 검증
 - 잔존 앱 프로세스 2차 종료 확인과 서명된 앱의 실제 Keychain CRUD·접근 정책 검증
+- B-015~B-017 세 프로필 전환·재로그인 실계정 Black-box 검증
 - MVP 완료·배포 전 `07_test_acceptance.md` §16 형식의 동일 task 왕복 증거 보존
 
 허용 build는 `/Applications/ChatGPT.app` `26.721.41059`/`5848`, `26.721.81911`/`5973`이다. 현재 설치된 `26.721.81911`/`5973`은 signature/build gate를 통과해 `application=ready`이며 auth-changing 명령 실검증을 완료했다.
@@ -109,7 +112,7 @@ ADR-027과 기존 안전 결정을 유지한 채 Step 9 메뉴바 MVP를 구현�
 - 올바른 인증 전환 뒤 account/task ownership 구조 때문에 동일 task를 B에서 재개하지 못하면 제품 중단; Helper 결함은 수정 후 전체 재검증
 - A→B→A 실제 메시지 왕복 3회 연속 성공 필요
 
-전환 journal의 exact schema는 `schemaVersion`, `transactionId`, `phase`, `previousProfileId`, `targetProfileId`, `startedAt`, `updatedAt` 일곱 필드다. build, 이메일, 인증 비밀은 넣지 않는다. canonical persisted phase는 다음과 같다.
+전환 journal의 exact schema는 `schemaVersion`, `transactionId`, `phase`, `previousProfileId`, `targetProfileId`, `startedAt`, `updatedAt` 일곱 필드다. build, 이메일, 인증 비밀은 넣지 않는다. 일반 switch의 canonical persisted phase는 다음과 같다.
 
 ```text
 preparing → quitRequested → quiescent → refreshingCurrent → currentSaved
@@ -117,7 +120,7 @@ preparing → quitRequested → quiescent → refreshingCurrent → currentSaved
 → verifyingTarget → targetVerified
 ```
 
-롤백 phase는 `rollbackStarted`, `rollbackFailed`만 사용한다.
+롤백 phase는 `rollbackStarted`, `rollbackFailed`만 사용한다. 재로그인만 exact B credential 저장과 A-active registry의 B marker 해제 뒤 private store API로 `validatingTarget→targetVerified` 단축 전이를 허용한다. public state machine은 완화하지 않는다.
 
 이 항목을 구현 편의를 이유로 다시 열지 않는다. 실제 환경이 불가능함을 증명할 때만 사용자에게 재결정을 요청한다.
 
@@ -253,13 +256,13 @@ cd codex-account-switcher-spike
 구현:
 
 - exact-schema journal state machine
-- canonical phase 순서: `preparing`→`quitRequested`→`quiescent`→`refreshingCurrent`→`currentSaved`→`validatingTarget`→`targetValidated`→`authReplaced`→`targetLaunched`→`verifyingTarget`→`targetVerified`
+- 일반 switch canonical phase 순서: `preparing`→`quitRequested`→`quiescent`→`refreshingCurrent`→`currentSaved`→`validatingTarget`→`targetValidated`→`authReplaced`→`targetLaunched`→`verifyingTarget`→`targetVerified`
 - 각 phase를 다음 side effect 전에 file `fsync`→rename→parent `fsync`로 내구 기록
 - current 기본 홈 `true` refresh/save 뒤 target 격리 `false` identity→`true` refresh/save 순서
 - atomic switch
 - post-launch active auth copy 기반 격리 `false` verification
 - rollback
-- startup recovery
+- 메뉴바 profile/status 조회 전 startup recovery, 앱 자동 실행 없음
 
 검증:
 
@@ -268,10 +271,10 @@ cd codex-account-switcher-spike
 - torn/malformed journal에서 auth/registry mutation과 launch가 0회인지 검증
 - 취소·호환성/process pre-auth 차단에서 journal unlink와 parent `fsync` 순서 검증
 - `refreshingCurrent` crash 시 source-valid이면 refresh/save를 완료하고, missing/corrupt/mismatch이면 configured-store source를 복원한다. 어느 분기든 source 검증 후 전환 안전 취소
-- `validatingTarget` crash/실패 시 verifier 정리→active source·registry previous 확인→안전 취소. target 프로필/갱신본 보존, forward switch 없음
+- `validatingTarget` crash/실패 시 일반 switch는 source 확인, 재로그인은 설치 target 식별 뒤 source 복원→registry previous→안전 취소. 검증된 target 저장본·marker 상태 보존, forward switch 없음
 - crash recovery는 `targetVerified`에서만 target commit을 완료할 수 있고 `authReplaced` 이하에서는 forward launch를 재개하지 않음
 - registry 내구 commit 완료 후에만 journal unlink, 이후 parent `fsync` 검증
-- 대상 불일치 시 source 복원→이메일 검증→registry previous durable commit→journal unlink+parent `fsync`→source 앱 재실행 순서
+- typed `target-unverified`만 source 복원. process·registry race, verifier 종료 미확인, 내구성 불확실은 STOP. startup recovery는 source 앱 미실행
 - rollback 실패 시 launch 호출 없음
 - registry/auth/journal 정합성 property test 또는 table-driven test
 
@@ -323,7 +326,7 @@ cd codex-account-switcher-spike
 
 ADR-027의 개발 승인에 따라 시작한다. B-010 정식 증거 공백은 릴리스 게이트로 남긴다.
 
-현재 1~3, 4의 실제 provider 주입·등록·활성 인증 동기화·durable phase 진행 표시, 5의 recovery mutation gate·상세 표시·exact transaction/previous-profile 수동 복구까지 완료됐다. 재로그인 동작 정의와 연결이 다음 작업이다.
+현재 1~3, 4의 실제 provider 주입·등록·활성 인증 동기화·durable phase 진행 표시·inactive target 재로그인, 5의 recovery mutation gate·시작 자동 복구·상세 표시·exact transaction/previous-profile 수동 복구까지 완료됐다. 잔존 앱 프로세스 2차 종료 확인 UI와 실제 서명·Keychain 검증이 다음 작업이다.
 
 구현 순서:
 
@@ -331,7 +334,8 @@ ADR-027의 개발 승인에 따라 시작한다. B-010 정식 증거 공백은 �
 2. fake provider로 세 프로필 카드와 활성 표시를 검증한다. 이미 활성인 카드는 auth write/restart 없이, 앱 실행 중이면 activate 1회, 닫혀 있으면 verify 후 launch한다.
 3. Core의 credential backend 경계를 연결해 CLI는 기존 private file store, 제품은 Keychain을 사용하게 한다. plaintext fallback은 금지한다.
 4. view model은 문자열 CLI 출력이 아닌 typed Core API를 호출하고 quit 확인·단계·안전한 오류를 연결한다. UI에 전환 로직을 복제하지 않는다.
-5. 시작 시 journal recovery와 `needsRelogin` 표시를 연결한다.
+5. 완료: 상태 조회 전 journal 자동 복구와 `needsRelogin` 표시를 연결한다.
+6. 다음: 잔존 앱 프로세스 2차 종료 확인 UI를 연결한다.
 
 첫 구현 slice의 성공 기준:
 
@@ -367,7 +371,7 @@ registration slice의 완료 기준:
 - label은 UI에서 정규화하지 않으며 blank·64자 초과는 버튼에서, control 문자·중복·네 번째 등록은 Core에서 거부한다.
 - 첫 등록은 새 프로필을 active로, 추가 등록은 등록 전 active를 유지한 상태로 목록을 다시 읽는다.
 - 등록 전 공식 앱과 독립 Codex 프로세스를 사용자가 종료해야 함을 표시한다. 자동 종료는 하지 않는다.
-- 시작 시와 mutation 실패 뒤 recovery status를 조회한다. pending/blocked면 등록·전환을 중단하고 STOP 오류를 표시한다.
+- 시작 시와 mutation 실패 뒤 자동 복구→profile 조회→read-only recovery status 조회 순서를 지킨다. pending/blocked면 등록·전환을 중단하고 STOP 오류를 표시한다.
 - capture가 durable commit 뒤 실패해도 profile 목록을 다시 읽어 중복 재시도를 막는다.
 - 추가 등록 commit 뒤 앱 launch만 실패하고 recovery가 없으면 새 profile ID를 등록 완료로 판정하고 폼을 닫되 launch 실패를 알린다.
 - 테스트는 fake provider만 사용하며 실제 홈·Keychain·공식 앱을 건드리지 않는다.
@@ -387,6 +391,16 @@ read-only recovery status slice의 완료 기준:
 - `rollbackFailed`는 현재 active나 label을 추측하지 않고 exact previous ID에 해당하는 프로필을 표시한다.
 - 다른 pending은 persisted phase를 표시하고 blocked는 상태 불명확 STOP을 표시한다.
 - 모든 recovery required 상태에서 등록·sync·전환 mutation 차단을 유지한다.
+- `recovery status`는 일반 auth/registry 복구를 시작하지 않는다. 기존 finalization evidence cleanup만 안전 gate 아래 재개할 수 있다.
+
+menu bar startup recovery slice의 완료 기준:
+
+- `MenuBarViewModel`은 각 상태 refresh에서 자동 복구를 profile·recovery 조회보다 먼저 한 번 호출한다.
+- production provider는 기존 `RecoveryCoordinator`를 transaction lock 아래 재사용하고 `relaunchPrevious=false`로 실행한다.
+- exact `targetVerified`만 target commit을 완료한다. typed `target-unverified`만 source rollback하고 process·registry race, verifier 종료 미확인, 내구성 불확실은 STOP한다.
+- `validatingTarget` 재로그인은 미저장 B와 검증 저장·marker 해제 B를 구분해 A로 복귀하되 올바른 B 저장 상태를 보존한다.
+- `refreshingCurrent` 복구 실패는 `rollbackFailed` terminal로 남기고, `rollbackFailed` 자동 복구는 side effect 없이 중단한다.
+- recovery outcome/throw와 무관하게 다음 profile·status 조회가 최종 UI 상태를 정하며 자동 앱 launch는 0회다.
 
 manual recovery outcome slice의 완료 기준:
 
@@ -414,6 +428,16 @@ menu bar switch progress slice의 완료 기준:
 - 확인 취소와 이미 활성인 프로필의 무변경 경로는 progress callback을 내보내지 않는다.
 - 메뉴바는 현재 phase의 안전한 문구와 indeterminate spinner만 표시하고 퍼센트·예상 시간·실행 중 취소를 추정하지 않는다.
 - 성공·실패 반환 뒤 transient phase를 제거하고 profile/recovery 재조회 결과를 기존 성공·STOP 문구에 반영한다.
+
+menu bar relogin slice의 완료 기준:
+
+- `needsRelogin`인 비활성 카드만 일반 switch와 분리된 확인을 표시하고, dialog dismiss 뒤에도 snapshot의 exact opaque ID를 Core에 한 번만 전달한다.
+- 사용자가 먼저 공식 앱에서 대상 계정으로 로그인하고 앱·독립 Codex 프로세스를 모두 종료해야 함을 표시한다.
+- Core는 첫 verifier 전에 `validatingTarget` journal을 기록하고, 공용 auth의 exact 대상 identity·refresh·동일 blob 검증 뒤에만 대상 credential을 교체한다.
+- A active를 유지한 registry에서 대상 marker를 먼저 해제한 뒤 `targetVerified`를 기록하고 active ID를 대상으로 커밋한다. 성공 뒤 앱은 자동 실행하지 않는다.
+- UI는 호출 직전과 outcome/throw 뒤 profile·recovery를 재조회한다. recovery none·대상 단일 active·marker 해제일 때만 성공이며 wrong-ID outcome과 상태 불일치는 blocked다.
+- Core가 A로 안전 rollback하고 recovery none으로 throw하면 수동 재시도를 허용한다. pending·blocked·finalization 불명확에서는 자동 재시도하지 않는다.
+- fake provider와 임시 file/credential fixture만 사용하며 실제 Keychain·공식 앱 재로그인은 릴리스 검증에 남긴다.
 
 ## 8. 실제 switch를 이 task 안에서 실행하면 안 되는 이유
 

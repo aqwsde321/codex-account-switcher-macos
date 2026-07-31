@@ -33,10 +33,11 @@
 - 메뉴바 recovery pending phase와 journal의 정확한 이전 프로필 표시, blocked 상태의 fail-closed 안내
 - 메뉴바 `rollbackFailed` transaction+이전 프로필에 묶인 수동 복구, 명시 확인, launch 미확인 재시도 금지, journal 불확실 STOP
 - 메뉴바 전환의 durable journal phase 기반 실시간 진행 문구와 완료·실패 후 상태 정리
+- 메뉴바 `needsRelogin` 비활성 카드의 exact-ID 확인, 검증된 저장본 갱신, 대상 즉시 활성화, 불확실 상태 재시도 차단
+- 메뉴바 상태 조회 전 미완료 journal 자동 복구, 불확실 상태 STOP, 복구 중 앱 자동 실행 금지
 
 아직 구현·노출하지 않음:
 
-- 메뉴바 재로그인 동작
 - 잔존 앱 프로세스 2차 종료 확인과 서명된 앱의 실제 Keychain 검증
 - 5시간·주간 사용량 표시
 
@@ -117,6 +118,14 @@ cd codex-account-switcher-spike
 ```
 
 `SYNC`를 입력해야 진행한다. 현재 `auth.json`의 이메일이 registry 활성 프로필과 정확히 일치할 때만 해당 저장본을 교체한다. 현재 `auth.json`, 다른 프로필 저장본, registry는 변경하지 않는다. 저장 후 검사가 실패하면 기존 활성 저장본을 복구한다. verifier 종료를 확인하지 못하면 private store의 격리 workspace를 보존하고 `recovery=blocked`로 표시한다.
+
+### 메뉴바에서 비활성 계정 재로그인 반영
+
+`재로그인 필요`인 비활성 B를 공식 Codex 앱에서 다시 로그인한 뒤 앱과 독립 Codex CLI·IDE 프로세스를 모두 종료한다. 메뉴바의 B 카드를 눌러 확인하면 exact B identity와 갱신된 auth blob을 검증·저장하고 B를 즉시 활성 프로필로 커밋한다. 성공 뒤 앱은 자동 실행하지 않으므로 직접 연다.
+
+확인 전이나 finalization이 불명확한 상태에서 자동 재시도하지 않는다. 메뉴바가 복구 필요 또는 상태 불명확을 표시하면 앱을 열거나 다른 계정 작업을 하지 않는다. Core가 A로 안전 롤백하고 recovery가 없을 때만 사용자가 B 로그인 상태를 고친 뒤 다시 시도할 수 있다.
+
+메뉴바는 시작과 mutation 실패 뒤 상태를 새로 읽을 때 자동 복구를 먼저 한 번 시도하고, 그 다음 profile과 recovery 상태를 읽는다. 자동 복구는 공식 앱을 실행하지 않는다. CLI `recovery status`는 일반 auth/registry 복구를 시작하지 않는 관찰 명령이며, 이미 증명된 journal finalization 정리만 재개할 수 있다.
 
 ### 저장된 계정으로 전환
 

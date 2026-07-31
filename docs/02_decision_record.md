@@ -265,7 +265,7 @@
 ## ADR-014: crash 복구용 저널에는 비밀을 넣지 않는다
 
 - 상태: 승인
-- 결정: 영속 저널 필드는 `schemaVersion`, `transactionId`, `phase`, `previousProfileId`, `targetProfileId`, `startedAt`, `updatedAt`으로 제한한다. 시작 시 미완료 저널을 해석해 보수적으로 이전 인증을 복원한다.
+- 결정: 영속 저널 필드는 `schemaVersion`, `transactionId`, `phase`, `previousProfileId`, `targetProfileId`, `startedAt`, `updatedAt`으로 제한한다. 메뉴바 상태 조회 전에 미완료 저널을 복구하되 앱은 자동 실행하지 않는다. typed `target-unverified`만 이전 인증 복구로 수렴시키고, process·registry race, verifier 종료 미확인, 내구성 불확실성은 STOP한다. CLI `recovery status`는 일반 auth/registry 복구를 시작하지 않는다.
 - 내구성 규칙:
   - 저널과 registry는 같은 디렉터리의 `0600` 임시 파일에 완전히 쓰고 file `fsync` → atomic rename → parent directory `fsync` 순서로 지속한다.
   - 각 phase는 그 phase가 보호하는 다음 side effect보다 먼저 지속돼야 한다.
@@ -493,6 +493,27 @@
 - 재검토 트리거:
   - 네 번째 계정 요구가 확인됨
 
+## ADR-029: 재로그인한 비활성 대상은 즉시 활성화한다
+
+- 상태: 승인 (2026-07-31)
+- 결정:
+  - `needsRelogin`인 비활성 B는 사용자가 공식 Codex 앱에서 B로 로그인하고 앱·독립 Codex 프로세스를 종료한 뒤 별도 메뉴바 확인으로 반영한다.
+  - Helper는 exact B 이메일과 동일 auth blob을 검증·갱신해 B credential을 저장하고, A를 active로 유지한 registry에서 B marker를 먼저 해제한 뒤 `targetVerified`를 기록하고 active ID를 B로 바꾼다.
+  - 성공 뒤 B를 활성 프로필로 유지하며 공식 앱은 자동 실행하지 않는다. 사용자가 직접 연다.
+  - Core throw 뒤 recovery가 없고 A로 안전 복구됐으면 수동 재시도를 허용한다. pending·blocked 또는 결과 불일치면 STOP하며 자동 재시도하지 않는다.
+- 이유:
+  - 사용자가 이미 B 로그인까지 완료했으므로 A로 다시 복귀하면 즉시 B로 전환하는 중복 작업이 생긴다.
+  - B credential과 marker를 `targetVerified` 전에 내구 저장하면 모든 crash window가 기존 rollback 또는 forward recovery로 수렴한다.
+  - 앱 launch를 분리하면 재로그인 credential commit과 launch 확인 실패를 한 transaction에 섞지 않는다.
+- 기각 대안:
+  - 재로그인 후 A로 복귀: 사용자가 다시 B 전환을 실행해야 한다.
+  - 활성 프로필 sync 재사용: inactive B의 exact ID·marker·active commit 계약을 표현하지 못한다.
+  - 일반 switch state machine에 단축 phase 허용: 정상 전환의 canonical transition까지 약화한다.
+  - 성공 뒤 앱 자동 실행: credential 반영과 launch uncertainty가 결합돼 재시도 판단이 모호해진다.
+- 재검토 트리거:
+  - 공식 앱이 안정적인 다중 계정 또는 계정 지정 로그인 API를 제공함
+  - 앱 자동 실행을 포함한 별도 typed outcome 요구가 확인됨
+
 ## 2. 결정 간 핵심 제약
 
 아래 제약은 하나라도 깨지면 구현을 계속하지 않는다.
@@ -508,6 +529,7 @@
 9. MVP는 최대 3개 프로필만 허용하고 네 번째 등록은 무변경 거부한다.
 10. MVP는 사용량, 자동 전환, 계정별 환경을 포함하지 않는다.
 11. 실제 인증값과 이메일을 문서·로그·fixture에 넣지 않는다.
+12. 재로그인 반영은 exact inactive target만 허용하며 성공 후 앱을 자동 실행하지 않는다.
 
 ## 3. 재검토 절차
 
@@ -523,4 +545,4 @@
 
 ## 4. 구현 task 시작용 요약
 
-Swift CLI Core와 실환경 전환·롤백 검증은 완료됐다. 다음 구현은 Core를 재사용하는 `CodexAccountMenuBar`다. 기본 `~/.codex`만 지원하고 비활성 인증은 Keychain에 둔다. 공식 앱 정상 종료, 독립 CLI 차단, `flock`, 비밀 없는 저널, `account/read` 이메일 검증, 전체 롤백 불변조건은 유지한다. 최대 3개 프로필을 노출하고 사용량은 후속이다. ADR-027에 따라 개발은 시작하되 B-010 정식 증거는 MVP 완료·배포 전 확보한다.
+Swift CLI Core와 메뉴바의 등록·전환·복구·재로그인 연결은 완료됐다. 기본 `~/.codex`만 지원하고 비활성 인증은 Keychain에 둔다. 공식 앱 정상 종료, 독립 CLI 차단, `flock`, 비밀 없는 저널, `account/read` 이메일 검증, 전체 롤백 불변조건은 유지한다. 최대 3개 프로필을 노출하고 사용량은 후속이다. ADR-027에 따라 개발은 진행하되 B-010 정식 증거는 MVP 완료·배포 전 확보한다.

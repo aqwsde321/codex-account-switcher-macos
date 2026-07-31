@@ -7,7 +7,7 @@
 - 목적: 개인 계정 A와 회사 계정 B의 인증을 교체하면서 **동일한 Codex task를 양쪽 계정에서 실제로 이어갈 수 있는지** 검증
 - 실행 기준: 실제 CLI 명령은 `README.md`를 따른다. 이 문서의 `switcher ...` 표기는 설계 당시 예정 인터페이스이므로 실행하지 않는다.
 
-현재 구현된 명령은 `inspect`, `profiles list`, `profile capture`, `profile sync-active`, `switch`, `recovery status`, `recovery restore`다. debug build에는 B-011 실패 주입 명령도 포함된다. 메뉴바 앱은 구현 전이다.
+현재 구현된 명령은 `inspect`, `profiles list`, `profile capture`, `profile sync-active`, `switch`, `recovery status`, `recovery restore`다. debug build에는 B-011 실패 주입 명령도 포함된다. 메뉴바 앱은 등록·전환·수동 복구·재로그인·시작 자동 복구 wiring까지 구현됐고, 실제 재부팅 복구, 서명된 앱의 실제 Keychain 검증, B-017 실계정 재로그인은 미실행이다.
 
 ## 1. 핵심 판정
 
@@ -482,21 +482,22 @@ journal은 §9의 고정 7필드만 가진다: `schemaVersion`, `transactionId`,
 
 재시작 시 journal을 읽기 전에 transaction lock을 획득한다. JSON parse 실패, 지원하지 않는 `schemaVersion`, 누락·추가 필드, torn content, 알 수 없는 phase는 자동 복구하지 않고 STOP한다.
 
-재시작 시 예정 동작:
+메뉴바 재시작 시 자동 복구 동작:
 
 - journal 없음: 미완료 transaction 없음
-- `preparing`~`quiescent`: process 상태와 active source 이메일을 확인한다. source가 맞으면 journal을 durable delete해 안전 취소하고, 원래 앱 실행 상태를 journal에 저장하지 않으므로 앱은 자동 재실행하지 않는다.
+- `preparing`~`quitRequested`: process 상태와 exact source를 확인해 journal을 durable delete한다. 다른 신원·판독 불가는 STOP하며 원래 앱 실행 상태를 journal에 저장하지 않으므로 앱은 자동 재실행하지 않는다.
+- `quiescent`: exact source면 안전 취소하고 exact target이면 source rollback한다. 다른 신원·판독 불가는 STOP한다.
 - `refreshingCurrent`: refresh가 실행됐는지 추측하지 않는다. process gate 후 안전하면 기본 홈 Helper App Server의 `refreshToken: true`와 source private-store save를 idempotent하게 완료하고, 그렇지 않으면 마지막 durable source private-store blob을 active에 복원한다. source 이메일·registry previous를 확인한 뒤 전환을 안전 취소한다. 둘 다 실패하면 `rollbackFailed` 후 STOP한다.
-- `currentSaved`: durable source private-store blob을 active에 반영·검증하고 journal을 durable delete해 안전 취소한다.
-- `validatingTarget`: 남은 verifier와 임시 홈을 정리하고 source active·registry previous를 확인한 뒤 전환을 안전 취소한다. 이미 갱신된 target private-store blob은 보존하되 forward switch를 재개하지 않는다. network 오류를 revoked로 바꾸지 않는다.
+- `currentSaved`: exact source면 durable source private-store blob을 확인하고 안전 취소한다. exact target이면 source rollback하며 다른 신원·판독 불가는 STOP한다.
+- `validatingTarget`: 남은 verifier와 임시 홈을 정리한다. exact source인 일반 switch는 안전 취소하고, exact target인 재로그인은 configured source를 복원한다. 다른 신원·판독 불가는 STOP한다. registry previous를 유지하며 검증된 target 저장본·해제된 marker는 보존할 수 있고 forward switch는 재개하지 않는다.
 - `targetValidated`: active가 source인지 target인지 격리 verifier로 확인한다. source면 안전 취소하고, target이면 source rollback한다. 어느 쪽도 아니면 STOP한다.
-- `authReplaced`: target launch를 재개하지 않는다. 앱이 우연히 실행됐는지도 확인해 정상 종료한 뒤 source rollback한다.
-- `targetLaunched`~`verifyingTarget`: target 앱을 정상 종료한 뒤 source 롤백
-- `targetVerified`: active target 이메일을 격리 verifier로 다시 확인한다. registry가 previous면 target으로 durable commit하고, 이미 target이면 중복 write 없이 확인한다. 그 뒤 journal을 unlink하고 parent directory를 fsync한다. 불명확하면 source rollback한다.
-- `rollbackStarted`: source 복구·source 이메일 검증·registry previous durable write·journal durable delete를 idempotent하게 완료한 뒤 source 앱을 실행
-- `rollbackFailed`: 자동 새 전환 금지, 수동 복구만 허용
+- `authReplaced`: target launch를 재개하지 않는다. 관련 process가 실행 중이면 종료하지 않고 STOP하며, process gate가 깨끗할 때만 source rollback한다.
+- `targetLaunched`~`verifyingTarget`: 관련 process가 실행 중이면 종료하지 않고 STOP하며, 사용자가 모두 종료한 뒤 다음 자동 복구에서 source rollback한다.
+- `targetVerified`: active target 이메일·configured target·marker를 격리 verifier와 저장소로 다시 확인한다. registry가 previous면 target으로 durable commit하고, 이미 target이면 중복 write 없이 확인한다. 그 뒤 journal을 unlink하고 parent directory를 fsync한다. typed `target-unverified`만 source rollback하며 process·registry race, verifier 종료 미확인, 내구성 불확실은 STOP한다.
+- `rollbackStarted`: source 복구·source 이메일 검증·registry previous durable write·journal durable delete를 idempotent하게 완료한다. 시작 자동 복구는 source 앱을 실행하지 않는다.
+- `rollbackFailed`: 자동 auth write·workspace 정리·앱 실행 없이 수동 복구만 허용
 
-복구 로직도 각 mutation 전 process gate를 통과해야 한다. journal phase만으로 active auth를 추정하지 않으며 journal, registry, active 이메일이 해소할 수 없이 모순되면 STOP한다.
+복구 로직도 각 mutation 전 process gate를 통과해야 한다. journal phase만으로 active auth를 추정하지 않으며 journal, registry, marker, active 이메일이 해소할 수 없이 모순되면 STOP한다. CLI `recovery status`는 일반 auth/registry 복구를 실행하지 않고 상태를 관찰하며, 이미 검증된 finalization evidence 정리만 재개할 수 있다.
 
 ## 14. Codex 업데이트 대응
 

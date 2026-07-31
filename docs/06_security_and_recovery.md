@@ -1,6 +1,6 @@
 # 보안·복구 설계
 
-- 상태: Swift CLI Spike·manual recovery typed outcome·durable finalization gate·Keychain backend·메뉴바 provider/등록/활성 인증 sync/수동 복구/전환 진행 표시 완료, 메뉴바 재로그인·실 Keychain·배포 보안 검증 전
+- 상태: Swift CLI Spike·manual recovery typed outcome·durable finalization gate·Keychain backend·메뉴바 provider/등록/활성 인증 sync/수동 복구/전환 진행/재로그인 완료, 실 Keychain·배포 보안 검증 전
 - 기준일: 2026-07-31
 - 적용 대상: Swift CLI Spike와 후속 macOS 메뉴바 앱
 
@@ -180,6 +180,8 @@ flowchart LR
 - 대상 처리 전 journal을 `validatingTarget`으로 내구 기록한다. 대상 Keychain blob을 격리 홈에서 먼저 `account/read(refreshToken: false)`로 식별하고, 같은 격리 홈에서 `refreshToken: true`로 갱신한다.
 - 두 응답의 이메일이 모두 대상 프로필과 완전 일치할 때만 갱신된 대상 blob을 Keychain에 저장한다. Keychain 쓰기 성공을 확인한 뒤 journal을 `targetValidated`로 내구 기록한다.
 - 대상 식별·갱신·Keychain 저장 중 하나라도 실패하면 공용 active auth는 변경하지 않고 대상 프로필과 기존 저장본을 보존한다. 명시적 인증 만료·폐기·로그아웃·identity 불일치만 재로그인 상태로 바꾼다. timeout·network/server 오류는 retryable 검증 실패, Keychain write 실패는 저장소 오류이며 둘 다 token 폐기나 재로그인 근거가 아니다.
+- 비활성 B 재로그인은 사용자가 공식 앱에서 B 로그인을 완료하고 모든 관련 프로세스를 종료한 뒤 exact profile ID 확인으로만 시작한다. 첫 verifier 전에 `validatingTarget`을 기록하고 공용 auth의 B identity·refresh·동일 file identity를 검증한 뒤에만 B Keychain item을 교체한다.
+- 재로그인 성공 경로는 A active를 유지한 registry에서 B marker를 먼저 해제하고 `targetVerified`를 내구 기록한 뒤 active ID를 B로 바꾼다. 성공 뒤 앱은 자동 실행하지 않는다. pending·blocked·wrong-ID outcome·내구 상태 불일치에서는 자동 재시도하지 않는다.
 - 공식 앱 재실행 후 검증은 공용 active auth를 임시 격리 홈에 복사해 `account/read(refreshToken: false)`를 호출한다. private Electron IPC에는 연결하지 않으며, 이 검증은 공용 active auth의 이메일만 직접 입증한다.
 - Developer ID 서명·공증은 배포 전 필수다. Keychain 접근 정책은 서명 identity가 바뀌었을 때 재검증한다.
 
@@ -212,6 +214,8 @@ preparing
 ```
 
 롤백 시작은 `rollbackStarted`, 자동 복구 불능은 `rollbackFailed`다. `committed`, `rolledBack`, `blocked`, `idle`은 진단/UI 상태이며 persisted phase가 아니다.
+
+재로그인만 private store API로 `validatingTarget → targetVerified`를 허용한다. exact B credential 저장과 A-active registry의 B marker 해제까지 검증된 뒤에만 호출한다. public `SwitchStateMachine`의 canonical transition은 완화하지 않는다.
 
 ### 6.2 내구 쓰기 계약
 
@@ -280,21 +284,22 @@ preparing
 
 ## 9. crash recovery 판정
 
-journal을 strict decode하기 전에 자동 복구 side effect를 실행하지 않는다. malformed/torn journal, field set 불일치, 알 수 없는 phase는 모두 journal과 인증을 보존한 채 `STOP`한다.
+메뉴바는 profile·recovery 상태를 읽기 전에 자동 복구를 한 번 시도한다. transaction lock 뒤 journal을 strict decode하며, malformed/torn journal, field set 불일치, 알 수 없는 phase는 모두 journal과 인증을 보존한 채 `STOP`한다. 시작 자동 복구는 앱을 실행하지 않는다. CLI `recovery status`는 일반 auth/registry 복구를 시작하지 않는다.
 
 | journal phase | 재시작 시 기본 판단 |
 |---|---|
 | `preparing` | active source 이메일과 무변경 상태를 확인하고 journal을 내구 삭제해 안전 취소 |
-| `quitRequested`~`quiescent` | process gate와 active source 이메일을 재확인하고 journal을 내구 삭제해 안전 취소. 원래 앱 실행 상태를 journal에 저장하지 않으므로 자동 재실행하지 않음 |
+| `quitRequested` | process gate와 exact source를 재확인해 journal을 내구 삭제. 다른 신원·판독 불가는 `STOP`; 원래 앱 실행 상태를 저장하지 않으므로 자동 재실행하지 않음 |
+| `quiescent` | exact source면 안전 취소, exact target이면 이전본 롤백, 다른 신원·판독 불가는 `STOP` |
 | `refreshingCurrent` | process gate 후 active가 source로 유효하면 `refreshToken: true`와 configured-store 저장을 멱등 완료하고, active가 missing/corrupt/mismatch면 configured-store source를 복원한다. 어느 분기든 source 이메일·registry previous를 확인하고 journal을 내구 삭제해 안전 취소 |
-| `currentSaved` | configured store의 최신 source를 active에 반영·검증하고 journal을 내구 삭제해 안전 취소 |
-| `validatingTarget` | 남은 verifier·임시 홈을 정리하고 active source·registry previous를 확인한 뒤 journal을 내구 삭제해 안전 취소. 이미 저장된 refreshed target blob은 보존할 수 있지만 forward switch는 재개하지 않음 |
+| `currentSaved` | exact source면 configured store의 최신 source를 확인하고 안전 취소, exact target이면 이전본 롤백, 다른 신원·판독 불가는 `STOP` |
+| `validatingTarget` | 남은 verifier·임시 홈을 정리한다. exact source인 일반 switch는 안전 취소하고, exact target인 재로그인은 configured source credential을 복원·검증한다. 다른 신원·판독 불가는 `STOP`한다. registry previous를 유지하며 검증 저장된 target blob·해제된 marker는 보존 가능 |
 | `targetValidated` | rename crash window를 고려해 active를 판독한다. source면 journal을 내구 삭제해 안전 취소, target이면 `rollbackStarted`로 전환해 source 롤백, 둘 다 아니면 `STOP` |
-| `authReplaced` | 앱이 이미 시작됐는지 확인해 실행 중이면 정상 종료한 뒤 이전본 롤백 |
-| `targetLaunched`~`verifyingTarget` | 대상 앱을 먼저 정상 종료하고 이전본 롤백 |
-| `targetVerified` | active auth 복사본의 대상 이메일 재검증 후 registry 내구 commit→journal unlink→parent `fsync`; 불명확하면 이전본 롤백 |
-| `rollbackStarted` | 앱 종료 확인 후 이전본 복구 재개 |
-| `rollbackFailed` | 자동 새 전환 금지, 수동 복구만 허용 |
+| `authReplaced` | 관련 process가 실행 중이면 종료하지 않고 `STOP`; gate가 깨끗할 때만 이전본 롤백 |
+| `targetLaunched`~`verifyingTarget` | 관련 process가 실행 중이면 종료하지 않고 `STOP`; 사용자가 모두 종료한 뒤 다음 자동 복구에서 이전본 롤백 |
+| `targetVerified` | active auth 복사본·configured target·marker 재검증 후 registry 내구 commit→journal unlink→parent `fsync`; typed `target-unverified`만 이전본 롤백, process·registry race·verifier 종료 미확인·내구성 불확실은 `STOP` |
+| `rollbackStarted` | process gate 뒤 이전본 복구 재개. 시작 자동 복구는 앱 미실행 |
+| `rollbackFailed` | terminal: 자동 auth write·workspace 정리·앱 실행 금지, 수동 복구만 허용 |
 
 journal 단계만 믿고 파일을 쓰지 않는다. 항상 현재 프로세스 상태와 격리 App Server 이메일을 함께 확인한다. timeout·DNS·서버 오류만으로 token을 만료·폐기로 분류하지 않는다.
 

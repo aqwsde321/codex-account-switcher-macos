@@ -1,7 +1,7 @@
 # 기술 설계
 
-- 상태: Swift CLI Spike 구현·실계정 기능 검증 완료, 메뉴바 MVP 개발 승인
-- 기준일: 2026-07-30
+- 상태: Swift CLI Spike 구현·실계정 기능 검증 완료, 메뉴바 재로그인·시작 자동 복구 slice 완료
+- 기준일: 2026-07-31
 - 구현 순서: 검증된 Core 재사용 → SwiftUI 메뉴바 앱 → 엄격한 릴리스 인수
 
 ## 1. 설계 목표
@@ -467,13 +467,13 @@ Spike에서 다음을 확인했다.
 
 ## 10. crash recovery 설계
 
-Helper 시작 시 일반 UI보다 recovery coordinator가 먼저 실행된다.
+메뉴바의 첫 상태 조회와 mutation 실패 뒤 refresh는 profile·recovery 조회 전에 recovery coordinator를 한 번 실행한다. CLI `recovery status`는 일반 auth/registry 복구를 실행하지 않고, 기존 finalization evidence 정리만 멱등 재개할 수 있다.
 
 1. lock 획득
 2. journal bytes와 schema를 읽고 필드 집합·phase·UUID·시각을 검증
 3. malformed/torn JSON, 알 수 없는 phase, 필수 필드 누락, 모순된 ID면 즉시 STOP. 자동 보정·삭제·auth write·앱 실행 금지
 4. 공식 앱과 관련 프로세스 상태 확인
-5. 파일 mutation이 필요한 phase에서 관련 process가 실행 중이면 정상 종료 승인을 받고 process gate를 통과. 거부·timeout이면 journal을 유지하고 STOP
+5. 파일 mutation이 필요한 phase에서 관련 process가 실행 중이면 journal을 유지하고 STOP. 시작 자동 복구는 종료 승인 UI를 띄우거나 프로세스를 종료하지 않음
 6. 현재 active auth의 사본을 격리 홈에서 `refreshToken: false`로 읽고 previous/target secure blob 검증 결과와 조합
 7. 아래 phase table의 한 경로만 실행
 8. 모든 phase/registry write와 journal delete에 정상 transaction과 같은 file/parent `fsync` 규칙 적용
@@ -484,17 +484,17 @@ registry alone 또는 journal alone으로 commit을 추론하지 않는다. phas
 |---|---|
 | `preparing` | active가 previous이고 registry도 previous면 mutation 전 abort로 처리해 journal을 durable delete한다. 불일치하면 STOP한다. |
 | `quitRequested` | process gate와 active previous를 확인하고 journal을 durable delete해 안전 취소한다. journal schema에 원래 실행 상태를 저장하지 않으므로 앱은 자동 재실행하지 않는다. 종료 여부·identity가 모호하면 STOP한다. |
-| `quiescent` | active source와 registry previous를 확인하고 journal을 durable delete해 전환을 안전 취소한다. 불일치하면 `rollbackStarted`를 기록한 뒤 stored previous를 복구한다. |
+| `quiescent` | active가 exact previous면 journal을 durable delete해 안전 취소하고, exact target이면 `rollbackStarted` 뒤 stored previous를 복구한다. 다른 신원·판독 불가는 STOP한다. |
 | `refreshingCurrent` | source-valid이면 기본 홈 Helper-owned App Server의 `true` refresh와 current credential-store save를 idempotent하게 완료한다. source-valid가 아니면 stored previous를 복구한다. 어느 분기든 previous 이메일과 registry previous를 확인하고 journal을 durable delete해 전환을 안전 취소한다. |
-| `currentSaved` | active와 current credential store가 previous 신원으로 검증되면 registry previous를 확인하고 journal을 durable delete해 안전 취소한다. 아니면 previous rollback을 시작한다. |
-| `validatingTarget` | 남은 isolated home/probe를 Helper-owned 여부로 정리한다. active source와 registry previous를 확인하고 journal을 durable delete해 안전 취소한다. 이미 refresh된 target blob은 보존할 수 있지만 forward switch는 재개하지 않으며 network 실패를 revocation으로 표시하지 않는다. |
+| `currentSaved` | active가 exact previous면 current credential store도 previous인지 확인하고 안전 취소한다. exact target이면 previous rollback을 시작하며 다른 신원·판독 불가는 STOP한다. |
+| `validatingTarget` | 남은 isolated home/probe를 Helper-owned 여부로 정리한다. exact previous인 일반 switch는 안전 취소하고, exact target인 재로그인은 configured source를 복원·검증한다. 다른 신원·판독 불가는 STOP한다. registry previous를 유지하며 검증 저장된 target blob·해제된 marker는 보존할 수 있지만 forward switch는 재개하지 않는다. |
 | `targetValidated` | rename crash window를 고려해 active를 판독한다. previous면 journal을 durable delete해 안전 취소하고, target이면 `rollbackStarted`를 기록해 previous rollback한다. 다른 신원·판독 불가는 STOP한다. |
-| `authReplaced` | target launch를 재개하지 않는다. 실행 중인 앱이 있으면 정상 종료와 process gate 후 previous rollback한다. |
-| `targetLaunched` | target 앱을 정상 종료하고 process gate 후 previous rollback한다. |
-| `verifyingTarget` | target 앱을 정상 종료하고 process gate 후 previous rollback한다. network 실패는 target revocation이나 `needsRelogin` 근거로 사용하지 않는다. |
-| `targetVerified` | active target을 다시 확인하고 registry target commit을 durable하게 완료한다. 이미 commit됐어도 idempotent하게 확인한 뒤 journal `unlink`와 parent `fsync`를 수행한다. active가 target이 아니면 previous rollback으로 간다. |
-| `rollbackStarted` | 관련 writer를 quiescent하게 만든 뒤 stored previous blob을 공용 auth에 원자 복구하고 격리 `false` probe로 previous 이메일을 검증한다. 성공하면 registry previous durable commit→journal unlink와 parent `fsync`→previous 앱 재실행 순서로 끝낸다. |
-| `rollbackFailed` | 자동 auth write와 앱 재실행을 하지 않는다. configured credential store의 previous/target 원본을 보존하고 명시적 수동 recovery만 허용한다. 수동 recovery는 process gate 뒤 stale verifier를 private evidence로 격리하고 previous 복구를 먼저 durable commit한다. 등록된 target은 보존하고 미등록 capture target만 marker와 함께 제거하며 journal은 마지막에 삭제한다. |
+| `authReplaced` | target launch를 재개하지 않는다. 관련 process가 실행 중이면 종료하지 않고 STOP하며, process gate가 깨끗할 때만 previous rollback한다. |
+| `targetLaunched` | 관련 process가 실행 중이면 종료하지 않고 STOP한다. 사용자가 모두 종료한 뒤 다음 자동 복구에서 previous rollback한다. |
+| `verifyingTarget` | 관련 process가 실행 중이면 종료하지 않고 STOP한다. gate가 깨끗하면 previous rollback하며 network 실패는 target revocation이나 `needsRelogin` 근거로 사용하지 않는다. |
+| `targetVerified` | active target·configured target·marker를 다시 확인하고 registry target commit을 durable하게 완료한다. 이미 commit됐으면 중복 write 없이 journal 정리만 수행한다. typed `target-unverified`만 previous rollback하며 process·registry race, verifier 종료 미확인, 내구성 불확실은 STOP한다. |
+| `rollbackStarted` | 관련 writer가 없는지 확인한 뒤 stored previous blob을 공용 auth에 원자 복구하고 격리 `false` probe로 previous 이메일을 검증한다. 성공하면 registry previous durable commit→journal unlink와 parent `fsync`로 끝낸다. 시작 자동 복구는 previous 앱을 실행하지 않는다. |
+| `rollbackFailed` | terminal로 반환하며 locator·process scan·workspace 정리·auth/registry write·앱 실행을 하지 않는다. configured credential store의 previous/target 원본을 보존하고 명시적 수동 recovery만 허용한다. |
 
 previous rollback 중 어떤 단계든 실패하면 `rollbackFailed`를 durable하게 기록한다. 성공 phase를 추측해 journal을 지우지 않는다.
 
@@ -533,10 +533,15 @@ ADR-027의 개발 승인에 따라 다음 최소 기능만 추가한다.
 - 단계별 상태와 안전한 오류 표시
 - 이미 활성 카드 클릭 시 Codex 창 활성화
 - 재로그인 필요 표시
+- 재로그인 필요 비활성 카드의 exact-ID 확인·반영과 B 활성화
 - `rollbackFailed` journal의 exact transaction ID와 previous profile을 확인 snapshot에 묶고, Core lock 안에서 둘 다 재검증한 뒤에만 수동 복구
 - 복구 성공·앱 launch 미확인·journal finalization 불확실을 typed outcome으로 구분하고 마지막 두 분기에서 auth 복구 재시도 금지
 
 전환 진행 표시는 `SwitchCoordinator`가 각 journal create/update의 내구 성공 직후 내보내는 `SwitchPhase` callback만 사용한다. UI는 이를 현재 단계 문구로 매핑하며 퍼센트·예상 시간·실행 중 취소를 추정하지 않는다. 이미 활성인 프로필의 무변경 경로는 journal phase를 만들지 않으므로 진행 callback도 내보내지 않는다.
+
+재로그인은 일반 switch와 다른 최소 경로다. 사용자가 공식 앱에서 inactive B 로그인을 끝내고 모든 관련 프로세스를 종료한 상태에서만 시작한다. Core는 첫 verifier 전에 `validatingTarget`을 기록하고 공용 auth의 exact B identity와 refresh 결과의 동일 blob을 검증한 뒤 B Keychain item을 교체한다. registry는 A active를 유지한 채 B marker를 먼저 해제하고, 내부에서만 허용한 `validatingTarget → targetVerified` 전이 뒤 active ID를 B로 커밋한다. 이 순서는 `targetVerified` 이후 기존 forward recovery가 marker 없는 B를 완료할 수 있게 한다. 성공 뒤 앱 launch는 수행하지 않는다.
+
+메뉴바는 재로그인 확인을 일반 전환 pending과 분리하고 `presenting` snapshot의 opaque ID를 Core에 한 번만 전달한다. 호출 직전과 반환·throw 뒤 profile/recovery를 다시 읽는다. `recovery=none`, B 단일 active, B `needsRelogin=false`일 때만 성공이다. 안전 rollback 뒤 Core throw는 수동 재시도를 허용하지만 pending·blocked, wrong-ID outcome, 반환 뒤 상태 불일치는 STOP이다.
 
 후속 범위:
 
@@ -582,6 +587,11 @@ Core protocol로 다음 실패를 결정적으로 주입할 수 있어야 한다
 - 대상 refresh 실패
 - 대상 `false` identity 성공 뒤 `true` refresh의 이메일 변경
 - 대상 network 실패가 `needsRelogin`을 바꾸지 않음
+- 재로그인 첫 verifier보다 `validatingTarget` journal이 먼저 기록됨
+- 재로그인 refresh 직후 읽은 B blob과 verifier가 확인한 file identity 불일치
+- B credential 저장 뒤 marker 해제·`targetVerified`·active ID commit 사이 중단
+- 재로그인 journal finalization 불확실의 restart 재조정
+- 메뉴바 재로그인 확인 취소·stale snapshot·wrong-ID outcome·mutation 뒤 throw
 - refreshed target configured-store 저장 후 `targetValidated` 기록 전 crash
 - 현재 refresh 후 crash
 - `refreshingCurrent` recovery에서 source refresh 완료 또는 stored source 복구 후 안전 취소 분기

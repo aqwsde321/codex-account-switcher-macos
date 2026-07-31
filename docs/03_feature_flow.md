@@ -1,7 +1,7 @@
 # Codex 계정 전환 기능 흐름
 
-- 상태: Swift CLI Spike 완료, ADR-027에 따라 메뉴바 MVP 개발 승인
-- 기준일: 2026-07-30
+- 상태: Swift CLI Spike 완료, 메뉴바 재로그인·시작 자동 복구 slice 완료
+- 기준일: 2026-07-31
 - 대상: macOS 공식 Codex 앱용 별도 메뉴바 helper
 - 선행 단계: Swift CLI Spike
 
@@ -163,7 +163,20 @@ flowchart TD
 19. `verifyingTarget`에서 현재 active auth를 격리 verifier로 읽어 대상 이메일을 검증하고 일치하면 `targetVerified`로 갱신한다.
 20. `activeProfileId`를 내구성 있게 대상 프로필로 커밋한 뒤 journal을 unlink하고 parent directory를 `fsync`한다.
 
-### 3.4 전환 실패와 자동 롤백
+### 3.4 비활성 대상 재로그인 반영
+
+1. 사용자가 공식 Codex 앱에서 `needsRelogin`인 비활성 B로 로그인한 뒤 앱과 독립 Codex 프로세스를 모두 종료한다.
+2. 메뉴바에서 B 카드를 선택하고 별도 확인을 승인한다. 확인 snapshot은 exact profile ID를 보존하며 일반 switch 경로를 호출하지 않는다.
+3. Helper는 profile·recovery를 다시 읽고 B가 여전히 비활성·재로그인 필요이며 recovery가 없는지 확인한 뒤 단일 transaction lock을 획득해 같은 조건을 재검증한다.
+4. 첫 verifier 실행 전에 source A와 target B를 담은 `validatingTarget` journal을 내구 저장한다.
+5. 공용 `auth.json`이 exact B인지 확인하고 `account/read(refreshToken: true)`로 갱신한다. 갱신 직후 읽은 동일 blob을 다시 B 이메일로 검증한다.
+6. 검증된 blob을 B credential에 저장하고 round-trip을 확인한다.
+7. A를 active로 유지한 registry에서 B의 `needsRelogin`을 먼저 해제한다. 그 뒤 재로그인 전용 내부 전이로 journal을 `targetVerified`로 바꾼다.
+8. registry active ID를 B로 커밋하고 journal을 내구 삭제한다. 공식 앱은 자동 실행하지 않으며 사용자가 직접 연다.
+9. `targetVerified` 전 확정 실패는 A credential·active ID를 검증 복원한다. verifier 종료를 확인하지 못하면 auth를 다시 쓰지 않고 pending으로 남긴다. Core throw 뒤 recovery가 없으면 수동 재시도를 허용하고, pending·blocked면 재시도하지 않는다.
+10. journal 삭제 내구성이 불명확하면 profile·recovery를 다시 읽는다. B 하나만 active이고 marker가 해제됐으며 recovery가 없을 때만 완료를 재확인한다. 그 밖에는 STOP한다.
+
+### 3.5 전환 실패와 자동 롤백
 
 `authReplaced` 이전 실패는 대상 rollback이 아니라 현재 계정 정상화다. `refreshingCurrent` 중 실패해 active auth가 손상·불명확하면 저장된 이전 blob을 복원하고 이전 이메일을 검증한다. 대상 검증·저장 실패처럼 active가 검증된 이전 계정인 경우 journal을 내구성 있게 삭제하고, 사용자가 전환 때문에 앱을 종료했다면 이전 계정으로 다시 실행한다.
 
@@ -178,17 +191,17 @@ flowchart TD
 9. 대상 프로필은 삭제하지 않는다. 명시적 인증 거부일 때만 `재로그인 필요`, 그 밖의 실패는 원인에 맞는 재시도 상태로 유지한다.
 10. 복구 어느 단계든 실패하면 공식 앱을 실행하지 않고 journal과 안전한 수동 복구 안내를 남긴다.
 
-### 3.5 시작 시 crash recovery
+### 3.6 시작 시 crash recovery
 
-1. Helper 시작 시 secret-free journal 존재 여부를 확인한다.
-2. journal을 완전히 읽어 schema와 허용 phase를 검증한다. 잘리거나 모순된 저널이면 자동 쓰기 없이 STOP한다.
-3. journal 단계와 현재 `auth.json`의 검증 가능한 이메일을 비교한다.
-4. `refreshingCurrent`에서 중단됐다면 process gate 후 active auth가 이전 이메일로 유효한 경우 refresh를 다시 완료해 저장하고, 그렇지 않으면 저장된 이전 blob을 복원·검증한다. 어느 분기든 source를 정상화한 뒤 전환을 안전 취소한다.
-5. `currentSaved` 또는 `validatingTarget`이면 source를 검증하고 전환을 안전 취소한다. `targetValidated` 이후 target 교체 가능성이 있으면 source rollback을 우선한다.
-6. `targetVerified`와 active target이 모두 명백한 경우에만 registry의 target 커밋을 마무리한다.
-7. 그 외에는 이전 프로필 복구를 우선한다. crash 후 `authReplaced`에서 target launch를 재개하는 forward recovery는 하지 않는다.
-8. 어떤 이메일인지 검증할 수 없거나 프로세스가 남아 있으면 자동 쓰기를 하지 않는다.
-9. 복구 실패 상태에서는 새 전환을 차단한다.
+1. 메뉴바의 첫 상태 조회와 mutation 실패 뒤 refresh는 profile·recovery를 읽기 전에 자동 복구를 한 번 시도한다.
+2. transaction lock을 먼저 획득하고 secret-free journal 전체를 읽어 schema, phase, UUID, 시각, registry·marker 정합성을 검증한다. 잘리거나 모순된 상태면 쓰지 않고 STOP한다.
+3. `refreshingCurrent`에서 중단됐다면 process gate 후 active source refresh/save를 멱등 완료하거나 저장된 source를 복원·검증한다. 실패하면 `rollbackFailed`를 내구 기록해 다음 자동 시도를 막는다.
+4. `quiescent`·`currentSaved`는 exact source면 안전 취소하고 exact target이면 source rollback한다. 제3 신원·판독 불가는 STOP한다. `validatingTarget`의 일반 switch는 source를 확인하고, 재로그인은 설치된 target을 식별한 뒤 source를 복원한다. 검증 저장된 target credential과 해제된 marker는 보존할 수 있다.
+5. `targetValidated`부터 `verifyingTarget`까지는 관련 process가 없을 때만 source rollback으로 수렴한다. 실행 중 process가 있으면 종료하지 않고 STOP하며 target launch를 재개하지 않는다.
+6. `targetVerified`에서 exact target auth·configured credential·marker·registry가 일치할 때만 target commit을 완료한다. registry가 이미 target이면 중복 write 없이 journal 정리만 완료한다.
+7. target verifier의 typed `target-unverified`는 source rollback한다. process·registry race, verifier 종료 미확인, 내구성 불확실은 auth/registry를 쓰지 않고 STOP한다.
+8. `rollbackFailed`는 terminal이다. 자동 auth write, workspace 정리, 앱 실행 없이 수동 복구만 허용한다.
+9. 자동 복구는 공식 앱을 실행하지 않는다. 완료나 STOP 뒤 profile과 read-only recovery 상태를 읽고 pending·blocked면 새 mutation을 차단한다.
 
 ## 4. 상태 전이 초안
 
@@ -286,7 +299,7 @@ stateDiagram-v2
 
 이메일, 토큰, 인증 JSON, 쿠키, raw command line은 journal에 저장하지 않는다.
 
-persisted journal phase는 다음 이름으로 통일한다.
+일반 switch의 persisted journal phase는 다음 이름으로 통일한다.
 
 ```text
 preparing → quitRequested → quiescent → refreshingCurrent → currentSaved
@@ -294,7 +307,7 @@ preparing → quitRequested → quiescent → refreshingCurrent → currentSaved
 → authReplaced → targetLaunched → verifyingTarget → targetVerified
 ```
 
-롤백은 `rollbackStarted`, 자동 복구 불능은 `rollbackFailed`다. 성공 시 `targetVerified`에서 registry를 커밋한 뒤 journal을 삭제한다. 앞 절의 `idle`, `blocked`, `committed`, `rolledBack` 등은 UI/runtime 상태이며 persisted journal phase가 아니다.
+롤백은 `rollbackStarted`, 자동 복구 불능은 `rollbackFailed`다. 재로그인만 검증된 B credential 저장과 A-active registry의 B marker 해제 뒤 private store API로 `validatingTarget → targetVerified` 단축 전이를 허용한다. 성공 시 `targetVerified`에서 active ID를 커밋한 뒤 journal을 삭제한다. 앞 절의 `idle`, `blocked`, `committed`, `rolledBack` 등은 UI/runtime 상태이며 persisted journal phase가 아니다.
 
 ### journal·registry 내구성
 

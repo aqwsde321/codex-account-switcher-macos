@@ -81,14 +81,14 @@ Unit/Integration test는 실제 `~/.codex/auth.json`을 읽거나 쓰지 않는�
 - `refreshingCurrent` durable 후 기본 홈 Helper App Server의 `account/read(refreshToken: true)` 실행
 - target은 격리 홈에서 `account/read(refreshToken: false)` identity→`account/read(refreshToken: true)` validity/refresh→동일 이메일→configured credential store durable save
 - post-launch는 active auth copy를 격리 홈에서 `account/read(refreshToken: false)`로 검증하고 private Electron IPC를 사용하지 않음
-- persisted phase 순서는 `preparing→quitRequested→quiescent→refreshingCurrent→currentSaved→validatingTarget→targetValidated→authReplaced→targetLaunched→verifyingTarget→targetVerified`
+- 일반 switch의 persisted phase 순서는 `preparing→quitRequested→quiescent→refreshingCurrent→currentSaved→validatingTarget→targetValidated→authReplaced→targetLaunched→verifyingTarget→targetVerified`
 - rollback phase는 `rollbackStarted`, 자동 복구 불능은 `rollbackFailed`
 - journal 필드는 정확히 `schemaVersion, transactionId, phase, previousProfileId, targetProfileId, startedAt, updatedAt`
 - 모든 journal/registry write는 same-directory `0600` temp→file fsync→atomic rename→parent fsync 후 다음 side effect 진행
-- target 이메일 일치와 `targetVerified` durability 전 registry commit 없음
+- 일반 switch의 target active-ID commit은 target 이메일 일치와 `targetVerified` durability 전 없음. 재로그인만 exact B credential 저장과 A-active registry의 B marker 해제 뒤 private `validatingTarget→targetVerified`를 허용하며 active ID는 그 뒤 commit
 - 성공 registry가 durable한 뒤 journal unlink→parent fsync
 - auth mutation 전 취소/차단은 journal unlink→parent fsync로 durable cleanup
-- 실패 후 롤백은 source auth 복원→source 이메일 검증→registry previous durable commit→journal durable delete→source 앱 재실행 순서
+- 실행 중 일반 switch 실패 후 롤백은 source auth 복원→source 이메일 검증→registry previous durable commit→journal durable delete→source 앱 재실행 순서. 시작 자동 복구는 앱 미실행
 - 종료 전 확인한 exact 앱 소유 잔존도 1초 유예와 별도 승인 뒤에만 `SIGTERM` 1회
 - `SIGKILL` 없음
 - 독립 CLI/task 자동 종료 없음
@@ -146,6 +146,12 @@ Unit/Integration test는 실제 `~/.codex/auth.json`을 읽거나 쓰지 않는�
 | U-040 | 메뉴바 복구 뒤 앱 launch 미확인 | 이전 계정 active와 recovery none 재확인, restore 재시도 0회, 앱만 수동 실행 안내 | 예 |
 | U-041 | 메뉴바 journal 완료 불확실 | 재조회가 blocked면 등록·sync·전환·restore 추가 mutation 0회, none이면 앱 미실행 안내 | 예 |
 | U-042 | 메뉴바 전환 진행 표시 | durable journal 성공 뒤 canonical phase 순서로만 표시, 확인 취소·활성 무변경 경로 callback 0회, 완료 뒤 상태 제거 | 예 |
+| U-043 | 메뉴바 재로그인 카드 확인 | inactive `needsRelogin`만 별도 snapshot, 취소 0회, exact ID Core 호출 1회, normal switch 0회 | 예 |
+| U-044 | 재로그인 확인 뒤 상태 변경 | profile/recovery 재조회, stale 확인 Core 호출 0회 | 예 |
+| U-045 | 재로그인 성공·finalization 불확실 | recovery none+B 단일 active+marker 해제일 때만 성공 또는 재확인, 앱 수동 실행 안내 | 예 |
+| U-046 | 재로그인 Core throw | durable B commit은 성공 재확인, A 안전 rollback은 수동 재시도, pending은 STOP·재호출 0회 | 예 |
+| U-047 | transient 조회 실패와 wrong-ID outcome | catch 재조회 뒤에도 payload exact ID 검증, 불일치 blocked·성공 표시 없음 | 예 |
+| U-048 | 메뉴바 시작 자동 복구 순서 | recovery 시도→profile 조회→read-only status 조회, stopped/throw도 상태 조회 뒤 fail-closed, 앱 launch 0회 | 예 |
 
 ## 6. Integration 테스트 매트릭스
 
@@ -203,6 +209,17 @@ Unit/Integration test는 실제 `~/.codex/auth.json`을 읽거나 쓰지 않는�
 | I-048 | 수동 복구 commit 뒤 앱 launch 실패 | exit 1과 `application_launch_unconfirmed`, previous active·auth와 journal 내구 삭제 보존 | 예 |
 | I-049 | journal unlink가 보이나 parent `fsync` 실패 | exit 1과 `recovery_uncertain`, durable phase/profile+auth-digest evidence 보존, registry/auth digest 불일치나 fsync 실패 시 blocked·mutation 0회; 모두 재검증 뒤에만 none | 예 |
 | I-050 | evidence 저장 뒤 journal unlink 전 중단 | 무관한 phase/profile은 blocked+양쪽 보존, exact 또는 `rollbackStarted` evidence/`rollbackFailed` journal 조합이면 status 선행 없이 공통 mutation gate가 cleanup 재개 | 예 |
+| I-051 | exact B 수동 로그인 뒤 재로그인 반영 | B credential·marker 해제·active ID를 순서대로 내구 저장, B 활성, journal 없음, 앱 launch 0회 | 예 |
+| I-052 | 재로그인 B identity mismatch | A credential·active ID 검증 복원, B 기존 저장본·marker 보존 | 예 |
+| I-053 | 재로그인 중 process 또는 recovery 존재 | verifier·credential·registry mutation 0회 | 예 |
+| I-054 | 재로그인 verifier 종료 미확인 | 첫 child 전 `validatingTarget` journal 존재, recovery pending, workspace-only 상태 없음 | 예 |
+| I-055 | refresh 응답 B 뒤 공용 auth file identity 변경 | B 저장본을 덮지 않고 A rollback, journal 정리 | 예 |
+| I-056 | 재로그인 journal finalization 불확실 | 자동 재시도·앱 launch 없음, restart 재조정이 exact B 상태에서만 recovery none | 예 |
+| I-057 | `targetVerified` 재시작, registry A 또는 B | exact B면 target commit 또는 중복 registry write 없는 finalization, 앱 launch 0회 | 예 |
+| I-058 | `validatingTarget` 재로그인 재시작 | 미저장 B와 저장·marker 해제 B를 구분해 A 복원, B의 검증 상태 보존, 앱 launch 0회 | 예 |
+| I-059 | `targetVerified` target mismatch와 불확실성 | typed `target-unverified`만 A rollback, process·registry race·verifier 종료 미확인은 STOP·unsafe write 0회 | 예 |
+| I-060 | phase/registry/marker 모순과 `rollbackFailed` | 모순은 상태 보존 STOP, terminal phase는 locator·workspace·auth·registry side effect 0회 | 예 |
+| I-061 | `refreshingCurrent` 복구 실패 | `rollbackStarted→rollbackFailed` 내구 기록, 다음 자동 복구는 terminal STOP | 예 |
 
 ## 7. 공식 앱 Black-box 매트릭스
 
@@ -226,6 +243,7 @@ Unit/Integration test는 실제 `~/.codex/auth.json`을 읽거나 쓰지 않는�
 | B-014 | post-launch 검증 transport | active copy의 isolated Helper verifier false, private IPC 0회 | STOP |
 | B-015 | C 등록 후 기존 active 복귀 | C 저장, 등록 시작 전 active 이메일 복원, A/B/C 보존 | 자동 롤백 또는 STOP |
 | B-016 | 세 프로필 수동 전환 | A→B→C→A 각 단계 이메일·UI active 일치 | 자동 롤백/FAIL |
+| B-017 | `needsRelogin` B 수동 재로그인 | 공식 앱 B 로그인·전체 종료 뒤 메뉴바 1회 확인, B active·marker 해제·앱 미실행 | A 자동 롤백 또는 STOP |
 
 ### 7.1 B-015~B-016 실행 절차
 
@@ -237,6 +255,18 @@ Unit/Integration test는 실제 `~/.codex/auth.json`을 읽거나 쓰지 않는�
 4. A/B/C profile ID·순서와 credential 보존 여부가 기준선 기대와 일치하는지 확인한다. 실제 이메일·인증 bytes·digest는 기록하지 않는다.
 
 실패 시 다음 단계로 진행하지 않는다. 자동 rollback이 검증되지 않으면 STOP하고 공식 앱을 다시 열지 않는다.
+
+### 7.2 B-017 실행 절차
+
+실제 인증 폐기가 필요한 사전조건은 전용 테스트 계정에서만 만든다. auth 원문을 수동 편집해 `needsRelogin` 상태를 위조하지 않는다.
+
+1. A active, B inactive·`needsRelogin`, recovery none을 확인한다.
+2. 공식 Codex 앱에서 B로 로그인한 뒤 앱과 독립 Codex CLI·IDE를 모두 정상 종료하고 process gate가 깨끗한지 확인한다.
+3. 메뉴바의 B 카드를 한 번 선택하고 재로그인 반영을 확인한다.
+4. B 하나만 active, B marker 해제, recovery none, 공식 앱 미실행을 확인한다.
+5. 공식 앱을 직접 열고 `account/read`가 B 이메일과 완전 일치하는지 확인한다.
+
+pending·blocked 또는 결과 불일치면 확인을 반복하지 않고 상태를 보존한다.
 
 ## 8. 동일 task 핵심 인수 시나리오
 
@@ -311,25 +341,28 @@ ID를 신뢰성 있게 관측할 수 없으면 실행하지 않고 INCONCLUSIVE/
 |---|---|---|---|
 | C-001 | `preparing` 전 | transaction 없음, active 불변 | PASS |
 | C-002 | `quitRequested` | process gate 재확인, auth mutation 없음 | PASS |
-| C-003 | `quiescent` | source identity 확인 후 journal durable delete·안전 취소 | PASS |
+| C-003 | `quiescent` | exact source는 안전 취소, exact target은 source rollback, 다른 신원·판독 불가는 STOP | PASS/STOP |
 | C-004 | `refreshingCurrent` durable, verifier 시작 전 | source refresh/save 또는 stored source 복원 후 안전 취소 | PASS |
 | C-005 | current true refresh 후, source store save 전 | source 이메일 확인 후 refresh/save 또는 stored source 복원, 그 뒤 안전 취소 | PASS |
 | C-006 | source store save 후, `currentSaved` 전 | round-trip·source 검증 후 안전 취소 | PASS |
-| C-007 | `currentSaved` | latest source를 active에 반영·검증 후 안전 취소 | PASS |
+| C-007 | `currentSaved` | exact source는 latest source 확인 뒤 안전 취소, exact target은 source rollback, 다른 신원·판독 불가는 STOP | PASS/STOP |
 | C-008 | `validatingTarget` durable, false 호출 전 | verifier 정리·source 검증·안전 취소, forward switch 없음 | PASS |
 | C-009 | target false 성공 후, true 호출 전 | verifier 정리·source 검증·안전 취소, forward switch 없음 | PASS |
 | C-010 | target true 성공 후, target store save 전 | active source 불변 확인·안전 취소, forward switch 없음 | PASS |
 | C-011 | target store save 후, `targetValidated` 전 | refreshed target 보존 가능, source 검증·안전 취소, forward switch 없음 | PASS |
 | C-012 | `targetValidated`, active replace 전 | source 확인 후 안전 취소 가능 | PASS |
 | C-013 | active replace 후, `authReplaced` journal 전 | actual active target 감지→source rollback | PASS |
-| C-014 | `authReplaced` | process gate 후 source 자동 롤백 | PASS |
-| C-015 | `targetLaunched`/`verifyingTarget` | target 앱 정상 종료 후 source 롤백 | PASS |
-| C-016 | `targetVerified`, registry commit 전 | isolated target 재검증 후 registry durable commit; 불명확하면 source rollback | PASS |
+| C-014 | `authReplaced` | process 실행 중이면 종료 없이 STOP, gate가 깨끗하면 source 롤백·앱 미실행 | PASS/STOP |
+| C-015 | `targetLaunched`/`verifyingTarget` | process 실행 중이면 종료 없이 STOP, 사용자가 종료한 뒤 source 롤백·앱 미실행 | PASS/STOP |
+| C-016 | `targetVerified`, registry commit 전 | exact target은 registry durable commit; typed `target-unverified`만 source rollback, process·registry race·verifier 종료 미확인·내구성 불확실은 STOP | PASS/STOP |
 | C-017 | registry commit 후 journal delete 전/중 | target·registry 재검증→journal unlink+parent fsync, 중복 launch/write 없음 | PASS |
 | C-018 | `rollbackStarted` 또는 rollback 설치 중 | source 복구·검증을 idempotent하게 완료하거나 `rollbackFailed` STOP | PASS/STOP |
 | C-019 | malformed/torn/unknown journal | 자동 삭제·추정 없이 STOP | PASS |
 | C-020 | journal과 active/registry 모순 | 해소 불가하면 STOP | PASS |
 | C-021 | macOS reboot after active replace | 앱 자동 실행 전에 recovery gate와 source rollback | PASS |
+| C-022 | 재로그인 `validatingTarget`, B 저장·marker 해제 전/후 | target 식별 뒤 A 복원, 검증된 B 상태 보존, 앱 launch 0회 | PASS |
+| C-023 | 재로그인 `targetVerified`, active ID commit 전/후 | exact B forward commit 또는 중복 write 없는 finalization; 불확실은 STOP | PASS/STOP |
+| C-024 | `refreshingCurrent` 복구 실패 뒤 재시작 | `rollbackFailed` terminal 유지, 자동 재시도 side effect 0회 | STOP |
 
 current refresh crash window에서는 refresh 실행 여부를 phase만으로 추측하지 않는다. 안전하면 기본 홈 Helper App Server의 true refresh와 configured-store save를 완료하고, 그렇지 않으면 마지막 durable source blob을 복원한다. 어느 분기든 source를 검증한 뒤 전환을 안전 취소한다. source 이메일 재검증까지 실패하면 `rollbackFailed`/STOP이며 성공 rollback으로 계산하지 않는다. crash recovery가 forward switch를 재개할 수 있는 유일한 정상 phase는 검증이 끝난 `targetVerified`다.
 
@@ -456,14 +489,14 @@ MVP는 최대 3개 계정을 노출하며 `personalAuth`, `workAuth` 같은 고�
 
 아래가 모두 충족되어야 한다.
 
-- 공식 앱 Black-box B-001~B-016 PASS
+- 공식 앱 Black-box B-001~B-017 PASS
 - process gate와 독립 CLI P-001~P-008 PASS 또는 P-008의 명시적 안전 조건 충족
-- Integration I-001~I-050 PASS
+- Integration I-001~I-061 PASS
 - 동일 task B-010: A→B→A 3회 연속 실제 메시지 PASS
 - 모든 전환에서 이메일 검증 PASS
 - secret exposure 0건
 
-기존 A/B CLI 실증에서 남은 형식 항목은 B-010의 §16 증거다. 3계정 MVP는 메뉴바 구현 뒤 B-015~B-016도 통과해야 한다. 개발 중 구조적 same-task 실패가 확인되면 아래 NO-GO를 즉시 적용한다. 현재 A/B 결과는 `04_spike_runbook.md` §18에 기록한다.
+기존 A/B CLI 실증에서 남은 형식 항목은 B-010의 §16 증거다. 3계정·재로그인 MVP는 메뉴바 구현 뒤 B-015~B-017도 통과해야 한다. 개발 중 구조적 same-task 실패가 확인되면 아래 NO-GO를 즉시 적용한다. 현재 A/B 결과는 `04_spike_runbook.md` §18에 기록한다.
 
 ### NO-GO — 제품 구현 중단
 
@@ -511,6 +544,7 @@ MVP는 최대 3개 계정을 노출하며 `personalAuth`, `workAuth` 같은 고�
 - 현재 Codex build의 update compatibility case PASS
 - A/B/C 최대 3계정 등록과 수동 switch UX PASS
 - 이미 활성 계정 클릭 시 no-op+창 활성화 PASS
+- `needsRelogin` 비활성 계정의 exact-ID 수동 재로그인 반영과 B 활성화 PASS
 - 앱 종료 확인 취소 시 mutation 0회
 - 제품 inactive profile auth가 Keychain에만 존재하고 persistent active auth file은 하나
 - 실제 인증정보가 저장소·로그·crash report에 0건
