@@ -1,6 +1,6 @@
 # 구현 인수인계
 
-- 상태: CLI Spike 검증 완료, 메뉴바 재로그인·시작 자동 복구·잔존 프로세스 2차 확인 slice 완료
+- 상태: CLI Spike 검증 완료, 메뉴바 재로그인·시작 자동 복구·잔존 프로세스 2차 확인·ad-hoc 소스 앱 설치·synthetic Keychain smoke 완료
 - 기준일: 2026-07-31
 - 코드: 저장소 루트 `.`
 - 중요: 외부 Terminal에서 A↔B 기능 왕복 3회, 수동 A 복구 2회, B-011 자동 롤백을 완료했다. B-010 형식 증거는 보존하지 않았으며 ADR-027에 따라 개발에는 수용하고 MVP 완료·배포 전 게이트로 유지한다.
@@ -21,7 +21,7 @@
 
 ```text
 `docs/00_README.md`부터 문서 세트를 읽고,
-ADR-027·ADR-029와 기존 안전 결정을 유지한 채 Step 9 메뉴바 MVP의 서명된 앱 실제 Keychain 검증과 잔존 프로세스 2차 확인 Black-box 검증을 진행해줘.
+ADR-027·ADR-029·ADR-030과 기존 안전 결정을 유지한 채 Step 9 메뉴바 MVP의 B-015~B-017 실계정·재부팅 복구와 잔존 프로세스 2차 확인 Black-box 검증을 진행해줘.
 검증된 CodexAccountCore를 재사용하고 먼저 배포 검증 성공 기준을 대조해.
 실제 auth.json 교체와 Codex 앱 종료는 외부 Terminal 실행 게이트 전까지 하지 마.
 ```
@@ -56,6 +56,8 @@ ADR-027·ADR-029와 기존 안전 결정을 유지한 채 Step 9 메뉴바 MVP�
 - inactive `needsRelogin` exact-ID 확인, B credential 갱신·marker 해제·B 활성화, 불확실 결과 재조정, 앱 수동 실행 안내 구현
 - 메뉴바 상태 조회 전 production startup recovery, STOP/terminal guard, 앱 자동 실행 금지 구현
 - 메뉴바 native 비동기 잔존 앱 프로세스 2차 확인, 취소 기본, 종료 전 exact snapshot 대상의 `SIGTERM` 1회 제한 구현
+- Command Line Tools 기반 release `.app` build, strict ad-hoc 서명, 고정 bundle ID와 LaunchAgent install/update/uninstall 구현
+- 번들·설치 실행파일의 random synthetic Keychain create/read/update/read/delete/notFound와 cleanup 통과; 제품 service·실제 auth 접근 0회
 - fake credential만 사용하는 128개 debug 테스트 통과
 - 실제 read-only inspect에서 사용자 auth와 helper store 무변경 확인
 - `rollbackFailed` 수동 복구 CLI와 실환경 A 복구 2회 완료
@@ -65,7 +67,7 @@ ADR-027·ADR-029와 기존 안전 결정을 유지한 채 Step 9 메뉴바 MVP�
 
 - 실제 재부팅 뒤 production startup recovery Black-box 검증
 - 실제 잔존 앱 프로세스 2차 확인 Black-box 검증
-- 서명된 앱의 실제 Keychain CRUD·접근 정책 검증
+- 실계정 제품 service Keychain flow, ad-hoc 재빌드 뒤 기존 item ACL, 잠금·접근 거부 정책 검증
 - B-015~B-017 세 프로필 전환·재로그인 실계정 Black-box 검증
 - MVP 완료·배포 전 `07_test_acceptance.md` §16 형식의 동일 task 왕복 증거 보존
 
@@ -328,7 +330,7 @@ cd codex-account-switcher-spike
 
 ADR-027의 개발 승인에 따라 시작한다. B-010 정식 증거 공백은 릴리스 게이트로 남긴다.
 
-현재 1~6과 실제 provider 주입·등록·활성 인증 동기화·durable phase 진행 표시·inactive target 재로그인, recovery mutation gate·시작 자동 복구·상세 표시·exact transaction/previous-profile 수동 복구까지 완료됐다. 실제 서명·Keychain 검증과 잔존 프로세스 2차 확인 Black-box 검증이 다음 작업이다.
+현재 1~6과 실제 provider 주입·등록·활성 인증 동기화·durable phase 진행 표시·inactive target 재로그인, recovery mutation gate·시작 자동 복구·상세 표시·exact transaction/previous-profile 수동 복구, ad-hoc 소스 앱 설치와 synthetic Keychain host smoke까지 완료됐다. 실계정 제품 flow·재부팅·잔존 프로세스 2차 확인·ad-hoc 재빌드 ACL Black-box 검증이 다음 작업이다.
 
 구현 순서:
 
@@ -352,10 +354,17 @@ credential backend slice의 완료 기준:
 
 - CLI는 `FileCredentialStore`를 명시적으로 사용하고 기존 `0700`/`0600` 저장 계약을 유지한다.
 - 제품 backend는 profile UUID를 account key로 쓰는 Keychain generic-password item만 사용한다.
-- Keychain item은 동기화하지 않고 `WhenUnlockedThisDeviceOnly` 접근성을 사용한다.
+- 제품 item은 사용자 기본 file-based Keychain을 사용한다. 일반 구성에서는 login Keychain이며 Data Protection Keychain과 명시적 accessibility option을 사용하지 않는다.
 - Keychain 접근 실패는 안전한 typed error로 중단되며 plaintext fallback이 없다.
 - credential load 실패 시 active auth, registry, capture marker가 바뀌지 않는다.
-- 실제 Keychain item과 서명 identity 검증은 서명된 앱 배포 검증에서 수행한다.
+- 현재 ad-hoc bundle과 설치 실행파일은 random synthetic item CRUD·cleanup을 검증했다. 제품 service·실제 auth와 update-safe signing identity는 아직 검증하지 않았다.
+
+source app packaging slice의 완료 기준:
+
+- `Scripts/build-app.sh`가 release executable을 `.build/CodexAccountSwitcher.app`으로 묶고 plist lint와 strict ad-hoc codesign을 통과한다.
+- `Scripts/install-app.sh`는 소유권이 확인된 `~/Applications/CodexAccountSwitcher.app`과 `~/Library/LaunchAgents/local.codex.account-switcher.plist`만 교체하고 exact process 실행을 확인한다.
+- `Scripts/uninstall-app.sh`는 앱과 LaunchAgent만 제거하며 Application Support, Keychain, logs를 보존한다.
+- ad-hoc 재빌드는 cdhash가 바뀔 수 있으므로 기존 Keychain item 접근을 update-safe로 과장하지 않는다.
 
 provider wiring slice의 완료 기준:
 

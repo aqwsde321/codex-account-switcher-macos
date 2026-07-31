@@ -1,6 +1,6 @@
 # 보안·복구 설계
 
-- 상태: Swift CLI Spike·manual recovery typed outcome·durable finalization gate·Keychain backend·메뉴바 provider/등록/활성 인증 sync/수동 복구/전환 진행/재로그인/잔존 프로세스 2차 확인 완료, 실 Keychain·배포 보안 검증 전
+- 상태: Swift CLI Spike·manual recovery typed outcome·durable finalization gate·Keychain backend·메뉴바 provider/등록/활성 인증 sync/수동 복구/전환 진행/재로그인/잔존 프로세스 2차 확인·ad-hoc 번들 synthetic Keychain CRUD 완료, 실계정·배포 보안 검증 전
 - 기준일: 2026-07-31
 - 적용 대상: Swift CLI Spike와 후속 macOS 메뉴바 앱
 
@@ -171,7 +171,7 @@ flowchart LR
 
 ### 제품
 
-- 저장 프로필의 인증 blob, 특히 비활성 프로필 인증은 macOS Keychain generic password item으로만 저장한다.
+- 저장 프로필의 인증 blob, 특히 비활성 프로필 인증은 사용자 기본 file-based macOS Keychain generic password item으로만 저장한다. 일반 구성에서는 login Keychain이며 Data Protection Keychain과 명시적 accessibility option을 사용하지 않는다.
 - Keychain service는 `CodexAccountSwitcher.credentials.v1`, item account key는 비밀이 아닌 profile UUID를 사용한다. service 변경은 기존 item migration 없이는 금지한다.
 - Keychain 접근 실패 시 fallback plaintext 저장을 만들지 않는다.
 - 평문 인증의 유일한 제품 예외는 현재 활성 계정 blob 하나를 materialize한 `~/.codex/auth.json`이다. 비활성 인증이나 추가 평문 백업을 만들지 않는다.
@@ -183,7 +183,7 @@ flowchart LR
 - 비활성 B 재로그인은 사용자가 공식 앱에서 B 로그인을 완료하고 모든 관련 프로세스를 종료한 뒤 exact profile ID 확인으로만 시작한다. 첫 verifier 전에 `validatingTarget`을 기록하고 공용 auth의 B identity·refresh·동일 file identity를 검증한 뒤에만 B Keychain item을 교체한다.
 - 재로그인 성공 경로는 A active를 유지한 registry에서 B marker를 먼저 해제하고 `targetVerified`를 내구 기록한 뒤 active ID를 B로 바꾼다. 성공 뒤 앱은 자동 실행하지 않는다. pending·blocked·wrong-ID outcome·내구 상태 불일치에서는 자동 재시도하지 않는다.
 - 공식 앱 재실행 후 검증은 공용 active auth를 임시 격리 홈에 복사해 `account/read(refreshToken: false)`를 호출한다. private Electron IPC에는 연결하지 않으며, 이 검증은 공용 active auth의 이메일만 직접 입증한다.
-- Developer ID 서명·공증은 배포 전 필수다. Keychain 접근 정책은 서명 identity가 바뀌었을 때 재검증한다.
+- Developer ID 서명·공증은 공개 바이너리 배포 단계의 후속 gate다. 현재 ad-hoc 소스 build는 random synthetic item의 현재-build CRUD만 입증하며, 서명 identity가 바뀐 뒤 기존 item 접근과 잠금·거부 정책은 별도 재검증한다.
 
 ## 6. 원자 교체 불변조건
 

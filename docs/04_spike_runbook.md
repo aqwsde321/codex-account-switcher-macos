@@ -7,7 +7,7 @@
 - 목적: 개인 계정 A와 회사 계정 B의 인증을 교체하면서 **동일한 Codex task를 양쪽 계정에서 실제로 이어갈 수 있는지** 검증
 - 실행 기준: 실제 CLI 명령은 `README.md`를 따른다. 이 문서의 `switcher ...` 표기는 설계 당시 예정 인터페이스이므로 실행하지 않는다.
 
-현재 구현된 명령은 `inspect`, `profiles list`, `profile capture`, `profile sync-active`, `switch`, `recovery status`, `recovery restore`다. debug build에는 B-011 실패 주입 명령도 포함된다. 메뉴바 앱은 등록·전환·수동 복구·재로그인·시작 자동 복구·잔존 프로세스 2차 확인 wiring까지 구현됐고, 실제 재부팅 복구, 실제 잔존 프로세스 확인 UI, 서명된 앱의 실제 Keychain 검증, B-017 실계정 재로그인은 미실행이다.
+현재 구현된 명령은 `inspect`, `profiles list`, `profile capture`, `profile sync-active`, `switch`, `recovery status`, `recovery restore`다. debug build에는 B-011 실패 주입 명령도 포함된다. 메뉴바 앱은 등록·전환·수동 복구·재로그인·시작 자동 복구·잔존 프로세스 2차 확인 wiring과 ad-hoc 소스 앱 build/install까지 구현됐다. 번들·설치 실행파일의 random synthetic Keychain CRUD와 cleanup은 통과했지만 실제 재부팅 복구, 잔존 프로세스 확인 UI, 실계정 제품 service Keychain flow, ad-hoc 재빌드 ACL, B-017 실계정 재로그인은 미실행이다.
 
 ## 1. 핵심 판정
 

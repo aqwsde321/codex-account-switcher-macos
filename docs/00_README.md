@@ -183,7 +183,8 @@ Swift CLI Core의 비파괴 기반 구현은 저장소 루트에 있다. 빌드�
 16. 완료: inactive `needsRelogin` exact-ID 확인, B credential 갱신·marker 해제·B 활성화, finalization/throw 재조정, 앱 수동 실행 안내
 17. 완료: 메뉴바 상태 조회 전 미완료 transaction 자동 복구, phase/registry/marker 모순 STOP, startup 앱 자동 실행 금지
 18. 완료: 메뉴바 native 잔존 앱 프로세스 2차 확인, 취소 기본, 종료 전 exact snapshot 대상의 `SIGTERM` 1회 제한
-19. 다음: 서명된 앱의 실제 Keychain 검증과 잔존 프로세스 2차 확인 Black-box 검증
+19. 완료: Command Line Tools 기반 ad-hoc `.app` build/install, LaunchAgent 실행, 번들·설치 실행파일의 random synthetic Keychain CRUD와 cleanup
+20. 다음: B-015~B-017 실계정, 재부팅 startup recovery, 잔존 프로세스 2차 확인, ad-hoc 재빌드 ACL Black-box 검증
 
 구현 상세와 각 단계 검증은 `08_implementation_handoff.md`에 있다.
 
@@ -191,8 +192,8 @@ Swift CLI Core의 비파괴 기반 구현은 저장소 루트에 있다. 빌드�
 
 ```text
 `docs/00_README.md`부터 연결된 문서를 읽어.
-`02_decision_record.md`의 ADR-027·ADR-029와 기존 안전 결정을 유지하고,
-`08_implementation_handoff.md` Step 9의 서명된 앱 실제 Keychain 검증과
+`02_decision_record.md`의 ADR-027·ADR-029·ADR-030과 기존 안전 결정을 유지하고,
+`08_implementation_handoff.md` Step 9의 B-015~B-017 실계정·재부팅 복구와
 잔존 프로세스 2차 확인 Black-box 검증을 진행해. 실제 Codex 앱 종료와
 auth.json 교체는 외부 Terminal 실행 게이트로 남겨둬. B-010 정식 증거는 릴리스 전 확보해.
 ```

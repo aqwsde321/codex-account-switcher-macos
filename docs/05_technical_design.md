@@ -1,6 +1,6 @@
 # 기술 설계
 
-- 상태: Swift CLI Spike 구현·실계정 기능 검증 완료, 메뉴바 재로그인·시작 자동 복구·잔존 프로세스 2차 확인 slice 완료
+- 상태: Swift CLI Spike 구현·실계정 기능 검증 완료, 메뉴바 재로그인·시작 자동 복구·잔존 프로세스 2차 확인·ad-hoc 소스 앱 설치·synthetic Keychain smoke 완료
 - 기준일: 2026-07-31
 - 구현 순서: 검증된 Core 재사용 → SwiftUI 메뉴바 앱 → 엄격한 릴리스 인수
 
@@ -29,7 +29,16 @@
 | 개발 도구 | Xcode Command Line Tools |
 | 전체 Xcode | 현재 active developer directory에는 없음 |
 
-Swift CLI Spike는 현재 환경에서 SwiftPM으로 빌드할 수 있다. `MenuBarExtra` 앱 번들 제작·서명·공증 단계에서는 전체 Xcode 설치가 필요할 수 있으므로 Phase 2 시작 전에 별도 점검한다.
+Swift CLI와 `MenuBarExtra` 소스 앱은 현재 환경에서 SwiftPM과 Command Line Tools만으로 빌드된다. `Scripts/build-app.sh`는 release 실행파일을 `.app`으로 묶어 strict ad-hoc 서명한다. 전체 Xcode, Developer ID 서명과 공증은 공개 바이너리 배포 단계에서만 재검토한다.
+
+| 소스 앱 배포 항목 | 값 |
+|---|---|
+| build 결과 | `.build/CodexAccountSwitcher.app` |
+| 설치 경로 | `~/Applications/CodexAccountSwitcher.app` |
+| bundle identifier | `local.codex.account-switcher` |
+| LaunchAgent label | `local.codex.account-switcher` |
+
+ad-hoc designated requirement는 현재 build의 cdhash에 묶인다. 코드 변경 뒤 기존 Keychain item 접근 확인 또는 거부가 발생할 수 있으므로 현재 경로는 update-safe signing identity를 보장하지 않는다.
 
 ### 공식 앱
 
@@ -159,7 +168,7 @@ path만 같다고 공식 앱으로 신뢰하지 않는다. bundle id와 서명 �
 구현:
 
 - Spike: private file store
-- 제품: macOS Keychain
+- 제품: 사용자 기본 file-based macOS Keychain generic-password item. 일반 구성에서는 login Keychain이며 Data Protection Keychain을 사용하지 않는다.
 
 ### `AtomicAuthFile`
 

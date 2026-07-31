@@ -93,7 +93,7 @@ Unit/Integration test는 실제 `~/.codex/auth.json`을 읽거나 쓰지 않는�
 - `SIGKILL` 없음
 - 독립 CLI/task 자동 종료 없음
 - 전환된 기본 auth는 이후 새로 시작하는 기본 Codex CLI에도 적용됨
-- CLI Spike 비활성 auth는 repo 밖 `0700` private directory의 `0600` file; 제품 MVP 비활성 auth는 Keychain
+- CLI Spike 비활성 auth는 repo 밖 `0700` private directory의 `0600` file; 제품 MVP 비활성 auth는 사용자 기본 file-based Keychain
 - 제품의 persistent 평문 active auth file은 `~/.codex/auth.json` 하나
 - 격리 verifier auth copy는 `0600` 임시 파일이며 verifier 종료 후 제거
 - 로그/journal에 token, cookie, JWT, 전체 auth, 실제 이메일, raw command line 없음
@@ -199,7 +199,7 @@ Unit/Integration test는 실제 `~/.codex/auth.json`을 읽거나 쓰지 않는�
 | I-037 | malformed/torn/unknown journal | 자동 삭제·복구 없이 STOP | 예 |
 | I-038 | 두 process가 같은 transaction 재개 | 단일 lock, 중복 rename/launch 없음 | 예 |
 | I-039 | 진단 error에 auth blob 포함 | persisted log에 민감값 0건 | 예 |
-| I-040 | credential backend 검사 | Spike는 private `0600` file store, 제품은 Keychain; backend 혼용 없음 | 예 |
+| I-040 | credential backend 검사 | Spike는 private `0600` file store, 제품은 사용자 기본 file-based Keychain; backend 혼용 없음 | 예 |
 | I-041 | current true refresh 도중 실패 | `rollbackStarted` durable→마지막 검증 source 복원·이메일 확인 | 예 |
 | I-042 | `currentSaved` 뒤 target validation 실패 | active source 유지 확인→registry previous→journal durable cleanup | 예 |
 | I-043 | `SIGTERM` 뒤 앱 소유 process 잔존 또는 identity 변경 | switch 차단, active auth unchanged | 예 |
@@ -221,6 +221,9 @@ Unit/Integration test는 실제 `~/.codex/auth.json`을 읽거나 쓰지 않는�
 | I-059 | `targetVerified` target mismatch와 불확실성 | typed `target-unverified`만 A rollback, process·registry race·verifier 종료 미확인은 STOP·unsafe write 0회 | 예 |
 | I-060 | phase/registry/marker 모순과 `rollbackFailed` | 모순은 상태 보존 STOP, terminal phase는 locator·workspace·auth·registry side effect 0회 | 예 |
 | I-061 | `refreshingCurrent` 복구 실패 | `rollbackStarted→rollbackFailed` 내구 기록, 다음 자동 복구는 terminal STOP | 예 |
+| I-062 | 번들 Keychain host smoke | exact ad-hoc bundled executable이 random service/profile의 synthetic blob을 create→read→update→read→delete→notFound; cleanup 성공, 제품 service·실제 auth 접근 0회 | 예 |
+
+I-062는 custom debug harness 128개와 별도의 host integration smoke다. 현재 build bundle과 `~/Applications` 설치본에서 각각 통과했지만, ad-hoc 재빌드 뒤 기존 item ACL·잠금·접근 거부·실계정 제품 flow는 입증하지 않는다.
 
 ## 7. 공식 앱 Black-box 매트릭스
 
@@ -451,7 +454,7 @@ MVP는 최대 3개 계정을 노출하며 `personalAuth`, `workAuth` 같은 고�
 | S-008 | journal snapshot | 고정 7필드만 존재; build/email/secret 없음 |
 | S-009 | UI error | 실제 token·auth JSON 미노출 |
 | S-010 | screenshot evidence | 이메일/다른 task/sidebar 내용 마스킹 |
-| S-011 | credential storage | Spike private store는 `0700`/`0600`; 제품 inactive auth는 Keychain이고 persistent active 평문은 하나 |
+| S-011 | credential storage | Spike private store는 `0700`/`0600`; 제품 inactive auth는 사용자 기본 file-based Keychain이고 persistent active 평문은 하나 |
 | S-012 | working directory 표시 | UI에는 필요 범위만, persisted log에는 민감 경로 없음 |
 | S-013 | journal/registry atomic temp | same directory, mode `0600`, file·parent fsync 계약 준수 |
 | S-014 | isolated verifier cleanup | transient auth copy와 임시 홈 제거, private IPC 사용 0회 |
@@ -492,7 +495,7 @@ MVP는 최대 3개 계정을 노출하며 `personalAuth`, `workAuth` 같은 고�
 
 - 공식 앱 Black-box B-001~B-017 PASS
 - process gate와 독립 CLI P-001~P-008 PASS 또는 P-008의 명시적 안전 조건 충족
-- Integration I-001~I-061 PASS
+- Integration I-001~I-062 PASS
 - 동일 task B-010: A→B→A 3회 연속 실제 메시지 PASS
 - 모든 전환에서 이메일 검증 PASS
 - secret exposure 0건

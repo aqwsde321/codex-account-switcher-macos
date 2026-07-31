@@ -1,6 +1,6 @@
 # Codex Account Switcher Spike
 
-개인·회사 ChatGPT 로그인의 Codex 인증 전환 가능성을 검증하기 위한 macOS Swift CLI Core다.
+개인·회사 ChatGPT 로그인의 Codex 인증 전환 가능성을 검증하기 위한 macOS Swift CLI Core와 메뉴바 앱이다.
 
 > 비공식 개인 Spike다. OpenAI의 공식 제품이나 지원 도구가 아니다.
 
@@ -36,10 +36,12 @@
 - 메뉴바 `needsRelogin` 비활성 카드의 exact-ID 확인, 검증된 저장본 갱신, 대상 즉시 활성화, 불확실 상태 재시도 차단
 - 메뉴바 상태 조회 전 미완료 journal 자동 복구, 불확실 상태 STOP, 복구 중 앱 자동 실행 금지
 - 메뉴바의 native 비동기 잔존 앱 프로세스 2차 확인, 취소 기본, 종료 전 exact snapshot 대상에만 `SIGTERM` 1회
+- Command Line Tools만으로 만드는 ad-hoc 서명 `.app`, 고정 경로 설치·LaunchAgent 자동 실행·보존형 제거
+- 번들·설치 실행파일의 random synthetic Keychain create/read/update/read/delete/notFound smoke; 제품 service·실제 auth 접근 0회
 
 아직 구현·노출하지 않음:
 
-- 서명된 앱의 실제 Keychain CRUD·접근 정책 검증
+- 실계정 제품 flow의 Keychain 검증, ad-hoc 재빌드 ACL과 잠금·접근 거부 정책 검증
 - 5시간·주간 사용량 표시
 
 capture 명령은 앱을 자동 종료하지 않는다. 첫 capture는 현재 인증을 갱신·저장한다. 추가 capture는 새 계정을 저장한 뒤 `~/.codex/auth.json`을 등록 전 활성 프로필로 원자 복구하고 ChatGPT 앱을 해당 계정으로 다시 실행한다. 모든 auth 변경은 외부 Terminal의 대화형 확인과 process gate 뒤에만 수행한다.
@@ -51,7 +53,11 @@ capture 명령은 앱을 자동 종료하지 않는다. 첫 capture는 현재 �
 ```sh
 ./Scripts/dev.sh build
 ./Scripts/dev.sh test
+./Scripts/build-app.sh
+./Scripts/install-app.sh
 ```
+
+`install-app.sh`는 `~/Applications/CodexAccountSwitcher.app`과 `~/Library/LaunchAgents/local.codex.account-switcher.plist`만 소유권 확인 후 교체한다. 제거는 `./Scripts/uninstall-app.sh`이며 Application Support, Keychain, 로그는 보존한다. 현재 ad-hoc 서명은 코드 변경 뒤 기존 Keychain item 접근 확인 또는 거부가 발생할 수 있으므로 update-safe identity로 간주하지 않는다.
 
 다른 Mac에서 SDK를 직접 지정하는 예:
 
