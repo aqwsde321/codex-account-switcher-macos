@@ -11,6 +11,8 @@ public struct CodexAppDescriptor: Equatable, Sendable {
     public let build: String
     public let appSigningIdentifier: String
     public let bundledCodexSigningIdentifier: String
+    public let crashpadExecutableURL: URL
+    public let crashpadSigningIdentifier: String
     public let teamIdentifier: String
 
     public init(
@@ -22,6 +24,8 @@ public struct CodexAppDescriptor: Equatable, Sendable {
         build: String,
         appSigningIdentifier: String,
         bundledCodexSigningIdentifier: String,
+        crashpadExecutableURL: URL? = nil,
+        crashpadSigningIdentifier: String = "browser_crashpad_handler",
         teamIdentifier: String
     ) {
         self.bundleURL = bundleURL
@@ -32,6 +36,13 @@ public struct CodexAppDescriptor: Equatable, Sendable {
         self.build = build
         self.appSigningIdentifier = appSigningIdentifier
         self.bundledCodexSigningIdentifier = bundledCodexSigningIdentifier
+        self.crashpadExecutableURL = crashpadExecutableURL ?? bundleURL
+            .appendingPathComponent(
+                "Contents/Frameworks/Codex Framework.framework/Versions/Current/Helpers/browser_crashpad_handler"
+            )
+            .resolvingSymlinksInPath()
+            .standardizedFileURL
+        self.crashpadSigningIdentifier = crashpadSigningIdentifier
         self.teamIdentifier = teamIdentifier
     }
 }
@@ -97,21 +108,31 @@ private extension CodexAppLocator {
         }
         let bundledCodexURL = bundleURL
             .appendingPathComponent("Contents/Resources/codex", isDirectory: false)
+        let crashpadExecutableURL = canonicalURL(
+            bundleURL.appendingPathComponent(
+                "Contents/Frameworks/Codex Framework.framework/Versions/Current/Helpers/browser_crashpad_handler"
+            )
+        )
         guard isExecutableRegularFile(mainExecutableURL),
               isExecutableRegularFile(bundledCodexURL),
+              isExecutableRegularFile(crashpadExecutableURL),
               isInside(mainExecutableURL, root: bundleURL),
-              isInside(bundledCodexURL, root: bundleURL) else {
+              isInside(bundledCodexURL, root: bundleURL),
+              isInside(crashpadExecutableURL, root: bundleURL) else {
             throw CodexAppLocatorFailure.invalidExecutable
         }
 
         let appSignature = try signature(of: bundleURL)
         let codexSignature = try signature(of: bundledCodexURL)
+        let crashpadSignature = try signature(of: crashpadExecutableURL)
         guard appSignature.identifier == Self.officialBundleIdentifier,
-              codexSignature.identifier == "codex" else {
+              codexSignature.identifier == "codex",
+              crashpadSignature.identifier == "browser_crashpad_handler" else {
             throw CodexAppLocatorFailure.invalidSignature
         }
         guard appSignature.teamIdentifier == Self.observedOfficialTeamIdentifier,
-              codexSignature.teamIdentifier == appSignature.teamIdentifier else {
+              codexSignature.teamIdentifier == appSignature.teamIdentifier,
+              crashpadSignature.teamIdentifier == appSignature.teamIdentifier else {
             throw CodexAppLocatorFailure.unexpectedSigner
         }
 
@@ -124,6 +145,8 @@ private extension CodexAppLocator {
             build: build,
             appSigningIdentifier: appSignature.identifier,
             bundledCodexSigningIdentifier: codexSignature.identifier,
+            crashpadExecutableURL: crashpadExecutableURL,
+            crashpadSigningIdentifier: crashpadSignature.identifier,
             teamIdentifier: appSignature.teamIdentifier
         )
     }

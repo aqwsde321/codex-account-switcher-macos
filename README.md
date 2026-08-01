@@ -113,7 +113,7 @@ cd codex-account-switcher-spike
 
 성공 결과는 등록 전 프로필 `active=true`, 새 프로필 `active=false`, `recovery=none`이다. ChatGPT 앱은 등록 전 활성 계정으로 다시 열린다.
 
-프롬프트에 `CAPTURE`를 입력해야 진행한다. 현재 검증된 ChatGPT 앱은 `26.721.41059`/`5848`, `26.721.81911`/`5973`, `26.727.51351`/`6119`이다. `application=incompatible`, `process_blocked`, 다른 build는 hard gate다. `account_already_registered`면 미등록 계정 로그인부터 다시 한다. `profile_already_exists`면 3개 상한에 도달한 상태다. `rollback_failed`, `recovery=pending`, `recovery=blocked`면 재실행하지 말고 상태를 보존한다.
+프롬프트에 `CAPTURE`를 입력해야 진행한다. 앱 version/build 변경 자체는 hard gate가 아니다. 공식 bundle과 app·bundled CLI·현재 Crashpad의 정적 서명, 번들 내부 canonical 경로, 실행 중 Crashpad의 exact path·서명이 모두 맞아야 진행한다. `application=incompatible`, `process_blocked`면 중단한다. `account_already_registered`면 미등록 계정 로그인부터 다시 한다. `profile_already_exists`면 3개 상한에 도달한 상태다. `rollback_failed`, `recovery=pending`, `recovery=blocked`면 재실행하지 말고 상태를 보존한다.
 
 ### 수동 A 재로그인 후 저장본 동기화
 

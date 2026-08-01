@@ -59,26 +59,29 @@ public struct ApprovedResidentRule: Equatable, Sendable {
         guard descriptor.bundleIdentifier == CodexAppLocator.officialBundleIdentifier,
               descriptor.appSigningIdentifier == CodexAppLocator.officialBundleIdentifier,
               descriptor.bundledCodexSigningIdentifier == "codex",
+              descriptor.crashpadSigningIdentifier == "browser_crashpad_handler",
               descriptor.teamIdentifier == CodexAppLocator.observedOfficialTeamIdentifier else {
             return nil
         }
-        let frameworkVersion: String? = switch (descriptor.version, descriptor.build) {
-        case ("26.721.41059", "5848"), ("26.721.81911", "5973"):
-            "150.0.7871.128"
-        case ("26.727.51351", "6119"):
-            "150.0.7871.182"
-        default:
-            nil
-        }
-        guard let frameworkVersion else {
+        let bundleURL = descriptor.bundleURL.resolvingSymlinksInPath().standardizedFileURL
+        let executableURL = descriptor.crashpadExecutableURL
+            .resolvingSymlinksInPath()
+            .standardizedFileURL
+        let bundleComponents = bundleURL.pathComponents
+        let executableComponents = executableURL.pathComponents
+        let relativeComponents = Array(executableComponents.dropFirst(bundleComponents.count))
+        guard relativeComponents.count == 7,
+              Array(executableComponents.prefix(bundleComponents.count)) == bundleComponents,
+              relativeComponents[0] == "Contents",
+              relativeComponents[1] == "Frameworks",
+              relativeComponents[2] == "Codex Framework.framework",
+              relativeComponents[3] == "Versions",
+              relativeComponents[5] == "Helpers",
+              relativeComponents[6] == "browser_crashpad_handler" else {
             return nil
         }
         return ApprovedResidentRule(
-            executablePath: descriptor.bundleURL
-                .appendingPathComponent(
-                    "Contents/Frameworks/Codex Framework.framework/Versions/\(frameworkVersion)/Helpers/browser_crashpad_handler"
-                )
-                .path,
+            executablePath: executableURL.path,
             name: "browser_crashpad_handler",
             signingIdentifier: "browser_crashpad_handler",
             teamIdentifier: descriptor.teamIdentifier

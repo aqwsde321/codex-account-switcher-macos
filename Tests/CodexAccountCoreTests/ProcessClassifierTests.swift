@@ -81,93 +81,61 @@ func processClassifierTests() -> [TestCase] {
                 "duplicate PID records were not classified fail-closed"
             )
         },
-        TestCase("ApprovedResidentRule pins the validated Codex crashpad build") {
-            let current = CodexAppDescriptor(
-                bundleURL: URL(fileURLWithPath: "/Applications/ChatGPT.app", isDirectory: true),
-                mainExecutableURL: URL(fileURLWithPath: "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT"),
-                bundledCodexURL: URL(fileURLWithPath: "/Applications/ChatGPT.app/Contents/Resources/codex"),
-                bundleIdentifier: "com.openai.codex",
-                version: "26.721.41059",
-                build: "5848",
-                appSigningIdentifier: "com.openai.codex",
-                bundledCodexSigningIdentifier: "codex",
-                teamIdentifier: "2DC432GLL2"
-            )
-            let changedBuild = CodexAppDescriptor(
-                bundleURL: current.bundleURL,
-                mainExecutableURL: current.mainExecutableURL,
-                bundledCodexURL: current.bundledCodexURL,
-                bundleIdentifier: current.bundleIdentifier,
-                version: current.version,
-                build: "5849",
-                appSigningIdentifier: current.appSigningIdentifier,
-                bundledCodexSigningIdentifier: current.bundledCodexSigningIdentifier,
-                teamIdentifier: current.teamIdentifier
-            )
-            let updated = CodexAppDescriptor(
-                bundleURL: current.bundleURL,
-                mainExecutableURL: current.mainExecutableURL,
-                bundledCodexURL: current.bundledCodexURL,
-                bundleIdentifier: current.bundleIdentifier,
-                version: "26.721.81911",
-                build: "5973",
-                appSigningIdentifier: current.appSigningIdentifier,
-                bundledCodexSigningIdentifier: current.bundledCodexSigningIdentifier,
-                teamIdentifier: current.teamIdentifier
-            )
-            let latest = CodexAppDescriptor(
-                bundleURL: current.bundleURL,
-                mainExecutableURL: current.mainExecutableURL,
-                bundledCodexURL: current.bundledCodexURL,
-                bundleIdentifier: current.bundleIdentifier,
-                version: "26.727.51351",
-                build: "6119",
-                appSigningIdentifier: current.appSigningIdentifier,
-                bundledCodexSigningIdentifier: current.bundledCodexSigningIdentifier,
-                teamIdentifier: current.teamIdentifier
-            )
-            let unexpectedLatestBuild = CodexAppDescriptor(
-                bundleURL: latest.bundleURL,
-                mainExecutableURL: latest.mainExecutableURL,
-                bundledCodexURL: latest.bundledCodexURL,
-                bundleIdentifier: latest.bundleIdentifier,
-                version: latest.version,
-                build: "6120",
-                appSigningIdentifier: latest.appSigningIdentifier,
-                bundledCodexSigningIdentifier: latest.bundledCodexSigningIdentifier,
-                teamIdentifier: latest.teamIdentifier
-            )
+        TestCase("ApprovedResidentRule resolves future Codex crashpad builds inside the signed bundle") {
+            try withCrashpadFixture(frameworkVersion: "999.0.1") { bundleURL, helperURL, currentURL, rootURL in
+                func futureDescriptor(
+                    crashpadSigningIdentifier: String = "browser_crashpad_handler"
+                ) -> CodexAppDescriptor {
+                    CodexAppDescriptor(
+                        bundleURL: bundleURL,
+                        mainExecutableURL: bundleURL.appendingPathComponent("Contents/MacOS/ChatGPT"),
+                        bundledCodexURL: bundleURL.appendingPathComponent("Contents/Resources/codex"),
+                        bundleIdentifier: "com.openai.codex",
+                        version: "99.999.99999",
+                        build: "9999",
+                        appSigningIdentifier: "com.openai.codex",
+                        bundledCodexSigningIdentifier: "codex",
+                        crashpadSigningIdentifier: crashpadSigningIdentifier,
+                        teamIdentifier: "2DC432GLL2"
+                    )
+                }
+                let future = futureDescriptor()
+                let expected = ApprovedResidentRule(
+                    executablePath: helperURL.path,
+                    name: "browser_crashpad_handler",
+                    signingIdentifier: "browser_crashpad_handler",
+                    teamIdentifier: "2DC432GLL2"
+                )
 
-            try expect(
-                ApprovedResidentRule.codexCrashpad(for: current) == ApprovedResidentRule(
-                    executablePath: "/Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/150.0.7871.128/Helpers/browser_crashpad_handler",
-                    name: "browser_crashpad_handler",
-                    signingIdentifier: "browser_crashpad_handler",
-                    teamIdentifier: "2DC432GLL2"
-                ),
-                "validated crashpad rule did not match the observed signed executable"
-            )
-            try expect(
-                ApprovedResidentRule.codexCrashpad(for: updated) != nil,
-                "validated updated app build was rejected"
-            )
-            try expect(
-                ApprovedResidentRule.codexCrashpad(for: latest) == ApprovedResidentRule(
-                    executablePath: "/Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/150.0.7871.182/Helpers/browser_crashpad_handler",
-                    name: "browser_crashpad_handler",
-                    signingIdentifier: "browser_crashpad_handler",
-                    teamIdentifier: "2DC432GLL2"
-                ),
-                "validated latest app build was rejected"
-            )
-            try expect(
-                ApprovedResidentRule.codexCrashpad(for: changedBuild) == nil,
-                "unvalidated app build inherited the crashpad approval"
-            )
-            try expect(
-                ApprovedResidentRule.codexCrashpad(for: unexpectedLatestBuild) == nil,
-                "unvalidated latest app build inherited the crashpad approval"
-            )
+                try expect(
+                    ApprovedResidentRule.codexCrashpad(for: future) == expected,
+                    "official future app build was rejected only because its build number was unknown"
+                )
+                try expect(
+                    ApprovedResidentRule.codexCrashpad(
+                        for: futureDescriptor(crashpadSigningIdentifier: "other")
+                    ) == nil,
+                    "crashpad with an unexpected signing identifier was approved"
+                )
+
+                let outsideVersionURL = rootURL.appendingPathComponent("OutsideVersion", isDirectory: true)
+                let outsideHelperURL = outsideVersionURL
+                    .appendingPathComponent("Helpers/browser_crashpad_handler")
+                try makeExecutableFixture(at: outsideHelperURL)
+                try FileManager.default.removeItem(at: currentURL)
+                try FileManager.default.createSymbolicLink(
+                    atPath: currentURL.path,
+                    withDestinationPath: outsideVersionURL.path
+                )
+                try expect(
+                    ApprovedResidentRule.codexCrashpad(for: future) == expected,
+                    "a validated descriptor followed a later Current symlink change"
+                )
+                try expect(
+                    ApprovedResidentRule.codexCrashpad(for: futureDescriptor()) == nil,
+                    "crashpad symlink escaping the signed bundle was approved"
+                )
+            }
         },
         TestCase("ProcessClassifier approves only the exact signed resident tuple") {
             let path = "/Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/150.0.7871.128/Helpers/browser_crashpad_handler"
@@ -267,4 +235,44 @@ func processClassifierTests() -> [TestCase] {
             try expect(!inventory.authMutationAllowed, "unresolved crashpad resident allowed mutation")
         },
     ]
+}
+
+private func withCrashpadFixture(
+    frameworkVersion: String,
+    _ body: (URL, URL, URL, URL) throws -> Void
+) throws {
+    let rootURL = FileManager.default.temporaryDirectory
+        .appendingPathComponent("codex-crashpad-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: rootURL) }
+
+    let bundleURL = rootURL.appendingPathComponent("ChatGPT.app", isDirectory: true)
+    let versionsURL = bundleURL.appendingPathComponent(
+        "Contents/Frameworks/Codex Framework.framework/Versions",
+        isDirectory: true
+    )
+    let helperURL = versionsURL
+        .appendingPathComponent(frameworkVersion, isDirectory: true)
+        .appendingPathComponent("Helpers/browser_crashpad_handler")
+    try makeExecutableFixture(at: helperURL)
+
+    let currentURL = versionsURL.appendingPathComponent("Current")
+    try FileManager.default.createSymbolicLink(
+        atPath: currentURL.path,
+        withDestinationPath: frameworkVersion
+    )
+    try body(bundleURL, helperURL, currentURL, rootURL)
+}
+
+private func makeExecutableFixture(at url: URL) throws {
+    try FileManager.default.createDirectory(
+        at: url.deletingLastPathComponent(),
+        withIntermediateDirectories: true
+    )
+    guard FileManager.default.createFile(atPath: url.path, contents: Data()) else {
+        throw CocoaError(.fileWriteUnknown)
+    }
+    try FileManager.default.setAttributes(
+        [.posixPermissions: 0o755],
+        ofItemAtPath: url.path
+    )
 }

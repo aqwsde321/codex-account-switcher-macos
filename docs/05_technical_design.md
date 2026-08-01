@@ -378,7 +378,7 @@ process argument나 environment는 읽거나 기록하지 않는다.
 6. `independentCodex`: basename `codex`이면서 앱 ancestry/helper-owned가 아님
 7. `unclassifiedRelevant`: Codex bundle path 또는 알려진 관련 이름이지만 안전 분류 불가
 
-blocker 집합은 `approvedNonAuthResident`를 제외한 `appRoot`, `appOwned`, `bundledAppServer`, `independentCodex`, `unclassifiedRelevant`다. 현재 세 허용 build의 exact path·name·signing identifier·Team ID가 일치하는 crashpad만 `approvedNonAuthResident`다.
+blocker 집합은 `approvedNonAuthResident`를 제외한 `appRoot`, `appOwned`, `bundledAppServer`, `independentCodex`, `unclassifiedRelevant`다. 앱 검사 시 `Versions/Current`를 canonicalize한 bundle 내부 regular executable의 정적 서명을 검증해 경로를 고정한다. 실행 중인 crashpad가 그 exact path·name·signing identifier·Team ID와 일치할 때만 `approvedNonAuthResident`다. version/build 번호는 판정에 쓰지 않는다.
 
 ### 종료 알고리즘
 
@@ -401,7 +401,7 @@ Spike에서 다음을 확인했다.
 - auth 파일 open/write 여부
 - 앱 재실행과 무관한 crash reporter인지
 
-실증을 통과한 exact signed bundle path·executable name·signing identifier·Team ID 조합만 `approvedNonAuthResident` allow-list에 포함한다. 이 분류는 blocker 집합 계산 전에 적용하며 다른 crashpad 경로, 서명 불일치, 다른 reparent process에는 적용하지 않는다.
+현재 공식 bundle에서 canonicalize하고 정적 서명을 검증한 Crashpad의 exact path·executable name·signing identifier·Team ID 조합만 `approvedNonAuthResident` allow-list에 포함한다. 이 분류는 blocker 집합 계산 전에 적용하며 bundle 밖으로 나가는 symlink, 다른 crashpad 경로, 서명 불일치, 다른 reparent process에는 적용하지 않는다.
 
 ## 8. 전환 transaction
 

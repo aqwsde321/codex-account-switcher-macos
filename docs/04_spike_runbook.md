@@ -211,7 +211,7 @@ JWT를 디코딩하거나 token field를 로그에 출력해 신원을 추정하
 - working directory(사용자에게만 표시; 진단 로그에는 민감 경로를 남기지 않음)
 - helper가 직접 띄운 verifier PID
 
-현재 세 허용 build의 exact signed bundle path·executable name·signing identifier·Team ID가 모두 맞는 `browser_crashpad_handler`만 `approvedNonAuthResident`로 **blocker 집합 계산 전에** 제외한다. 하나라도 다르면 차단한다. helper 소유의 단기 verifier가 있다면 명시적으로 닫고 PID 종료를 확인한다.
+앱 검사 시 `Versions/Current`를 해석한 canonical 경로가 bundle 내부의 regular executable이고 정적 서명이 공식 Team ID와 일치해야 한다. 실행 중인 `browser_crashpad_handler`도 그 exact path·name·signing identifier·Team ID가 모두 맞을 때만 `approvedNonAuthResident`로 **blocker 집합 계산 전에** 제외한다. version/build 번호 자체는 판정에 쓰지 않으며 하나라도 다르면 차단한다. helper 소유의 단기 verifier가 있다면 명시적으로 닫고 PID 종료를 확인한다.
 
 ### 독립 CLI/task
 

@@ -58,7 +58,7 @@ ADR-027·ADR-029·ADR-030과 기존 안전 결정을 유지한 채 Step 9 메뉴
 - 메뉴바 native 비동기 잔존 앱 프로세스 2차 확인, 취소 기본, 종료 전 exact snapshot 대상의 `SIGTERM` 1회 제한 구현
 - Command Line Tools 기반 release `.app` build, strict ad-hoc 서명, 고정 bundle ID와 LaunchAgent install/update/uninstall 구현
 - 번들·설치 실행파일의 random synthetic Keychain create/read/update/read/delete/notFound와 cleanup 통과; 제품 service·실제 auth 접근 0회
-- fake credential만 사용하는 129개 debug 테스트 통과
+- fake credential만 사용하는 130개 debug 테스트 통과
 - 실제 read-only inspect에서 사용자 auth와 helper store 무변경 확인
 - `rollbackFailed` 수동 복구 CLI와 실환경 A 복구 2회 완료
 - debug 전용 B-011 실패 주입에서 source 자동 롤백과 최종 A 복귀 확인
@@ -71,7 +71,7 @@ ADR-027·ADR-029·ADR-030과 기존 안전 결정을 유지한 채 Step 9 메뉴
 - B-015~B-017 세 프로필 전환·재로그인 실계정 Black-box 검증
 - MVP 완료·배포 전 `07_test_acceptance.md` §16 형식의 동일 task 왕복 증거 보존
 
-허용 build는 `/Applications/ChatGPT.app` `26.721.41059`/`5848`, `26.721.81911`/`5973`, `26.727.51351`/`6119`이다. 현재 설치된 `26.727.51351`/`6119`는 signature/build gate, read-only process 검증, 빈 임시 홈의 App Server `initialize`·`account/read(false)`를 통과해 `application=ready`다. 이 build의 auth-changing 명령 실검증은 아직 완료하지 않았다.
+version/build 번호는 호환성 hard gate가 아니다. 앱 검사 시 `Versions/Current` Crashpad를 canonicalize해 bundle 내부 regular executable과 정적 OpenAI 서명을 확인하고, 실행 process의 exact path·서명도 다시 확인한다. 현재 설치된 `26.727.51351`/`6119`는 이 검사, read-only process 검증, 빈 임시 홈의 App Server `initialize`·`account/read(false)`, 첫 계정 등록을 통과했다. 실제 계정 전환·rollback은 아직 완료하지 않았다.
 
 재개 명령과 구현 범위는 루트 `README.md`를 먼저 읽는다.
 

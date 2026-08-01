@@ -333,7 +333,7 @@ ID를 신뢰성 있게 관측할 수 없으면 실행하지 않고 INCONCLUSIVE/
 | P-005 | helper가 띄운 verifier 종료 중 | 소유 PID만 정상 정리, 다른 process 불변 | 예 |
 | P-006 | 분류 불가능한 `codex` process | 안전 차단 | 예 |
 | P-007 | Codex와 무관한 유사 이름 process | false positive 없이 진행 | 예 |
-| P-008 | PPID 1의 bundle 내부 `browser_crashpad_handler`만 잔존 | 현재 허용 build의 exact path·name·signing identifier·Team ID가 모두 맞으면 진행, 아니면 STOP | 예 |
+| P-008 | PPID 1의 bundle 내부 `browser_crashpad_handler`만 잔존 | `Versions/Current`의 canonical bundle 내부 regular executable 및 정적 서명이 유효하고 실행 process의 exact path·name·signing identifier·Team ID가 모두 맞으면 진행, 아니면 STOP | 예 |
 
 어떤 case에서도 `kill -9`, 독립 process, 분류 불명 process 자동 종료를 PASS 방법으로 사용하지 않는다.
 
