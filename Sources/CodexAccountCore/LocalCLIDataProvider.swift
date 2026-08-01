@@ -2281,7 +2281,8 @@ private extension LocalCLIDataProvider {
     func validatedCredential(
         _ credential: CredentialBlob,
         expectedEmail: String,
-        descriptor: CodexAppDescriptor
+        descriptor: CodexAppDescriptor,
+        refreshToken: Bool = false
     ) async throws -> CredentialBlob {
         let homeURL = credentialVerificationHomeURL
         try createVerificationHome(homeURL)
@@ -2296,7 +2297,8 @@ private extension LocalCLIDataProvider {
                 expectedEmail: expectedEmail,
                 account: try await probeAccount(
                     descriptor: descriptor,
-                    codexHomeURL: homeURL
+                    codexHomeURL: homeURL,
+                    refreshToken: refreshToken
                 )
             )
             let credential = try CredentialBlob(validating: files.read(at: authURL).contents.data)
@@ -2363,12 +2365,17 @@ private extension LocalCLIDataProvider {
                   let previous = originalRegistry.profiles.first(where: { $0.id == previousProfileID }) else {
                 throw LocalCLIDataProviderFailure.rollbackUnavailable
             }
-            let previousCredential = try credentialStore.loadCredential(for: previous.id)
-            _ = try await validatedCredential(
-                previousCredential,
+            let previousCredential = try await validatedCredential(
+                credentialStore.loadCredential(for: previous.id),
                 expectedEmail: previous.email,
-                descriptor: descriptor
+                descriptor: descriptor,
+                refreshToken: true
             )
+            try await requireMutationGate(for: descriptor)
+            try credentialStore.saveCredential(previousCredential, for: previous.id)
+            guard try credentialStore.loadCredential(for: previous.id) == previousCredential else {
+                throw LocalCLIDataProviderFailure.credentialRoundTripFailed
+            }
             try await requireMutationGate(for: descriptor)
             let current = try files.snapshot(at: activeAuthURL)
             guard let expectedIdentity = capturedAuthIdentity ?? originalAuthIdentity,

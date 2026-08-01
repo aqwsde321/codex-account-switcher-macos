@@ -4,7 +4,7 @@
 - 구현 상태: 최대 3개 프로필 Core/CLI, 수동 복구 typed outcome, `MenuBarExtra` 재로그인·시작 자동 복구·잔존 프로세스 2차 확인 slice 완료
 - 실제 검증: A↔B 기능 왕복 3회, 수동 A 복구 2회, B-011 자동 롤백 PASS
 - 제품 단계: ADR-027에 따라 `MenuBarExtra` MVP 개발 승인
-- 마지막 조사일: 2026-07-31
+- 마지막 조사일: 2026-08-01
 
 ## 1. 결론
 
@@ -32,6 +32,7 @@
 | [06_security_and_recovery.md](06_security_and_recovery.md) | 위협 모델, 비밀 저장, 원자성, 실패별 복구 | auth 관련 코드 구현·리뷰 전 |
 | [07_test_acceptance.md](07_test_acceptance.md) | Unit/Integration/Black-box 테스트와 Go/No-Go | 테스트 작성·Spike 판정 시 |
 | [08_implementation_handoff.md](08_implementation_handoff.md) | 새 task 재개 prompt, 구현 순서, 현재 상태 | 구현을 실제로 재개할 때 |
+| [09_incident_2026-08-01_registration_restore.md](09_incident_2026-08-01_registration_restore.md) | 추가 계정 등록 뒤 이전 계정이 로그아웃 상태로 열린 장애의 증거·원인·수정 | 등록·복구 장애 조사 시 |
 
 ## 3. 권장 읽기 순서
 
