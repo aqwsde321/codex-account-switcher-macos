@@ -1,5 +1,11 @@
 import Darwin
 import Foundation
+import OSLog
+
+private let recoveryLogger = Logger(
+    subsystem: "local.codex.account-switcher",
+    category: "recovery"
+)
 
 private enum ProcessTerminationFailure: Error {
     case identityChanged
@@ -751,7 +757,29 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
         }
         recoveryExpectedTransactionID = expectedTransactionID
         recoveryRequestsApplicationQuiescence = requestApplicationQuiescence
-        return try await RecoveryCoordinator(executor: self).recover(relaunchPrevious: false)
+        let mode = requestApplicationQuiescence ? "manual" : "automatic"
+        recoveryLogger.notice("event=recovery_started mode=\(mode, privacy: .public)")
+        do {
+            let outcome = try await RecoveryCoordinator(executor: self).recover(relaunchPrevious: false)
+            switch outcome {
+            case .none:
+                recoveryLogger.notice("event=recovery_finished outcome=none")
+            case .completed:
+                recoveryLogger.notice("event=recovery_finished outcome=completed")
+            case .stopped(.helperChildAlive), .stopped(.processBlockerPresent):
+                recoveryLogger.error("event=recovery_finished outcome=stopped reason=process_blocked")
+            case .stopped(.activeCredentialUnverified):
+                recoveryLogger.error(
+                    "event=recovery_finished outcome=stopped reason=active_credential_unverified"
+                )
+            case .stopped:
+                recoveryLogger.error("event=recovery_finished outcome=stopped reason=recovery_state_invalid")
+            }
+            return outcome
+        } catch {
+            recoveryLogger.error("event=recovery_failed code=coordinator_failure")
+            throw error
+        }
     }
 
     public func recoveryStatus() async throws -> RecoveryCLIStatus {
@@ -1408,6 +1436,7 @@ extension LocalCLIDataProvider: SwitchTransactionDriving {
     }
 
     public func commitActiveProfile(_ profileID: ProfileID) async throws {
+        recoveryLogger.notice("event=active_profile_commit_started")
         let context = try requireSwitchContext()
         let current = try context.store.loadRegistry()
         guard current == context.registry,
@@ -1425,9 +1454,11 @@ extension LocalCLIDataProvider: SwitchTransactionDriving {
             throw LocalCLIDataProviderFailure.registryRoundTripFailed
         }
         switchExpectedRegistry = updated
+        recoveryLogger.notice("event=active_profile_commit_finished")
     }
 
     public func removeJournalDurably() async throws {
+        recoveryLogger.notice("event=journal_removal_started")
         let context = try requireSwitchContext()
         guard try context.store.loadRegistry() == context.registry else {
             throw LocalCLIDataProviderFailure.registryRoundTripFailed
@@ -1442,6 +1473,7 @@ extension LocalCLIDataProvider: SwitchTransactionDriving {
             expectedActiveProfileID: activeProfileID,
             expectedActiveAuthIdentity: expectedIdentity
         )
+        recoveryLogger.notice("event=journal_removal_finished")
     }
 
     public func activateExistingApplication() async throws {
@@ -1553,6 +1585,7 @@ extension LocalCLIDataProvider: RecoveryExecuting {
               try store.loadCaptureProfileIDIfPresent() == nil else {
             throw LocalCLIDataProviderFailure.pendingRecovery
         }
+        recoveryLogger.notice("event=journal_loaded phase=\(journal.phase.rawValue, privacy: .public)")
         let registry = try store.loadRegistry()
         guard let activeProfileID = registry.activeProfileID else {
             throw LocalCLIDataProviderFailure.activeProfileUnavailable
@@ -1627,7 +1660,9 @@ extension LocalCLIDataProvider: RecoveryExecuting {
             do {
                 try await requestNormalQuit()
                 try await waitForQuiescence()
+                recoveryLogger.notice("event=application_quiescent")
             } catch let failure as SwitchCoordinatorFailure where failure == .processBlocked {
+                recoveryLogger.error("event=application_quiescence_failed code=process_blocked")
                 return RecoverySnapshot(
                     journal: journal,
                     knownProfileIDs: knownProfileIDs,
@@ -1651,6 +1686,9 @@ extension LocalCLIDataProvider: RecoveryExecuting {
             processBlockerPresent = true
         }
         if processBlockerPresent || probeChildUnconfirmed {
+            recoveryLogger.error(
+                "event=process_gate_failed blocker=\(processBlockerPresent, privacy: .public) child_unconfirmed=\(self.probeChildUnconfirmed, privacy: .public)"
+            )
             return RecoverySnapshot(
                 journal: journal,
                 knownProfileIDs: knownProfileIDs,
@@ -1671,6 +1709,16 @@ extension LocalCLIDataProvider: RecoveryExecuting {
             descriptor: descriptor,
             expectedDestination: activeAuthDestination
         )
+        switch activeCredential {
+        case .previous:
+            recoveryLogger.notice("event=active_credential_evidence result=previous")
+        case .target:
+            recoveryLogger.notice("event=active_credential_evidence result=target")
+        case .other:
+            recoveryLogger.error("event=active_credential_evidence result=other")
+        case .unreadable:
+            recoveryLogger.error("event=active_credential_evidence result=unreadable")
+        }
         guard try store.loadRegistry() == registry,
               try store.loadJournalIfPresent() == journal,
               try store.loadJournalFinalizationEvidenceIfPresent() == nil,
@@ -1725,20 +1773,36 @@ extension LocalCLIDataProvider: RecoveryExecuting {
     }
 
     public func verifyPrevious(expectedProfileID: ProfileID) async throws {
+        recoveryLogger.notice("event=previous_verification_started")
         let context = try requireSwitchContext()
         guard let journal = try context.store.loadJournalIfPresent(),
               journal.previousProfileID == expectedProfileID,
               let profile = context.registry.profiles.first(where: { $0.id == expectedProfileID }) else {
             throw LocalCLIDataProviderFailure.rollbackFailed
         }
-        try await revalidateCredentialMutationGate()
-        switchActiveAuthDestination = .exact(
-            try await verifyActiveCredential(
-                expectedEmail: profile.email,
-                descriptor: context.descriptor
+        do {
+            try await revalidateCredentialMutationGate()
+            switchActiveAuthDestination = .exact(
+                try await verifyActiveCredential(
+                    expectedEmail: profile.email,
+                    descriptor: context.descriptor
+                )
             )
-        )
-        try await revalidateCredentialMutationGate()
+            try await revalidateCredentialMutationGate()
+            recoveryLogger.notice("event=previous_verification_finished")
+        } catch let failure as SwitchCoordinatorFailure where failure == .processBlocked {
+            recoveryLogger.error("event=previous_verification_failed code=process_blocked")
+            throw failure
+        } catch let failure as ProfileCaptureFailure where failure == .identityMismatch {
+            recoveryLogger.error("event=previous_verification_failed code=identity_mismatch")
+            throw failure
+        } catch let failure as AppServerProbeFailure {
+            recoveryLogger.error("event=previous_verification_failed code=app_server_failure")
+            throw failure
+        } catch {
+            recoveryLogger.error("event=previous_verification_failed code=other")
+            throw error
+        }
     }
 
     public func verifyTargetStillActive(expectedProfileID: ProfileID) async throws {
@@ -1883,6 +1947,7 @@ private extension LocalCLIDataProvider {
         guard case let .exact(expectedIdentity) = expectedDestination,
               let current = try? readCurrentCredential(),
               current.identity == expectedIdentity else {
+            recoveryLogger.error("event=evidence_failed stage=active_auth_snapshot")
             return .unreadable
         }
         let matchesPrevious = (try? credentialStore.loadCredential(for: journal.previousProfileID))
@@ -1891,10 +1956,13 @@ private extension LocalCLIDataProvider {
             .map { $0 == current.credential } ?? false
         switch (matchesPrevious, matchesTarget) {
         case (true, false):
+            recoveryLogger.notice("event=evidence_resolved result=previous source=keychain")
             return .previous
         case (false, true):
+            recoveryLogger.notice("event=evidence_resolved result=target source=keychain")
             return .target
         case (true, true):
+            recoveryLogger.error("event=evidence_resolved result=ambiguous source=keychain")
             return .other
         case (false, false):
             break
@@ -1904,26 +1972,40 @@ private extension LocalCLIDataProvider {
             return .other
         }
         do {
+            recoveryLogger.notice("event=evidence_probe_started expected=previous")
             _ = try await validatedCredential(
                 current.credential,
                 expectedEmail: previous.email,
                 descriptor: descriptor
             )
+            recoveryLogger.notice("event=evidence_probe_finished result=previous")
             return .previous
         } catch let failure as ProfileCaptureFailure where failure == .identityMismatch {
+            recoveryLogger.notice("event=evidence_probe_finished result=previous_mismatch")
+        } catch is AppServerProbeFailure {
+            recoveryLogger.error("event=evidence_probe_failed expected=previous code=app_server_failure")
+            return .unreadable
         } catch {
+            recoveryLogger.error("event=evidence_probe_failed expected=previous code=other")
             return .unreadable
         }
         do {
+            recoveryLogger.notice("event=evidence_probe_started expected=target")
             _ = try await validatedCredential(
                 current.credential,
                 expectedEmail: target.email,
                 descriptor: descriptor
             )
+            recoveryLogger.notice("event=evidence_probe_finished result=target")
             return .target
         } catch let failure as ProfileCaptureFailure where failure == .identityMismatch {
+            recoveryLogger.notice("event=evidence_probe_finished result=target_mismatch")
             return .other
+        } catch is AppServerProbeFailure {
+            recoveryLogger.error("event=evidence_probe_failed expected=target code=app_server_failure")
+            return .unreadable
         } catch {
+            recoveryLogger.error("event=evidence_probe_failed expected=target code=other")
             return .unreadable
         }
     }
