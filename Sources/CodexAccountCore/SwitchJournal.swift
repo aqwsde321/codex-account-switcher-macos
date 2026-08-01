@@ -41,6 +41,7 @@ public enum SwitchStateMachine {
         }
 
         let rollbackEligible: Set<SwitchPhase> = [
+            .quiescent,
             .refreshingCurrent,
             .currentSaved,
             .validatingTarget,

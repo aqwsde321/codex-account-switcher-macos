@@ -1,5 +1,6 @@
 public enum ActiveCredentialEvidence: Equatable, Sendable {
     case previous
+    case previousCredentialChanged
     case target
     case other
     case unreadable
@@ -81,11 +82,18 @@ public enum RecoveryPlanner {
 
         switch snapshot.journal.phase {
         case .preparing, .quitRequested:
-            return snapshot.activeCredential == .previous
-                ? .cancelBeforeMutation
-                : .stop(.activeCredentialUnverified)
+            switch snapshot.activeCredential {
+            case .previous, .previousCredentialChanged:
+                return .cancelBeforeMutation
+            case .target, .other, .unreadable:
+                return .stop(.activeCredentialUnverified)
+            }
         case .quiescent:
-            return actionForPreviousOrRollback(snapshot.activeCredential, previousAction: .cancelBeforeMutation)
+            return actionForPreviousOrRollback(
+                snapshot.activeCredential,
+                previousAction: .cancelBeforeMutation,
+                changedPreviousAction: .repairCurrentThenCancel
+            )
         case .refreshingCurrent:
             return .repairCurrentThenCancel
         case .currentSaved:
@@ -94,6 +102,8 @@ public enum RecoveryPlanner {
             switch snapshot.activeCredential {
             case .previous:
                 return .cancelTargetValidation
+            case .previousCredentialChanged:
+                return .stop(.activeCredentialUnverified)
             case .target:
                 return .cleanupTargetThenRestorePrevious
             case .other, .unreadable:
@@ -107,13 +117,20 @@ public enum RecoveryPlanner {
             switch snapshot.activeCredential {
             case .target:
                 return .commitVerifiedTarget
-            case .previous:
+            case .previous, .previousCredentialChanged:
                 return .restorePrevious
             case .other, .unreadable:
                 return .stop(.activeCredentialUnverified)
             }
         case .rollbackStarted:
-            return actionForKnownCredential(snapshot.activeCredential, action: .resumeRollback)
+            switch snapshot.activeCredential {
+            case .previousCredentialChanged:
+                return .repairCurrentThenCancel
+            case .previous, .target:
+                return .resumeRollback
+            case .other, .unreadable:
+                return .stop(.activeCredentialUnverified)
+            }
         case .rollbackFailed:
             return .stop(.rollbackPreviouslyFailed)
         }
@@ -121,11 +138,14 @@ public enum RecoveryPlanner {
 
     private static func actionForPreviousOrRollback(
         _ evidence: ActiveCredentialEvidence,
-        previousAction: RecoveryAction
+        previousAction: RecoveryAction,
+        changedPreviousAction: RecoveryAction = .stop(.activeCredentialUnverified)
     ) -> RecoveryAction {
         switch evidence {
         case .previous:
             return previousAction
+        case .previousCredentialChanged:
+            return changedPreviousAction
         case .target:
             return .restorePrevious
         case .other, .unreadable:
@@ -138,7 +158,7 @@ public enum RecoveryPlanner {
         action: RecoveryAction
     ) -> RecoveryAction {
         switch evidence {
-        case .previous, .target:
+        case .previous, .previousCredentialChanged, .target:
             return action
         case .other, .unreadable:
             return .stop(.activeCredentialUnverified)

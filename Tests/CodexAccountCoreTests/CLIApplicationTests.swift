@@ -2034,6 +2034,113 @@ func cliApplicationTests() -> [TestCase] {
                 try expect(launchCount == 0, "explicit retry relaunched the app")
             }
         },
+        TestCase("Local provider finalizes quiescent recovery after same-account credential rotation") {
+            try await withCaptureTemporaryDirectory { directory in
+                let fixture = try makeReloginFixture(in: directory)
+                let store = try SpikeStore.openExisting(at: fixture.storeURL)
+                let crash = try prepareReloginCrash(fixture, phase: .quiescent)
+                let rotatedSourceData = Data(
+                    #"{"auth_mode":"chatgpt","test_account":"a","tokens":{"id_token":"rotated-a-id","access_token":"rotated-a-access","refresh_token":"rotated-a-refresh"}}"#.utf8
+                )
+                let rotatedSource = try CredentialBlob(validating: rotatedSourceData)
+                let refreshedSource = try CredentialBlob(validating: Data(
+                    #"{"auth_mode":"chatgpt","test_account":"a","tokens":{"id_token":"fixture-id-rotated","access_token":"fixture-access-rotated","refresh_token":"fixture-refresh-rotated"}}"#.utf8
+                ))
+                try rotatedSourceData.write(to: fixture.authURL)
+                let provider = LocalCLIDataProvider(
+                    storeURL: fixture.storeURL,
+                    activeAuthURL: fixture.authURL,
+                    processProvider: EmptyProcessSnapshotProvider(),
+                    locateApp: { fixture.descriptor },
+                    runningApplicationPIDs: { _ in [] },
+                    requestApplicationTermination: { _ in [] }
+                )
+
+                let outcome = try await provider.retryPendingRecovery(
+                    expectedTransactionID: crash.journal.transactionID.uuidString
+                )
+                let active = try CredentialBlob(validating: Data(contentsOf: fixture.authURL))
+                let storedSource = try store.loadCredential(for: fixture.source.id)
+                let journal = try store.loadJournalIfPresent()
+
+                try expect(outcome == .completed(.repairCurrentThenCancel), "rotated A was not repaired")
+                try expect(active == refreshedSource, "recovery did not refresh the rotated active A")
+                try expect(
+                    storedSource == refreshedSource,
+                    "recovery did not retain the refreshed A"
+                )
+                try expect(storedSource != rotatedSource, "recovery stored identity-only A evidence")
+                try expect(journal == nil, "rotated A left recovery pending")
+            }
+        },
+        TestCase("Local provider restores configured source when active credential refresh fails") {
+            try await withCaptureTemporaryDirectory { directory in
+                let fixture = try makeReloginFixture(in: directory, failActiveRefresh: true)
+                let store = try SpikeStore.openExisting(at: fixture.storeURL)
+                let crash = try prepareReloginCrash(fixture, phase: .quiescent)
+                let rotatedSourceData = Data(
+                    #"{"auth_mode":"chatgpt","test_account":"a","tokens":{"id_token":"untrusted-a-id","access_token":"untrusted-a-access","refresh_token":"untrusted-a-refresh"}}"#.utf8
+                )
+                let rotatedSource = try CredentialBlob(validating: rotatedSourceData)
+                try rotatedSourceData.write(to: fixture.authURL)
+                let provider = LocalCLIDataProvider(
+                    storeURL: fixture.storeURL,
+                    activeAuthURL: fixture.authURL,
+                    processProvider: EmptyProcessSnapshotProvider(),
+                    locateApp: { fixture.descriptor },
+                    runningApplicationPIDs: { _ in [] },
+                    requestApplicationTermination: { _ in [] }
+                )
+
+                let outcome = try await provider.retryPendingRecovery(
+                    expectedTransactionID: crash.journal.transactionID.uuidString
+                )
+                let active = try CredentialBlob(validating: Data(contentsOf: fixture.authURL))
+                let storedSource = try store.loadCredential(for: fixture.source.id)
+                let journal = try store.loadJournalIfPresent()
+
+                try expect(outcome == .completed(.repairCurrentThenCancel), "failed refresh was not repaired")
+                try expect(active == storedSource, "failed refresh did not restore configured A")
+                try expect(storedSource != rotatedSource, "failed refresh stored identity-only A evidence")
+                try expect(journal == nil, "restored A left recovery pending")
+            }
+        },
+        TestCase("Local provider resumes an interrupted changed source repair") {
+            try await withCaptureTemporaryDirectory { directory in
+                let fixture = try makeReloginFixture(in: directory, failConfiguredRefresh: true)
+                let store = try SpikeStore.openExisting(at: fixture.storeURL)
+                let crash = try prepareReloginCrash(fixture, phase: .rollbackStarted)
+                let rotatedSourceData = Data(
+                    #"{"auth_mode":"chatgpt","test_account":"a","tokens":{"id_token":"resumable-a-id","access_token":"resumable-a-access","refresh_token":"resumable-a-refresh"}}"#.utf8
+                )
+                let rotatedSource = try CredentialBlob(validating: rotatedSourceData)
+                let refreshedSource = try CredentialBlob(validating: Data(
+                    #"{"auth_mode":"chatgpt","test_account":"a","tokens":{"id_token":"fixture-id-rotated","access_token":"fixture-access-rotated","refresh_token":"fixture-refresh-rotated"}}"#.utf8
+                ))
+                try rotatedSourceData.write(to: fixture.authURL)
+                let provider = LocalCLIDataProvider(
+                    storeURL: fixture.storeURL,
+                    activeAuthURL: fixture.authURL,
+                    processProvider: EmptyProcessSnapshotProvider(),
+                    locateApp: { fixture.descriptor },
+                    runningApplicationPIDs: { _ in [] },
+                    requestApplicationTermination: { _ in [] }
+                )
+
+                let outcome = try await provider.retryPendingRecovery(
+                    expectedTransactionID: crash.journal.transactionID.uuidString
+                )
+                let active = try CredentialBlob(validating: Data(contentsOf: fixture.authURL))
+                let storedSource = try store.loadCredential(for: fixture.source.id)
+                let journal = try store.loadJournalIfPresent()
+
+                try expect(outcome == .completed(.repairCurrentThenCancel), "interrupted repair was not resumed")
+                try expect(active == refreshedSource, "interrupted repair did not refresh active A")
+                try expect(storedSource == refreshedSource, "interrupted repair did not save refreshed A")
+                try expect(storedSource != rotatedSource, "interrupted repair stored identity-only A evidence")
+                try expect(journal == nil, "interrupted repair left recovery pending")
+            }
+        },
         TestCase("Local provider rejects a stale explicit recovery transaction") {
             try await withCaptureTemporaryDirectory { directory in
                 let fixture = try makeReloginFixture(in: directory)
@@ -3624,7 +3731,9 @@ private func makeReloginFixture(
     in directory: URL,
     rotateActiveToOtherAccount: Bool = false,
     holdVerifierPipesOpen: Bool = false,
-    probeCountURL: URL? = nil
+    probeCountURL: URL? = nil,
+    failActiveRefresh: Bool = false,
+    failConfiguredRefresh: Bool = false
 ) throws -> ReloginFixture {
     let codexHome = directory.appendingPathComponent(".codex", isDirectory: true)
     try FileManager.default.createDirectory(at: codexHome, withIntermediateDirectories: false)
@@ -3667,10 +3776,18 @@ private func makeReloginFixture(
     _ = try store.saveCredential(staleTargetCredential, for: target.id)
     _ = try store.saveRegistry(ProfileRegistry(activeProfileID: source.id, profiles: [source, target]))
 
+    let failRefreshHomeURL: URL? = if failActiveRefresh {
+        codexHome
+    } else if failConfiguredRefresh {
+        storeURL.appendingPathComponent("credential-verification-workspace", isDirectory: true)
+    } else {
+        nil
+    }
     let executable = try makeCaptureAppServer(
         in: directory,
         rotateToOtherAccount: rotateActiveToOtherAccount,
         rotateToOtherAccountHomeURL: rotateActiveToOtherAccount ? codexHome : nil,
+        failRefreshHomeURL: failRefreshHomeURL,
         probeCountURL: probeCountURL,
         requiredJournalURL: storeURL.appendingPathComponent("switch-journal.json"),
         holdPipesOpen: holdVerifierPipesOpen

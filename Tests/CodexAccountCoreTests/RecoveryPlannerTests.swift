@@ -114,6 +114,51 @@ func recoveryPlannerTests() -> [TestCase] {
                 "target was committed without active target evidence"
             )
         },
+        TestCase("RecoveryPlanner repairs only a changed previous credential at quiescence") {
+            let previous = ProfileID(UUID())
+            let target = ProfileID(UUID())
+            let exact = recoverySnapshot(
+                phase: .quiescent,
+                activeCredential: .previous,
+                previous: previous,
+                target: target
+            )
+            let changed = recoverySnapshot(
+                phase: .quiescent,
+                activeCredential: .previousCredentialChanged,
+                previous: previous,
+                target: target
+            )
+            let changedAfterSave = recoverySnapshot(
+                phase: .currentSaved,
+                activeCredential: .previousCredentialChanged,
+                previous: previous,
+                target: target
+            )
+            let interruptedRepair = recoverySnapshot(
+                phase: .rollbackStarted,
+                activeCredential: .previousCredentialChanged,
+                previous: previous,
+                target: target
+            )
+
+            try expect(
+                RecoveryPlanner.plan(exact) == .cancelBeforeMutation,
+                "exact previous credential was unnecessarily refreshed"
+            )
+            try expect(
+                RecoveryPlanner.plan(changed) == .repairCurrentThenCancel,
+                "changed previous credential bypassed safe repair"
+            )
+            try expect(
+                RecoveryPlanner.plan(changedAfterSave) == .stop(.activeCredentialUnverified),
+                "changed previous credential was adopted after the safe repair window"
+            )
+            try expect(
+                RecoveryPlanner.plan(interruptedRepair) == .repairCurrentThenCancel,
+                "interrupted changed credential repair discarded the latest A"
+            )
+        },
     ]
 }
 

@@ -1712,6 +1712,8 @@ extension LocalCLIDataProvider: RecoveryExecuting {
         switch activeCredential {
         case .previous:
             recoveryLogger.notice("event=active_credential_evidence result=previous")
+        case .previousCredentialChanged:
+            recoveryLogger.notice("event=active_credential_evidence result=previous_credential_changed")
         case .target:
             recoveryLogger.notice("event=active_credential_evidence result=target")
         case .other:
@@ -1978,8 +1980,8 @@ private extension LocalCLIDataProvider {
                 expectedEmail: previous.email,
                 descriptor: descriptor
             )
-            recoveryLogger.notice("event=evidence_probe_finished result=previous")
-            return .previous
+            recoveryLogger.notice("event=evidence_probe_finished result=previous_credential_changed")
+            return .previousCredentialChanged
         } catch let failure as ProfileCaptureFailure where failure == .identityMismatch {
             recoveryLogger.notice("event=evidence_probe_finished result=previous_mismatch")
         } catch is AppServerProbeFailure {

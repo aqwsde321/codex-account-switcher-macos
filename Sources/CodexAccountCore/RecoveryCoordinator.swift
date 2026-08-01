@@ -148,7 +148,9 @@ private extension RecoveryCoordinator {
             return .completed(action)
 
         case .repairCurrentThenCancel:
-            try await persist(.rollbackStarted, for: snapshot.journal)
+            if snapshot.journal.phase != .rollbackStarted {
+                try await persist(.rollbackStarted, for: snapshot.journal)
+            }
             do {
                 try await executor.revalidateCredentialMutationGate()
                 try await executor.repairCurrentCredential(snapshot.journal.previousProfileID)

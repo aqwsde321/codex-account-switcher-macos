@@ -496,7 +496,7 @@ registry alone 또는 journal alone으로 commit을 추론하지 않는다. phas
 |---|---|
 | `preparing` | active가 previous이고 registry도 previous면 mutation 전 abort로 처리해 journal을 durable delete한다. 불일치하면 STOP한다. |
 | `quitRequested` | process gate와 active previous를 확인하고 journal을 durable delete해 안전 취소한다. journal schema에 원래 실행 상태를 저장하지 않으므로 앱은 자동 재실행하지 않는다. 종료 여부·identity가 모호하면 STOP한다. |
-| `quiescent` | active가 exact previous면 journal을 durable delete해 안전 취소하고, exact target이면 `rollbackStarted` 뒤 stored previous를 복구한다. 다른 신원·판독 불가는 STOP한다. |
+| `quiescent` | active가 exact previous면 journal을 durable delete해 안전 취소한다. previous 이메일이지만 configured blob과 다르면 `rollbackStarted` 뒤 기본 홈에서 `true` refresh·저장을 완료하고, 실패하면 stored previous를 복구한다. exact target이면 `rollbackStarted` 뒤 stored previous를 복구하며 다른 신원·판독 불가는 STOP한다. |
 | `refreshingCurrent` | source-valid이면 기본 홈 Helper-owned App Server의 `true` refresh와 current credential-store save를 idempotent하게 완료한다. source-valid가 아니면 stored previous를 복구한다. 어느 분기든 previous 이메일과 registry previous를 확인하고 journal을 durable delete해 전환을 안전 취소한다. |
 | `currentSaved` | active가 exact previous면 current credential store도 previous인지 확인하고 안전 취소한다. exact target이면 previous rollback을 시작하며 다른 신원·판독 불가는 STOP한다. |
 | `validatingTarget` | 남은 isolated home/probe를 Helper-owned 여부로 정리한다. exact previous인 일반 switch는 안전 취소하고, exact target인 재로그인은 configured source를 복원·검증한다. 다른 신원·판독 불가는 STOP한다. registry previous를 유지하며 검증 저장된 target blob·해제된 marker는 보존할 수 있지만 forward switch는 재개하지 않는다. |
@@ -505,7 +505,7 @@ registry alone 또는 journal alone으로 commit을 추론하지 않는다. phas
 | `targetLaunched` | 관련 process가 실행 중이면 종료하지 않고 STOP한다. 사용자가 모두 종료한 뒤 다음 자동 복구에서 previous rollback한다. |
 | `verifyingTarget` | 관련 process가 실행 중이면 종료하지 않고 STOP한다. gate가 깨끗하면 previous rollback하며 network 실패는 target revocation이나 `needsRelogin` 근거로 사용하지 않는다. |
 | `targetVerified` | active target·configured target·marker를 다시 확인하고 registry target commit을 durable하게 완료한다. 이미 commit됐으면 중복 write 없이 journal 정리만 수행한다. typed `target-unverified`만 previous rollback하며 process·registry race, verifier 종료 미확인, 내구성 불확실은 STOP한다. |
-| `rollbackStarted` | 관련 writer가 없는지 확인한 뒤 stored previous blob을 공용 auth에 원자 복구하고 격리 `false` probe로 previous 이메일을 검증한다. 성공하면 registry previous durable commit→journal unlink와 parent `fsync`로 끝낸다. 시작 자동 복구는 previous 앱을 실행하지 않는다. |
+| `rollbackStarted` | active가 previous 이메일이지만 configured blob과 다르면 중단된 source repair로 보고 기본 홈의 `true` refresh·저장을 재개하며, 실패하면 stored previous를 복구한다. 그 외 verified previous/target은 관련 writer가 없는지 확인한 뒤 stored previous blob을 공용 auth에 원자 복구하고 격리 `false` probe로 previous 이메일을 검증한다. 성공하면 registry previous durable commit→journal unlink와 parent `fsync`로 끝낸다. 시작 자동 복구는 previous 앱을 실행하지 않는다. |
 | `rollbackFailed` | terminal로 반환하며 locator·process scan·workspace 정리·auth/registry write·앱 실행을 하지 않는다. configured credential store의 previous/target 원본을 보존하고 명시적 수동 recovery만 허용한다. |
 
 previous rollback 중 어떤 단계든 실패하면 `rollbackFailed`를 durable하게 기록한다. 성공 phase를 추측해 journal을 지우지 않는다.
