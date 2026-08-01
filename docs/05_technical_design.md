@@ -48,8 +48,8 @@ ad-hoc designated requirement는 현재 build의 cdhash에 묶인다. 코드 변
 | bundle identifier | `com.openai.codex` |
 | display/name | ChatGPT / Codex |
 | main executable | `Contents/MacOS/ChatGPT` |
-| version | `26.721.81911` |
-| build | `5973` |
+| version | `26.727.51351` |
+| build | `6119` |
 | bundled Codex | `Contents/Resources/codex` |
 | signing Team ID | `2DC432GLL2` (현재 설치본 관찰값) |
 | hardened runtime | 활성 |
@@ -378,7 +378,7 @@ process argument나 environment는 읽거나 기록하지 않는다.
 6. `independentCodex`: basename `codex`이면서 앱 ancestry/helper-owned가 아님
 7. `unclassifiedRelevant`: Codex bundle path 또는 알려진 관련 이름이지만 안전 분류 불가
 
-blocker 집합은 `approvedNonAuthResident`를 제외한 `appRoot`, `appOwned`, `bundledAppServer`, `independentCodex`, `unclassifiedRelevant`다. 현재 두 허용 build의 exact path·name·signing identifier·Team ID가 일치하는 crashpad만 `approvedNonAuthResident`다.
+blocker 집합은 `approvedNonAuthResident`를 제외한 `appRoot`, `appOwned`, `bundledAppServer`, `independentCodex`, `unclassifiedRelevant`다. 현재 세 허용 build의 exact path·name·signing identifier·Team ID가 일치하는 crashpad만 `approvedNonAuthResident`다.
 
 ### 종료 알고리즘
 

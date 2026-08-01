@@ -335,7 +335,7 @@ preparing → quitRequested → quiescent → refreshingCurrent → currentSaved
 
 - 앱 경로: `/Applications/ChatGPT.app`
 - bundle identifier: `com.openai.codex`
-- 표시 버전/build: `26.721.81911` / `5973`
+- 표시 버전/build: `26.727.51351` / `6119`
 - 메인 실행 파일: `Contents/MacOS/ChatGPT`
 - bundled CLI: `Contents/Resources/codex`
 - App Server stdio는 LF-delimited JSON이고 `account/read`가 설치 스키마에 존재한다.

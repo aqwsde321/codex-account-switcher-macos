@@ -115,6 +115,28 @@ func processClassifierTests() -> [TestCase] {
                 bundledCodexSigningIdentifier: current.bundledCodexSigningIdentifier,
                 teamIdentifier: current.teamIdentifier
             )
+            let latest = CodexAppDescriptor(
+                bundleURL: current.bundleURL,
+                mainExecutableURL: current.mainExecutableURL,
+                bundledCodexURL: current.bundledCodexURL,
+                bundleIdentifier: current.bundleIdentifier,
+                version: "26.727.51351",
+                build: "6119",
+                appSigningIdentifier: current.appSigningIdentifier,
+                bundledCodexSigningIdentifier: current.bundledCodexSigningIdentifier,
+                teamIdentifier: current.teamIdentifier
+            )
+            let unexpectedLatestBuild = CodexAppDescriptor(
+                bundleURL: latest.bundleURL,
+                mainExecutableURL: latest.mainExecutableURL,
+                bundledCodexURL: latest.bundledCodexURL,
+                bundleIdentifier: latest.bundleIdentifier,
+                version: latest.version,
+                build: "6120",
+                appSigningIdentifier: latest.appSigningIdentifier,
+                bundledCodexSigningIdentifier: latest.bundledCodexSigningIdentifier,
+                teamIdentifier: latest.teamIdentifier
+            )
 
             try expect(
                 ApprovedResidentRule.codexCrashpad(for: current) == ApprovedResidentRule(
@@ -130,8 +152,21 @@ func processClassifierTests() -> [TestCase] {
                 "validated updated app build was rejected"
             )
             try expect(
+                ApprovedResidentRule.codexCrashpad(for: latest) == ApprovedResidentRule(
+                    executablePath: "/Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/150.0.7871.182/Helpers/browser_crashpad_handler",
+                    name: "browser_crashpad_handler",
+                    signingIdentifier: "browser_crashpad_handler",
+                    teamIdentifier: "2DC432GLL2"
+                ),
+                "validated latest app build was rejected"
+            )
+            try expect(
                 ApprovedResidentRule.codexCrashpad(for: changedBuild) == nil,
                 "unvalidated app build inherited the crashpad approval"
+            )
+            try expect(
+                ApprovedResidentRule.codexCrashpad(for: unexpectedLatestBuild) == nil,
+                "unvalidated latest app build inherited the crashpad approval"
             )
         },
         TestCase("ProcessClassifier approves only the exact signed resident tuple") {

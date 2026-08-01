@@ -57,17 +57,26 @@ public struct ApprovedResidentRule: Equatable, Sendable {
 
     package static func codexCrashpad(for descriptor: CodexAppDescriptor) -> ApprovedResidentRule? {
         guard descriptor.bundleIdentifier == CodexAppLocator.officialBundleIdentifier,
-              (descriptor.version == "26.721.41059" && descriptor.build == "5848")
-                || (descriptor.version == "26.721.81911" && descriptor.build == "5973"),
               descriptor.appSigningIdentifier == CodexAppLocator.officialBundleIdentifier,
               descriptor.bundledCodexSigningIdentifier == "codex",
               descriptor.teamIdentifier == CodexAppLocator.observedOfficialTeamIdentifier else {
             return nil
         }
+        let frameworkVersion: String? = switch (descriptor.version, descriptor.build) {
+        case ("26.721.41059", "5848"), ("26.721.81911", "5973"):
+            "150.0.7871.128"
+        case ("26.727.51351", "6119"):
+            "150.0.7871.182"
+        default:
+            nil
+        }
+        guard let frameworkVersion else {
+            return nil
+        }
         return ApprovedResidentRule(
             executablePath: descriptor.bundleURL
                 .appendingPathComponent(
-                    "Contents/Frameworks/Codex Framework.framework/Versions/150.0.7871.128/Helpers/browser_crashpad_handler"
+                    "Contents/Frameworks/Codex Framework.framework/Versions/\(frameworkVersion)/Helpers/browser_crashpad_handler"
                 )
                 .path,
             name: "browser_crashpad_handler",

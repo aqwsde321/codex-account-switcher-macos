@@ -71,7 +71,7 @@ ADR-027·ADR-029·ADR-030과 기존 안전 결정을 유지한 채 Step 9 메뉴
 - B-015~B-017 세 프로필 전환·재로그인 실계정 Black-box 검증
 - MVP 완료·배포 전 `07_test_acceptance.md` §16 형식의 동일 task 왕복 증거 보존
 
-허용 build는 `/Applications/ChatGPT.app` `26.721.41059`/`5848`, `26.721.81911`/`5973`이다. 현재 설치된 `26.721.81911`/`5973`은 signature/build gate를 통과해 `application=ready`이며 auth-changing 명령 실검증을 완료했다.
+허용 build는 `/Applications/ChatGPT.app` `26.721.41059`/`5848`, `26.721.81911`/`5973`, `26.727.51351`/`6119`이다. 현재 설치된 `26.727.51351`/`6119`는 signature/build gate, read-only process 검증, 빈 임시 홈의 App Server `initialize`·`account/read(false)`를 통과해 `application=ready`다. 이 build의 auth-changing 명령 실검증은 아직 완료하지 않았다.
 
 재개 명령과 구현 범위는 루트 `README.md`를 먼저 읽는다.
 
