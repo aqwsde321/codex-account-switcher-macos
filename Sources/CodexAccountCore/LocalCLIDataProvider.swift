@@ -73,6 +73,8 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
     private var switchActiveAuthDestination: ExpectedDestination?
     private var switchLaunchedApplicationPID: Int32?
     private var switchAppOwnedTerminationCandidates = [ProcessIdentity: ProcessRecord]()
+    private var recoveryExpectedTransactionID: UUID?
+    private var recoveryRequestsApplicationQuiescence = false
     private var targetValidationProfileID: ProfileID?
 #if SPIKE_FAULT_INJECTION
     private var injectPostLaunchVerificationFailure = false
@@ -716,6 +718,26 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
     }
 
     public func recoverPendingTransaction() async throws -> RecoveryOutcome {
+        try await performPendingRecovery(
+            expectedTransactionID: nil,
+            requestApplicationQuiescence: false
+        )
+    }
+
+    public func retryPendingRecovery(expectedTransactionID: String) async throws -> RecoveryOutcome {
+        guard let transactionID = UUID(uuidString: expectedTransactionID) else {
+            throw LocalCLIDataProviderFailure.pendingRecovery
+        }
+        return try await performPendingRecovery(
+            expectedTransactionID: transactionID,
+            requestApplicationQuiescence: true
+        )
+    }
+
+    private func performPendingRecovery(
+        expectedTransactionID: UUID?,
+        requestApplicationQuiescence: Bool
+    ) async throws -> RecoveryOutcome {
         guard !switchInProgress else {
             throw LocalCLIDataProviderFailure.switchAlreadyRunning
         }
@@ -727,6 +749,8 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
             switchInProgress = false
             resetSwitchTransactionState()
         }
+        recoveryExpectedTransactionID = expectedTransactionID
+        recoveryRequestsApplicationQuiescence = requestApplicationQuiescence
         return try await RecoveryCoordinator(executor: self).recover(relaunchPrevious: false)
     }
 
@@ -1500,6 +1524,15 @@ extension LocalCLIDataProvider: RecoveryExecuting {
         guard let lock = try store.tryAcquireTransactionLock() else {
             return false
         }
+        do {
+            if let recoveryExpectedTransactionID,
+               try store.loadJournalIfPresent()?.transactionID != recoveryExpectedTransactionID {
+                throw RecoveryCoordinatorFailure.snapshotInvalid
+            }
+        } catch {
+            lock.release()
+            throw error
+        }
         switchStore = store
         switchLock = lock
         return true
@@ -1578,6 +1611,35 @@ extension LocalCLIDataProvider: RecoveryExecuting {
             throw LocalCLIDataProviderFailure.incompatibleApplication
         }
         switchDescriptor = descriptor
+
+        if probeChildUnconfirmed {
+            return RecoverySnapshot(
+                journal: journal,
+                knownProfileIDs: knownProfileIDs,
+                registryActiveProfileID: activeProfileID,
+                helperChildAlive: true,
+                durabilityUnknown: false,
+                activeCredential: .unreadable
+            )
+        }
+
+        if recoveryRequestsApplicationQuiescence {
+            do {
+                try await requestNormalQuit()
+                try await waitForQuiescence()
+            } catch let failure as SwitchCoordinatorFailure where failure == .processBlocked {
+                return RecoverySnapshot(
+                    journal: journal,
+                    knownProfileIDs: knownProfileIDs,
+                    registryActiveProfileID: activeProfileID,
+                    helperChildAlive: false,
+                    durabilityUnknown: false,
+                    activeCredential: .unreadable,
+                    processBlockerPresent: true
+                )
+            }
+        }
+
         let activeAuthDestination = try files.snapshot(at: activeAuthURL)
         switchActiveAuthDestination = activeAuthDestination
 
@@ -1963,6 +2025,8 @@ private extension LocalCLIDataProvider {
         switchActiveAuthDestination = nil
         switchLaunchedApplicationPID = nil
         switchAppOwnedTerminationCandidates = [:]
+        recoveryExpectedTransactionID = nil
+        recoveryRequestsApplicationQuiescence = false
         targetValidationProfileID = nil
     }
 

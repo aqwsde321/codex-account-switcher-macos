@@ -117,13 +117,37 @@ FAIL CLI additional capture stops before restoring an unrefreshable previous cre
 ```text
 PASS CLI capture stores a second profile and restores the first
 PASS CLI additional capture stops before restoring an unrefreshable previous credential
-PASS 131 tests
+PASS 135 tests
 ```
+
+## `quiescent` 복구 재시도
+
+시작 자동 복구는 사용자 동의 없이 실행 중인 공식 앱을 종료하지 않는다. 그래서 앱이 실행 중이면 journal을 보존하고 STOP했지만, 메뉴바에는 비종결 pending을 다시 처리할 동작이 없어 `quiescent` 안내만 계속 남았다.
+
+메뉴바에 `Codex 종료하고 복구 재시도`를 추가했다. 이 동작은 다음 제약을 유지한다.
+
+- transaction lock을 잡은 뒤 화면에 표시된 exact transaction ID를 다시 확인한다.
+- 공식 앱에 정상 종료를 요청하고, 종료 전 snapshot에 있던 exact 앱 소유 잔존 프로세스만 기존 별도 확인 뒤 `SIGTERM`한다.
+- 새·독립·분류 불명 프로세스나 transaction 교체를 발견하면 auth·registry·journal을 바꾸지 않고 STOP한다.
+- 앱 종료가 공용 auth를 갱신할 수 있으므로 종료 완료 뒤 auth를 다시 snapshot한다.
+- 기존 recovery coordinator를 재사용하고 Codex는 자동 실행하지 않는다.
+- `rollbackFailed`는 기존 이전 계정 수동 복구만 허용한다.
+
+회귀 테스트는 시작 자동 복구가 프로세스를 종료하지 않는지, 명시적 재시도가 transaction lock 안에서 정상 종료하는지, 확인된 exact 잔존 PID만 종료하는지, stale transaction이 모든 상태를 보존하는지 검증한다.
+
+## 진단 저장소 구분
+
+개발 CLI와 설치 메뉴바 앱은 의도적으로 서로 다른 저장소와 credential backend를 사용한다.
+
+- 개발 CLI: `~/Library/Application Support/CodexAccountSwitcherSpike`, private file credential store
+- 설치 메뉴바 앱: `~/Library/Application Support/CodexAccountSwitcher`, Keychain credential store
+
+따라서 `./Scripts/dev.sh run recovery status`의 `recovery=none`은 설치 메뉴바 앱의 journal이 없다는 뜻이 아니다. 이번 제품 상태는 제품 경로의 `switch-journal.json`을 별도로 읽어 `quiescent`임을 확인했다. 두 저장소를 복사하거나 합치지 않는다.
 
 ## 남은 작업
 
 - 이 소스 수정은 현재 설치 앱에 아직 반영하지 않았다.
-- 현재 `quiescent` 제품 상태는 별도 복구 절차가 필요하다. 수정 설치와 복구 전 계정 카드·동기화·등록을 실행하지 않는다.
+- 현재 `quiescent` 제품 상태는 수정 앱 설치 뒤 메뉴바의 명시적 복구 재시도로 처리한다. 설치와 복구 전 계정 카드·동기화·등록을 실행하지 않는다.
 - 공식 로그아웃이 저장된 다른 계정의 refresh 가능성을 항상 없애는지 통제된 추가 등록 실험으로 확인해야 한다.
 - 위 동작이 반복 확인되면 공식 앱에서 수동 로그아웃하는 추가 등록 UX를 중단하고, 기존 인증을 revoke하지 않는 별도 로그인 준비 또는 격리 로그인 흐름으로 ADR-016을 재검토한다.
 - 갱신 성공 뒤에도 데스크톱 앱이 로그아웃 상태로 열릴 때만 `auth.json` 외 추가 데스크톱 세션 가설을 다시 조사한다.

@@ -19,6 +19,7 @@ public final class MenuBarViewModel: ObservableObject {
     ) async throws -> ProfileListItem
     public typealias ReloginProfile = @Sendable (String) async throws -> ProfileReloginOutcome
     public typealias RestoreRecoveryProfile = @Sendable (String, String) async throws -> RecoveryRestoreOutcome
+    public typealias RetryPendingRecovery = @Sendable (String) async throws -> RecoveryOutcome
     public typealias AttemptAutomaticRecovery = @Sendable () async -> Void
 
     @Published public private(set) var profiles = [ProfileListItem]()
@@ -38,6 +39,7 @@ public final class MenuBarViewModel: ObservableObject {
     private let switchProfile: SwitchProfile
     private let reloginProfile: ReloginProfile
     private let restoreRecoveryProfile: RestoreRecoveryProfile
+    private let retryPendingRecovery: RetryPendingRecovery?
     private let attemptAutomaticRecovery: AttemptAutomaticRecovery
 
     public init(
@@ -48,6 +50,7 @@ public final class MenuBarViewModel: ObservableObject {
         switchProfile: @escaping SwitchProfile,
         reloginProfile: @escaping ReloginProfile,
         restoreRecoveryProfile: @escaping RestoreRecoveryProfile,
+        retryPendingRecovery: RetryPendingRecovery? = nil,
         attemptAutomaticRecovery: @escaping AttemptAutomaticRecovery = {}
     ) {
         self.loadProfiles = loadProfiles
@@ -57,6 +60,7 @@ public final class MenuBarViewModel: ObservableObject {
         self.switchProfile = switchProfile
         self.reloginProfile = reloginProfile
         self.restoreRecoveryProfile = restoreRecoveryProfile
+        self.retryPendingRecovery = retryPendingRecovery
         self.attemptAutomaticRecovery = attemptAutomaticRecovery
     }
 
@@ -240,6 +244,58 @@ public final class MenuBarViewModel: ObservableObject {
         pendingRecoveryConfirmation = nil
     }
 
+    public var canRetryRecovery: Bool {
+        retryPendingRecovery != nil && retryRecoveryTransactionID != nil
+    }
+
+    public func retryRecovery() async {
+        guard !isWorking,
+              let retryPendingRecovery,
+              let transactionID = retryRecoveryTransactionID else {
+            if recoveryRequired { errorMessage = recoveryErrorMessage }
+            return
+        }
+        statusMessage = nil
+        isWorking = true
+        defer { isWorking = false }
+        do {
+            let outcome = try await retryPendingRecovery(transactionID)
+            try await reloadState()
+            if !recoveryRequired {
+                errorMessage = nil
+                statusMessage = "중단된 계정 작업을 복구했습니다. Codex 앱을 직접 여세요."
+                return
+            }
+            switch outcome {
+            case let .stopped(reason):
+                errorMessage = recoveryRetryErrorMessage(for: reason)
+            case .none, .completed:
+                errorMessage = recoveryErrorMessage
+            }
+        } catch {
+            do {
+                try await reloadState()
+            } catch {
+                recoveryStatus = .blocked
+            }
+            if !recoveryRequired {
+                errorMessage = nil
+                statusMessage = "중단된 계정 작업을 복구했습니다. Codex 앱을 직접 여세요."
+                return
+            }
+            switch error {
+            case LocalCLIDataProviderFailure.pendingRecovery:
+                errorMessage = "복구 상태가 변경되었습니다. 다시 확인한 뒤 재시도하세요."
+            case RecoveryCoordinatorFailure.snapshotInvalid:
+                errorMessage = "복구 상태를 확인하지 못했습니다. Codex 앱을 열지 말고 다시 시도하세요."
+            default:
+                errorMessage = recoveryRequired
+                    ? "중단된 계정 작업을 복구하지 못했습니다."
+                    : nil
+            }
+        }
+    }
+
     @discardableResult
     public func register(label: String) async -> Bool {
         statusMessage = nil
@@ -354,6 +410,14 @@ public final class MenuBarViewModel: ObservableObject {
         return (transactionID, profile)
     }
 
+    private var retryRecoveryTransactionID: String? {
+        guard case let .pending(transactionID, phase, _) = recoveryStatus,
+              phase != .rollbackFailed else {
+            return nil
+        }
+        return transactionID
+    }
+
     private func performSwitch(to profile: ProfileListItem) async {
         statusMessage = nil
         guard !recoveryRequired else {
@@ -452,13 +516,30 @@ public final class MenuBarViewModel: ObservableObject {
         }
     }
 
-    private func refreshState() async throws {
-        recoveryStatus = .blocked
-        await attemptAutomaticRecovery()
+    private func recoveryRetryErrorMessage(for reason: RecoveryStopReason) -> String {
+        switch reason {
+        case .processBlockerPresent, .helperChildAlive:
+            return "Codex 앱 또는 관련 프로세스가 남아 복구하지 못했습니다."
+        case .activeCredentialUnverified:
+            return "현재 로그인 계정을 확인하지 못했습니다. 이전 활성 계정으로 로그인한 뒤 재시도하세요."
+        case .rollbackPreviouslyFailed:
+            return recoveryErrorMessage
+        case .durabilityUnknown, .invalidProfileReference, .registryMismatch:
+            return "복구 상태가 불명확합니다. 계정 작업을 중단했습니다."
+        }
+    }
+
+    private func reloadState() async throws {
         let loadedProfiles = try await loadProfiles()
         let loadedRecoveryStatus = try await loadRecoveryStatus()
         profiles = loadedProfiles
         recoveryStatus = loadedRecoveryStatus
+    }
+
+    private func refreshState() async throws {
+        recoveryStatus = .blocked
+        await attemptAutomaticRecovery()
+        try await reloadState()
     }
 
     private func refreshAfterMutationFailure() async {

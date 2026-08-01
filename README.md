@@ -35,6 +35,7 @@
 - 메뉴바 전환의 durable journal phase 기반 실시간 진행 문구와 완료·실패 후 상태 정리
 - 메뉴바 `needsRelogin` 비활성 카드의 exact-ID 확인, 검증된 저장본 갱신, 대상 즉시 활성화, 불확실 상태 재시도 차단
 - 메뉴바 상태 조회 전 미완료 journal 자동 복구, 불확실 상태 STOP, 복구 중 앱 자동 실행 금지
+- 비종결 recovery pending을 exact transaction에 묶어 공식 앱 정상 종료 뒤 다시 처리하는 메뉴바 복구 재시도
 - 메뉴바의 native 비동기 잔존 앱 프로세스 2차 확인, 취소 기본, 종료 전 exact snapshot 대상에만 `SIGTERM` 1회
 - Command Line Tools만으로 만드는 ad-hoc 서명 `.app`, 고정 경로 설치·LaunchAgent 자동 실행·보존형 제거
 - 번들·설치 실행파일의 random synthetic Keychain create/read/update/read/delete/notFound smoke; 제품 service·실제 auth 접근 0회
@@ -132,6 +133,8 @@ cd codex-account-switcher-spike
 확인 전이나 finalization이 불명확한 상태에서 자동 재시도하지 않는다. 메뉴바가 복구 필요 또는 상태 불명확을 표시하면 앱을 열거나 다른 계정 작업을 하지 않는다. Core가 A로 안전 롤백하고 recovery가 없을 때만 사용자가 B 로그인 상태를 고친 뒤 다시 시도할 수 있다.
 
 메뉴바는 시작과 mutation 실패 뒤 상태를 새로 읽을 때 자동 복구를 먼저 한 번 시도하고, 그 다음 profile과 recovery 상태를 읽는다. 자동 복구는 공식 앱을 실행하지 않는다. CLI `recovery status`는 일반 auth/registry 복구를 시작하지 않는 관찰 명령이며, 이미 증명된 journal finalization 정리만 재개할 수 있다.
+
+자동 복구가 실행 중인 공식 앱 때문에 멈춘 비종결 phase에서는 `Codex 종료하고 복구 재시도`를 누른다. 메뉴바는 표시 당시 transaction ID가 그대로인지 lock 안에서 확인하고 공식 앱에 정상 종료를 요청한 뒤 기존 복구를 다시 실행한다. 종료 후에도 남은 exact 앱 소유 프로세스만 별도 확인 뒤 `SIGTERM`하며, 새·독립·분류 불명 프로세스가 나타나면 쓰기 없이 STOP한다. 복구 성공 뒤 Codex는 자동 실행하지 않는다. `rollbackFailed`는 이 버튼 대신 기존 이전 계정 수동 복구만 사용한다.
 
 ### 저장된 계정으로 전환
 

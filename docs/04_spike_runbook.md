@@ -501,6 +501,8 @@ journal은 §9의 고정 7필드만 가진다: `schemaVersion`, `transactionId`,
 
 복구 로직도 각 mutation 전 process gate를 통과해야 한다. journal phase만으로 active auth를 추정하지 않으며 journal, registry, marker, active 이메일이 해소할 수 없이 모순되면 STOP한다. CLI `recovery status`는 일반 auth/registry 복구를 실행하지 않고 상태를 관찰하며, 이미 검증된 finalization evidence 정리만 재개할 수 있다.
 
+비종결 pending에서 시작 자동 복구가 실행 중인 공식 앱 때문에 STOP하면 메뉴바는 `Codex 종료하고 복구 재시도`를 노출한다. 명시적 재시도는 transaction lock을 먼저 잡고 UI가 읽은 exact transaction ID를 재검증한 뒤 정상 종료와 기존 exact-process 2차 종료 확인을 재사용한다. 앱 종료 뒤 공용 auth를 다시 snapshot하고 기존 복구 판단을 실행하며 Codex는 자동 실행하지 않는다. transaction 교체, 새·독립·분류 불명 프로세스, 판독 불가 auth는 mutation 없이 STOP한다. `rollbackFailed`에는 이 경로를 노출하지 않는다.
+
 ## 14. Codex 업데이트 대응
 
 앱 build가 마지막 성공 run과 달라지면 사용자에게 호환성 재검증 경고를 보여준다.

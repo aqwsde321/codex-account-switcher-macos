@@ -86,6 +86,14 @@ struct CodexAccountMenuBarApp: App {
                         expectedTransactionID: transactionID
                     )
                 },
+                retryPendingRecovery: { transactionID in
+                    guard let provider else {
+                        throw MenuBarStartupFailure.credentialStoreConfiguration
+                    }
+                    return try await provider.retryPendingRecovery(
+                        expectedTransactionID: transactionID
+                    )
+                },
                 attemptAutomaticRecovery: {
                     guard let provider else { return }
                     _ = try? await provider.recoverPendingTransaction()
@@ -192,6 +200,13 @@ private struct AccountMenuView: View {
                 } message: { _ in
                     Text("공식 앱을 정상 종료하고 저장된 이전 인증으로 복구합니다. 독립 Codex CLI와 IDE 작업은 먼저 직접 종료하세요.")
                 }
+            }
+
+            if model.canRetryRecovery {
+                Button("Codex 종료하고 복구 재시도") {
+                    Task { await model.retryRecovery() }
+                }
+                .disabled(model.isWorking)
             }
 
             if isRegistering {

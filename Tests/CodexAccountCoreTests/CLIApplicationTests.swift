@@ -1953,6 +1953,118 @@ func cliApplicationTests() -> [TestCase] {
                 try expect(journalAfter == journalBefore, "rollbackFailed changed journal")
             }
         },
+        TestCase("Local provider explicitly quiesces the app before retrying recovery") {
+            try await withCaptureTemporaryDirectory { directory in
+                let fixture = try makeReloginFixture(in: directory)
+                let store = try SpikeStore.openExisting(at: fixture.storeURL)
+                let crash = try prepareReloginCrash(fixture, phase: .quiescent)
+                try fixture.sourceAuthData.write(to: fixture.authURL)
+
+                let processes = TerminableProcessSnapshotProvider()
+                let root = ProcessRecord(
+                    identity: ProcessIdentity(pid: 601, startSeconds: 701, startMicroseconds: 1),
+                    parentPID: 1,
+                    executablePath: fixture.descriptor.mainExecutableURL.path,
+                    nameHint: "ChatGPT"
+                )
+                let child = ProcessRecord(
+                    identity: ProcessIdentity(pid: 602, startSeconds: 702, startMicroseconds: 1),
+                    parentPID: root.identity.pid,
+                    executablePath: "/bin/zsh",
+                    nameHint: "zsh"
+                )
+                let orphanedChild = ProcessRecord(
+                    identity: child.identity,
+                    parentPID: 1,
+                    executablePath: child.executablePath,
+                    nameHint: child.nameHint
+                )
+                processes.install([root, child])
+                let confirmations = TerminationConfirmationRecorder()
+                let launches = await MainActor.run { AppLaunchRecorder() }
+                let lockStoreURL = fixture.storeURL
+                let provider = LocalCLIDataProvider(
+                    storeURL: fixture.storeURL,
+                    activeAuthURL: fixture.authURL,
+                    processProvider: processes,
+                    locateApp: { fixture.descriptor },
+                    runningApplicationPIDs: { _ in
+                        processes.contains(pid: root.identity.pid) ? [root.identity.pid] : []
+                    },
+                    requestApplicationTermination: { _ in
+                        let lockStore = try SpikeStore.openExisting(at: lockStoreURL)
+                        if let unexpectedLock = try lockStore.tryAcquireTransactionLock() {
+                            unexpectedLock.release()
+                            throw TestFailure(description: "explicit recovery quit without the transaction lock")
+                        }
+                        processes.install(orphanedChild)
+                        return [root.identity.pid]
+                    },
+                    confirmAppOwnedTermination: confirmations.confirm,
+                    requestProcessTermination: { processes.terminate($0) },
+                    normalTerminationGracePolls: 0,
+                    quiescenceSleep: { _ in },
+                    launchApplication: { _ in
+                        launches.record()
+                        return 603
+                    }
+                )
+
+                let automatic = try await provider.recoverPendingTransaction()
+                let journalAfterAutomatic = try store.loadJournalIfPresent()
+                let explicit = try await provider.retryPendingRecovery(
+                    expectedTransactionID: crash.journal.transactionID.uuidString
+                )
+                let registry = try store.loadRegistry()
+                let active = try CredentialBlob(validating: Data(contentsOf: fixture.authURL))
+                let journal = try store.loadJournalIfPresent()
+                let launchCount = await MainActor.run { launches.count }
+
+                try expect(
+                    automatic == .stopped(.processBlockerPresent),
+                    "automatic recovery terminated a running app"
+                )
+                try expect(journalAfterAutomatic == crash.journal, "automatic recovery changed the journal")
+                try expect(explicit == .completed(.cancelBeforeMutation), "explicit retry did not recover A")
+                try expect(confirmations.counts == [1], "explicit retry did not confirm the exact survivor")
+                try expect(processes.terminatedPIDs == [child.identity.pid], "explicit retry terminated another process")
+                try expect(registry.activeProfileID == fixture.source.id, "explicit retry changed active profile")
+                try expect(active == fixture.sourceCredential, "explicit retry changed active auth")
+                try expect(journal == nil, "explicit retry left recovery pending")
+                try expect(launchCount == 0, "explicit retry relaunched the app")
+            }
+        },
+        TestCase("Local provider rejects a stale explicit recovery transaction") {
+            try await withCaptureTemporaryDirectory { directory in
+                let fixture = try makeReloginFixture(in: directory)
+                let store = try SpikeStore.openExisting(at: fixture.storeURL)
+                let crash = try prepareReloginCrash(fixture, phase: .quiescent)
+                try fixture.sourceAuthData.write(to: fixture.authURL)
+                let registryBefore = try store.loadRegistry()
+                let authBefore = try Data(contentsOf: fixture.authURL)
+                let provider = LocalCLIDataProvider(
+                    storeURL: fixture.storeURL,
+                    activeAuthURL: fixture.authURL,
+                    processProvider: EmptyProcessSnapshotProvider(),
+                    locateApp: { fixture.descriptor },
+                    runningApplicationPIDs: { _ in [] }
+                )
+
+                do {
+                    _ = try await provider.retryPendingRecovery(expectedTransactionID: UUID().uuidString)
+                    throw TestFailure(description: "stale explicit recovery was accepted")
+                } catch let failure as RecoveryCoordinatorFailure {
+                    try expect(failure == .snapshotInvalid, "stale retry returned the wrong failure")
+                }
+
+                let registryAfter = try store.loadRegistry()
+                let authAfter = try Data(contentsOf: fixture.authURL)
+                let journalAfter = try store.loadJournalIfPresent()
+                try expect(registryAfter == registryBefore, "stale retry changed registry")
+                try expect(authAfter == authBefore, "stale retry changed auth")
+                try expect(journalAfter == crash.journal, "stale retry changed journal")
+            }
+        },
         TestCase("Local provider makes a failed refreshingCurrent recovery terminal") {
             try await withCaptureTemporaryDirectory { directory in
                 let fixture = try makeReloginFixture(in: directory)
@@ -3502,6 +3614,7 @@ private struct ReloginFixture: Sendable {
     let authURL: URL
     let source: ProfileMetadata
     let target: ProfileMetadata
+    let sourceAuthData: Data
     let sourceCredential: CredentialBlob
     let staleTargetCredential: CredentialBlob
     let descriptor: CodexAppDescriptor
@@ -3543,9 +3656,10 @@ private func makeReloginFixture(
         createdAt: Date(timeIntervalSince1970: 1_700_000_001),
         updatedAt: Date(timeIntervalSince1970: 1_700_000_001)
     )
-    let sourceCredential = try CredentialBlob(validating: Data(
+    let sourceAuthData = Data(
         #"{"auth_mode":"chatgpt","test_account":"a","tokens":{"id_token":"a-id","access_token":"a-access","refresh_token":"a-refresh"}}"#.utf8
-    ))
+    )
+    let sourceCredential = try CredentialBlob(validating: sourceAuthData)
     let staleTargetCredential = try CredentialBlob(validating: Data(
         #"{"auth_mode":"chatgpt","test_account":"b","tokens":{"id_token":"stale-b-id","access_token":"stale-b-access","refresh_token":"stale-b-refresh"}}"#.utf8
     ))
@@ -3578,6 +3692,7 @@ private func makeReloginFixture(
         authURL: authURL,
         source: source,
         target: target,
+        sourceAuthData: sourceAuthData,
         sourceCredential: sourceCredential,
         staleTargetCredential: staleTargetCredential,
         descriptor: descriptor

@@ -423,11 +423,13 @@ func menuBarViewModelTests() -> [TestCase] {
             await model.load()
             let rollbackMessage = await MainActor.run { model.errorMessage }
             let rollbackProfile = await MainActor.run { model.recoveryProfile }
+            let rollbackRetry = await MainActor.run { model.canRetryRecovery }
             try expect(
                 rollbackMessage == "자동 복구에 실패했습니다. 회사 계정 복구가 필요합니다.",
                 "rollback recovery did not identify the exact previous profile"
             )
             try expect(rollbackProfile?.id == previous.id, "rollback recovery action targeted another profile")
+            try expect(!rollbackRetry, "rollbackFailed exposed the non-terminal retry action")
 
             let interruptedProvider = MenuBarProviderSpy(
                 profiles: menuBarProfiles(),
@@ -456,11 +458,79 @@ func menuBarViewModelTests() -> [TestCase] {
             await interruptedModel.load()
             let interruptedMessage = await MainActor.run { interruptedModel.errorMessage }
             let interruptedRecoveryProfile = await MainActor.run { interruptedModel.recoveryProfile }
+            let interruptedRetry = await MainActor.run { interruptedModel.canRetryRecovery }
             try expect(
                 interruptedMessage == "중단된 계정 작업 복구가 필요합니다. 단계: currentSaved",
                 "pending recovery phase was not shown safely"
             )
             try expect(interruptedRecoveryProfile == nil, "non-rollback recovery exposed a restore action")
+            try expect(!interruptedRetry, "model without a retry implementation exposed a retry action")
+        },
+        TestCase("MenuBarViewModel explicitly retries a non-terminal recovery once") {
+            let previous = menuBarProfiles()[0]
+            let transactionID = "00000000-0000-0000-0000-000000000012"
+            let provider = MenuBarProviderSpy(
+                profiles: menuBarProfiles(),
+                recoveryStatus: .pending(
+                    transactionID: transactionID,
+                    phase: .quiescent,
+                    previousProfileID: previous.id
+                )
+            )
+            let retries = RefreshOrderRecorder()
+            let model = await makeMenuBarModel(
+                provider: provider,
+                useInjectedProfileLoad: true,
+                retryPendingRecovery: { requestedTransactionID in
+                    await retries.record(requestedTransactionID)
+                    await provider.setRecoveryStatus(.none)
+                    await provider.failNextProfileLoad()
+                    return .completed(.cancelBeforeMutation)
+                }
+            )
+
+            await model.load()
+            let availableBefore = await MainActor.run { model.canRetryRecovery }
+            await model.retryRecovery()
+            await model.retryRecovery()
+            let requestedTransactions = await retries.events
+            let availableAfter = await MainActor.run { model.canRetryRecovery }
+            let recoveryStatus = await MainActor.run { model.recoveryStatus }
+            let statusMessage = await MainActor.run { model.statusMessage }
+            let errorMessage = await MainActor.run { model.errorMessage }
+
+            try expect(availableBefore, "quiescent recovery did not expose retry")
+            try expect(requestedTransactions == [transactionID], "explicit recovery retried a stale transaction")
+            try expect(!availableAfter, "completed recovery left retry enabled")
+            try expect(recoveryStatus == .none, "completed recovery left pending status")
+            try expect(statusMessage == "중단된 계정 작업을 복구했습니다. Codex 앱을 직접 여세요.", "recovery success message changed")
+            try expect(errorMessage == nil, "completed recovery left an error")
+        },
+        TestCase("MenuBarViewModel explains an unverified explicit recovery") {
+            let previous = menuBarProfiles()[0]
+            let pending = RecoveryCLIStatus.pending(
+                transactionID: "00000000-0000-0000-0000-000000000013",
+                phase: .quiescent,
+                previousProfileID: previous.id
+            )
+            let provider = MenuBarProviderSpy(profiles: menuBarProfiles(), recoveryStatus: pending)
+            let model = await makeMenuBarModel(
+                provider: provider,
+                retryPendingRecovery: { _ in .stopped(.activeCredentialUnverified) }
+            )
+
+            await model.load()
+            await model.retryRecovery()
+            let recoveryStatus = await MainActor.run { model.recoveryStatus }
+            let retryAvailable = await MainActor.run { model.canRetryRecovery }
+            let errorMessage = await MainActor.run { model.errorMessage }
+
+            try expect(recoveryStatus == pending, "stopped retry lost the pending journal")
+            try expect(retryAvailable, "safe STOP removed the retry action")
+            try expect(
+                errorMessage == "현재 로그인 계정을 확인하지 못했습니다. 이전 활성 계정으로 로그인한 뒤 재시도하세요.",
+                "unverified recovery was not actionable"
+            )
         },
         TestCase("MenuBarViewModel restores only after exact confirmation") {
             let previous = menuBarProfiles()[1]
@@ -855,7 +925,8 @@ private actor RefreshOrderRecorder {
 private func makeMenuBarModel(
     provider: MenuBarProviderSpy,
     useInjectedProfileLoad: Bool = false,
-    captureProfile: MenuBarViewModel.CaptureProfile? = nil
+    captureProfile: MenuBarViewModel.CaptureProfile? = nil,
+    retryPendingRecovery: MenuBarViewModel.RetryPendingRecovery? = nil
 ) async -> MenuBarViewModel {
     await MainActor.run {
         MenuBarViewModel(
@@ -872,7 +943,8 @@ private func makeMenuBarModel(
             reloginProfile: { try await provider.reloginProfile(target: $0) },
             restoreRecoveryProfile: {
                 try await provider.restoreRecoveryProfile(target: $0, expectedTransactionID: $1)
-            }
+            },
+            retryPendingRecovery: retryPendingRecovery
         )
     }
 }
@@ -971,6 +1043,10 @@ private actor MenuBarProviderSpy {
 
     func setRecoveryStatus(_ status: RecoveryCLIStatus) {
         storedRecoveryStatus = status
+    }
+
+    func failNextProfileLoad() {
+        injectedProfileLoadFailurePending = true
     }
 
     func captureProfile(label: String) throws -> ProfileListItem {
