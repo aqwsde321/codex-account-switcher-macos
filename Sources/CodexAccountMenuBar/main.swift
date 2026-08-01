@@ -472,5 +472,6 @@ private func confirmRegistration() -> Bool {
     alert.addButton(withTitle: "Codex 자동 종료하고 등록")
     let cancel = alert.addButton(withTitle: "취소")
     cancel.keyEquivalent = "\u{1b}"
+    NSApp.activate(ignoringOtherApps: true)
     return alert.runModal() == .alertFirstButtonReturn
 }
