@@ -211,10 +211,13 @@ private struct AccountMenuView: View {
                             let label = registrationLabel
                             guard confirmRegistration() else { return }
                             Task {
-                                if await model.register(label: label)
-                                    || model.recoveryRequired {
+                                let registered = await model.register(label: label)
+                                if registered || model.recoveryRequired {
                                     registrationLabel = ""
                                     isRegistering = false
+                                }
+                                if let errorMessage = model.errorMessage {
+                                    showRegistrationError(errorMessage)
                                 }
                             }
                         }
@@ -474,4 +477,15 @@ private func confirmRegistration() -> Bool {
     cancel.keyEquivalent = "\u{1b}"
     NSApp.activate(ignoringOtherApps: true)
     return alert.runModal() == .alertFirstButtonReturn
+}
+
+@MainActor
+private func showRegistrationError(_ message: String) {
+    let alert = NSAlert()
+    alert.alertStyle = .warning
+    alert.messageText = "계정 등록 문제"
+    alert.informativeText = message
+    alert.addButton(withTitle: "확인")
+    NSApp.activate(ignoringOtherApps: true)
+    alert.runModal()
 }

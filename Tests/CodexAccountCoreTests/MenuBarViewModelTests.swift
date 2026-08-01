@@ -291,6 +291,33 @@ func menuBarViewModelTests() -> [TestCase] {
             try expect(labelsAfterBlockedRetry == ["회사"], "recovery gate retried registration")
             try expect(targetsAfterBlockedRetry.isEmpty, "recovery gate allowed profile selection")
         },
+        TestCase("MenuBarViewModel explains registration compatibility and process blockers") {
+            let provider = MenuBarProviderSpy(profiles: [])
+            let model = await makeMenuBarModel(
+                provider: provider,
+                captureProfile: { label in
+                    if label == "호환성" {
+                        throw CodexAppLocatorFailure.invalidSignature
+                    }
+                    throw LocalCLIDataProviderFailure.processBlocked
+                }
+            )
+
+            await model.load()
+            _ = await model.register(label: "호환성")
+            let compatibilityMessage = await MainActor.run { model.errorMessage }
+            try expect(
+                compatibilityMessage == "설치된 Codex 앱의 무결성 또는 호환성을 확인하지 못했습니다. 공식 앱을 다시 설치하거나 업데이트하세요.",
+                "registration compatibility failure was not actionable"
+            )
+
+            _ = await model.register(label: "프로세스")
+            let processMessage = await MainActor.run { model.errorMessage }
+            try expect(
+                processMessage == "독립 Codex CLI와 IDE 작업을 종료한 뒤 다시 시도하세요.",
+                "registration process blocker was not actionable"
+            )
+        },
         TestCase("MenuBarViewModel syncs the active credential and stops on recovery") {
             let provider = MenuBarProviderSpy(profiles: menuBarProfiles())
             let model = await MainActor.run {
@@ -827,7 +854,8 @@ private actor RefreshOrderRecorder {
 
 private func makeMenuBarModel(
     provider: MenuBarProviderSpy,
-    useInjectedProfileLoad: Bool = false
+    useInjectedProfileLoad: Bool = false,
+    captureProfile: MenuBarViewModel.CaptureProfile? = nil
 ) async -> MenuBarViewModel {
     await MainActor.run {
         MenuBarViewModel(
@@ -838,7 +866,7 @@ private func makeMenuBarModel(
                 return await provider.profiles()
             },
             loadRecoveryStatus: { await provider.recoveryStatus() },
-            captureProfile: { try await provider.captureProfile(label: $0) },
+            captureProfile: captureProfile ?? { try await provider.captureProfile(label: $0) },
             syncActiveProfile: { try await provider.syncActiveProfile() },
             switchProfile: { try await provider.switchProfile(target: $0, onPhaseChange: $1) },
             reloginProfile: { try await provider.reloginProfile(target: $0) },

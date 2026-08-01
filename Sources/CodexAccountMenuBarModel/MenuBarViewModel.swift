@@ -269,7 +269,15 @@ public final class MenuBarViewModel: ObservableObject {
                 errorMessage = "계정은 등록했지만 Codex 앱을 다시 열지 못했습니다."
                 return true
             }
-            errorMessage = "계정 등록을 완료하지 못했습니다."
+            switch error {
+            case is CodexAppLocatorFailure,
+                 LocalCLIDataProviderFailure.incompatibleApplication:
+                errorMessage = "설치된 Codex 앱의 무결성 또는 호환성을 확인하지 못했습니다. 공식 앱을 다시 설치하거나 업데이트하세요."
+            case LocalCLIDataProviderFailure.processBlocked:
+                errorMessage = "독립 Codex CLI와 IDE 작업을 종료한 뒤 다시 시도하세요."
+            default:
+                errorMessage = "계정 등록을 완료하지 못했습니다."
+            }
             return false
         }
     }
