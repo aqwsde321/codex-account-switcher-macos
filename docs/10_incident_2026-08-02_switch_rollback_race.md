@@ -88,17 +88,28 @@ Keychain 접근은 B launch 전인 `10:05:57.528` 이후 관찰되지 않았다.
 PASS 140 tests
 ```
 
-기존 persistent app child, independent Codex, 분류 불명 process 차단 테스트도 통과했다. 설치 앱에서의 실제 A 복구와 A→B 재전환은 아직 수행하지 않았다.
+기존 persistent app child, independent Codex, 분류 불명 process 차단 테스트도 통과했다.
 
-## 현재 조치와 다음 단계
+## 실제 A 복구 결과
 
-현재 사용자는 B로 Codex를 직접 연 상태다. 수동 B 로그아웃은 저장된 B refresh 가능성을 무효화할 수 있으므로 먼저 하지 않는다.
+수정 앱 설치 뒤 사용자가 native 확인창에서 A 복구를 승인했다. B 수동 로그아웃, 제품 journal 삭제, auth 직접 복사는 하지 않았다.
 
-1. 최신 소스로 메뉴바 앱을 build/install한다.
-2. 메뉴의 A 복구를 눌러 native 확인창 표시와 취소 기본값을 확인한다.
-3. 복구를 명시 승인한다. 메뉴 앱이 Codex를 정상 종료하고 A 인증을 검증·복원해야 한다.
-4. Keychain 요청이 나오면 설치 앱 접근을 승인한다.
-5. Codex를 직접 열어 A 로그인, 메뉴 A 활성, journal 부재를 확인한다.
-6. A→B 전환을 다시 실행해 PID 지연 경합이 재발하지 않는지 확인한다.
+`11:37:06` 복구 로그:
 
-복구 완료 전에는 계정 카드, 동기화, 등록을 실행하지 않는다. 제품 journal을 수동 삭제하거나 auth/Keychain을 직접 복사하지 않는다.
+```text
+active_profile_commit_started
+active_profile_commit_finished
+journal_removal_started
+journal_removal_finished
+recovery_finished outcome=none
+```
+
+읽기 전용 최종 확인:
+
+```text
+journal=absent
+registry=A active
+사용자 확인 Codex 로그인=A
+```
+
+실제 A 복구는 PASS다. 수정 뒤 A→B 정상 전환은 아직 재검증하지 않았다.

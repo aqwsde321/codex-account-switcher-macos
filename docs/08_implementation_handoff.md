@@ -5,9 +5,9 @@
 - 코드: 저장소 루트 `.`
 - 중요: 외부 Terminal에서 A↔B 기능 왕복 3회, 수동 A 복구 2회, B-011 자동 롤백을 완료했다. B-010 형식 증거는 보존하지 않았으며 ADR-027에 따라 개발에는 수용하고 MVP 완료·배포 전 게이트로 유지한다.
 
-## 0. 2026-08-02 현재 복구 대기 상태
+## 0. 2026-08-02 복구 완료 상태
 
-실계정 A→B 전환에서 B 인증·앱 실행 뒤 롤백이 중단됐다. 작성 시점 제품 상태는 `registry=A`, `active auth=B`, `journal=rollbackFailed`다. 사용자는 B로 Codex를 직접 열었으며 수동 로그아웃하지 않았다.
+실계정 A→B 전환에서 B 인증·앱 실행 뒤 롤백이 중단돼 `registry=A`, `active auth=B`, `journal=rollbackFailed`가 됐다. 사용자는 B를 수동 로그아웃하지 않고 수정 앱의 명시적 A 복구를 실행했다.
 
 수정 커밋:
 
@@ -15,7 +15,7 @@
 - `86e8eac`: LaunchServices PID 가시성 지연을 bounded wait로 처리
 - `fa022e3`: 종료 중 생성된 앱 소유 자식의 자연 종료 대기
 
-`./Scripts/dev.sh test`는 140개를 통과했다. 소스 수정은 아직 설치 앱과 실제 제품 상태에 반영하지 않았다. 다음 task는 [10_incident_2026-08-02_switch_rollback_race.md](10_incident_2026-08-02_switch_rollback_race.md)를 먼저 읽고, 최신 앱 설치 → A 명시 복구 → journal 부재·A 로그인 확인 순서로 진행한다. 제품 journal 삭제, auth 직접 복사, B 수동 로그아웃으로 우회하지 않는다.
+`./Scripts/dev.sh test`는 140개를 통과했고 수정 앱 설치 뒤 A 복구도 완료했다. 제품 journal은 없고 registry는 A active이며 사용자가 공식 Codex의 A 로그인을 확인했다. 다음 task는 [10_incident_2026-08-02_switch_rollback_race.md](10_incident_2026-08-02_switch_rollback_race.md)를 먼저 읽고 작업을 이어간다. 수정 뒤 A→B 정상 전환은 아직 재검증하지 않았다.
 
 ## 1. 새 task에서 시작하는 방법
 
@@ -83,7 +83,7 @@ ADR-027·ADR-029·ADR-030과 기존 안전 결정을 유지한 채 Step 9 메뉴
 - B-015~B-017 세 프로필 전환·재로그인 실계정 Black-box 검증
 - MVP 완료·배포 전 `07_test_acceptance.md` §16 형식의 동일 task 왕복 증거 보존
 
-version/build 번호는 호환성 hard gate가 아니다. 앱 검사 시 `Versions/Current` Crashpad를 canonicalize해 bundle 내부 regular executable과 정적 OpenAI 서명을 확인하고, 실행 process의 exact path·서명도 다시 확인한다. 현재 설치된 `26.727.51351`/`6119`는 이 검사, read-only process 검증, 빈 임시 홈의 App Server `initialize`·`account/read(false)`, 첫 계정 등록을 통과했다. 실제 계정 전환·rollback은 아직 완료하지 않았다.
+version/build 번호는 호환성 hard gate가 아니다. 앱 검사 시 `Versions/Current` Crashpad를 canonicalize해 bundle 내부 regular executable과 정적 OpenAI 서명을 확인하고, 실행 process의 exact path·서명도 다시 확인한다. 현재 설치된 `26.727.51351`/`6119`는 이 검사, read-only process 검증, 빈 임시 홈의 App Server `initialize`·`account/read(false)`, 첫 계정 등록을 통과했다. 실제 A→B 시도에서 rollback 경합을 재현하고 수정 앱으로 A 복구를 완료했으며, 수정 뒤 정상 A→B 전환은 아직 재검증하지 않았다.
 
 재개 명령과 구현 범위는 루트 `README.md`를 먼저 읽는다.
 
