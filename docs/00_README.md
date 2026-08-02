@@ -1,7 +1,7 @@
 # Codex Account Switcher 문서 인덱스
 
 - 문서 상태: 기준안 완료
-- 구현 상태: 최대 3개 프로필 Core/CLI, 수동 복구 typed outcome, `MenuBarExtra` 재로그인·시작 자동 복구·잔존 프로세스 2차 확인 slice 완료
+- 구현 상태: 최대 3개 프로필 Core/CLI, 수동 복구 typed outcome, `MenuBarExtra` 재로그인·시작 자동 복구·비활성 계정 삭제 slice 완료
 - 실제 검증: A↔B 기능 왕복 3회, 수동 A 복구 2회, B-011 자동 롤백 PASS
 - 제품 단계: ADR-027에 따라 `MenuBarExtra` MVP 개발 승인
 - 마지막 조사일: 2026-08-02
@@ -26,7 +26,7 @@
 |---|---|---|
 | [01_product_requirements.md](01_product_requirements.md) | 제품 목적, 범위, UX, 기능·비기능 요구 | 제품 전체 파악 |
 | [02_decision_record.md](02_decision_record.md) | 확정 결정, 이유, 기각 대안, 재검토 조건 | 모든 새 구현 task의 필독 문서 |
-| [03_feature_flow.md](03_feature_flow.md) | 등록·전환·롤백·crash recovery 흐름과 상태 | orchestration 구현 전 |
+| [03_feature_flow.md](03_feature_flow.md) | 등록·전환·삭제·롤백·crash recovery 흐름과 상태 | orchestration 구현 전 |
 | [04_spike_runbook.md](04_spike_runbook.md) | 실제 계정 Spike 사전조건과 순서 | 외부 Terminal 실검증 전 |
 | [05_technical_design.md](05_technical_design.md) | Swift 구조, App Server, process, file transaction | Core 구현 전 |
 | [06_security_and_recovery.md](06_security_and_recovery.md) | 위협 모델, 비밀 저장, 원자성, 실패별 복구 | auth 관련 코드 구현·리뷰 전 |

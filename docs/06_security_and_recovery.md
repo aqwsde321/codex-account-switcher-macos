@@ -182,6 +182,8 @@ flowchart LR
 - 대상 식별·갱신·Keychain 저장 중 하나라도 실패하면 공용 active auth는 변경하지 않고 대상 프로필과 기존 저장본을 보존한다. 명시적 인증 만료·폐기·로그아웃·identity 불일치만 재로그인 상태로 바꾼다. timeout·network/server 오류는 retryable 검증 실패, Keychain write 실패는 저장소 오류이며 둘 다 token 폐기나 재로그인 근거가 아니다.
 - 비활성 B 재로그인은 사용자가 공식 앱에서 B 로그인을 완료하고 모든 관련 프로세스를 종료한 뒤 exact profile ID 확인으로만 시작한다. 첫 verifier 전에 `validatingTarget`을 기록하고 공용 auth의 B identity·refresh·동일 file identity를 검증한 뒤에만 B Keychain item을 교체한다.
 - 재로그인 성공 경로는 A active를 유지한 registry에서 B marker를 먼저 해제하고 `targetVerified`를 내구 기록한 뒤 active ID를 B로 바꾼다. 성공 뒤 앱은 자동 실행하지 않는다. pending·blocked·wrong-ID outcome·내구 상태 불일치에서는 자동 재시도하지 않는다.
+- 비활성 프로필 삭제는 해당 profile UUID의 Keychain item과 registry 항목만 제거한다. 활성 `auth.json`, active ID, OpenAI 계정은 변경하지 않으며 활성 프로필 삭제는 거부한다.
+- 삭제는 secret-free `profile-removal.json`을 먼저 내구 기록하고 Keychain item→registry profile→marker 순서로 멱등 수행한다. Keychain 거부·중단 시 marker와 registry를 보존하고 다음 자동 복구에서 재개한다.
 - 공식 앱 재실행 후 검증은 공용 active auth를 임시 격리 홈에 복사해 `account/read(refreshToken: false)`를 호출한다. private Electron IPC에는 연결하지 않으며, 이 검증은 공용 active auth의 이메일만 직접 입증한다.
 - Developer ID 서명·공증은 공개 바이너리 배포 단계의 후속 gate다. 현재 ad-hoc 소스 build는 random synthetic item의 현재-build CRUD만 입증하며, 서명 identity가 바뀐 뒤 기존 item 접근과 잠금·거부 정책은 별도 재검증한다.
 
@@ -227,6 +229,7 @@ preparing
 - lock 아래 phase/expected profile, registry, active auth digest, capture marker·verifier workspace 부재를 확인한다. `preparing`/`quitRequested` 외 phase는 configured credential exact 일치도 요구한다. journal/evidence phase는 exact 일치 또는 finalization 실패 뒤 `rollbackStarted`→`rollbackFailed`만 허용한다. journal과 evidence가 함께 남으면 journal 내구 삭제→상태 재검증→evidence 내구 삭제를 재개하고, journal이 없으면 directory `fsync`→상태 재검증→evidence 삭제를 수행한다. 실패하면 `blocked`이고 switch·capture·sync를 모두 거부한다.
 - `authReplaced` 전 사용자 취소나 process/compatibility 차단은 active가 검증된 source 상태임을 확인한 뒤 journal을 `unlink`하고 parent directory를 `fsync`한다.
 - journal이 누락이 아니라 malformed, 필드 초과·누락, 알 수 없는 phase, torn JSON이면 자동 추정·삭제·인증 변경 없이 `STOP`한다.
+- 삭제 marker는 정확히 `schemaVersion, transactionId, profileId, expectedActiveProfileId` 네 필드만 허용한다. marker와 switch journal이 공존하거나 expected active가 다르면 양쪽을 보존하고 `STOP`한다.
 
 ### 6.3 Auth 교체 불변조건
 

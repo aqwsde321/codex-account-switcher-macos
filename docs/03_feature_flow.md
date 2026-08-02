@@ -1,7 +1,7 @@
 # Codex 계정 전환 기능 흐름
 
-- 상태: Swift CLI Spike 완료, 메뉴바 등록 자동 종료·재실행과 재로그인·시작 자동 복구 slice 완료
-- 기준일: 2026-08-01
+- 상태: Swift CLI Spike 완료, 메뉴바 등록·전환·복구·재로그인·비활성 계정 삭제 slice 완료
+- 기준일: 2026-08-02
 - 대상: macOS 공식 Codex 앱용 별도 메뉴바 helper
 - 선행 단계: Swift CLI Spike
 
@@ -71,6 +71,8 @@
 | 대상 토큰 만료·폐기 | 이전 계정으로 롤백, 대상 프로필 유지, 재로그인 필요 표시 |
 | 대상 이메일 불일치 | 새 앱을 정상 종료한 뒤 자동 롤백 |
 | 롤백 검증 실패 | 앱을 실행하지 않은 안전 정지 상태 유지, 수동 복구 안내 |
+| 비활성 프로필 삭제 | 로컬 registry 항목과 해당 Keychain item만 제거; 현재 로그인·OpenAI 계정 불변 |
+| 활성 프로필 삭제 | UI 미노출, Core 거부 |
 | Codex 업데이트 감지 | version/build와 무관하게 공식 서명·canonical bundle 경로·App Server 계약을 다시 검사하고, 통과하면 진행하며 불일치하면 차단 |
 | bundle/auth/App Server 계약 파손 | 즉시 차단; 인증 파일을 변경하지 않음 |
 
@@ -177,6 +179,17 @@ flowchart TD
 8. registry active ID를 B로 커밋하고 journal을 내구 삭제한다. 공식 앱은 자동 실행하지 않으며 사용자가 직접 연다.
 9. `targetVerified` 전 확정 실패는 A credential·active ID를 검증 복원한다. verifier 종료를 확인하지 못하면 auth를 다시 쓰지 않고 pending으로 남긴다. Core throw 뒤 recovery가 없으면 수동 재시도를 허용하고, pending·blocked면 재시도하지 않는다.
 10. journal 삭제 내구성이 불명확하면 profile·recovery를 다시 읽는다. B 하나만 active이고 marker가 해제됐으며 recovery가 없을 때만 완료를 재확인한다. 그 밖에는 STOP한다.
+
+### 3.4.1 비활성 계정 삭제·재등록
+
+1. 활성 카드에는 삭제 동작을 노출하지 않는다. 비활성 카드의 휴지통만 삭제 확인을 연다.
+2. 독립 native modal은 로컬 registry와 해당 Keychain item만 삭제하며 OpenAI 계정과 현재 Codex 로그인은 바뀌지 않음을 표시한다. 취소가 기본 동작이다.
+3. 확인 snapshot은 exact profile ID·라벨·이메일·상태를 보존한다. ViewModel은 Core 호출 직전에 profile과 recovery를 다시 읽고 동일한 비활성 프로필일 때만 진행한다.
+4. Core는 단일 transaction lock 아래 전환 journal·finalization evidence·capture marker·verifier workspace가 없고 대상이 여전히 비활성인지 재검증한다.
+5. `profile-removal.json`에 `schemaVersion, transactionId, profileId, expectedActiveProfileId`만 내구 기록한다.
+6. Keychain item 멱등 삭제→registry profile 내구 삭제→삭제 marker 내구 삭제 순서로 완료한다. `auth.json`과 활성 프로필은 쓰지 않는다.
+7. 중단되면 시작 자동 복구가 같은 순서를 재개한다. 삭제 marker와 전환 journal이 함께 있거나 예상 active ID가 바뀌었으면 자동 추정 없이 둘 다 보존하고 STOP한다.
+8. 완료 뒤 프로필 슬롯과 라벨·이메일 중복 제약이 해제된다. 사용자는 같은 계정으로 공식 앱에 로그인해 같은 라벨·이메일로 다시 등록할 수 있으며 새 profile ID가 발급되고 등록 시작 전 활성 계정으로 복귀한다.
 
 ### 3.5 전환 실패와 자동 롤백
 

@@ -1,7 +1,7 @@
 # 구현 인수인계
 
-- 상태: CLI Spike 검증 완료, 메뉴바 재로그인·시작 자동 복구·잔존 프로세스 2차 확인·ad-hoc 소스 앱 설치·synthetic Keychain smoke 완료
-- 기준일: 2026-07-31
+- 상태: CLI Spike 검증 완료, 메뉴바 등록·전환·복구·재로그인·비활성 계정 삭제 구현과 최신 앱 설치 완료
+- 기준일: 2026-08-02
 - 코드: 저장소 루트 `.`
 - 중요: 외부 Terminal에서 A↔B 기능 왕복 3회, 수동 A 복구 2회, B-011 자동 롤백을 완료했다. B-010 형식 증거는 보존하지 않았으며 ADR-027에 따라 개발에는 수용하고 MVP 완료·배포 전 게이트로 유지한다.
 
@@ -69,9 +69,10 @@ ADR-027·ADR-029·ADR-030과 기존 안전 결정을 유지한 채 Step 9 메뉴
 - inactive `needsRelogin` exact-ID 확인, B credential 갱신·marker 해제·B 활성화, 불확실 결과 재조정, 앱 수동 실행 안내 구현
 - 메뉴바 상태 조회 전 production startup recovery, STOP/terminal guard, 앱 자동 실행 금지 구현
 - 메뉴바 native 비동기 잔존 앱 프로세스 2차 확인, 취소 기본, 종료 전 exact snapshot 대상의 `SIGTERM` 1회 제한 구현
+- inactive-only 로컬 계정 삭제, exact snapshot 재검증, 내구 삭제 marker와 시작 자동 복구, native destructive 확인 UI 구현
 - Command Line Tools 기반 release `.app` build, strict ad-hoc 서명, 고정 bundle ID와 LaunchAgent install/update/uninstall 구현
 - 번들·설치 실행파일의 random synthetic Keychain create/read/update/read/delete/notFound와 cleanup 통과; 제품 service·실제 auth 접근 0회
-- fake credential만 사용하는 130개 debug 테스트 통과
+- fake credential만 사용하는 148개 debug 테스트와 전체 executable build 통과
 - 실제 read-only inspect에서 사용자 auth와 helper store 무변경 확인
 - `rollbackFailed` 수동 복구 CLI와 실환경 A 복구 2회 완료
 - debug 전용 B-011 실패 주입에서 source 자동 롤백과 최종 A 복귀 확인
@@ -82,6 +83,7 @@ ADR-027·ADR-029·ADR-030과 기존 안전 결정을 유지한 채 Step 9 메뉴
 - 실제 잔존 앱 프로세스 2차 확인 Black-box 검증
 - 실계정 제품 service Keychain flow, ad-hoc 재빌드 뒤 기존 item ACL, 잠금·접근 거부 정책 검증
 - B-015~B-017 세 프로필 전환·재로그인 실계정 Black-box 검증
+- 비활성 계정 삭제 취소·승인과 같은 라벨·이메일 재등록 실계정 Black-box 검증
 - MVP 완료·배포 전 `07_test_acceptance.md` §16 형식의 동일 task 왕복 증거 보존
 
 version/build 번호는 호환성 hard gate가 아니다. 앱 검사 시 `Versions/Current` Crashpad를 canonicalize해 bundle 내부 regular executable과 정적 OpenAI 서명을 확인하고, 실행 process의 exact path·서명도 다시 확인한다. 현재 설치된 `26.727.51351`/`6119`는 이 검사, read-only process 검증, 빈 임시 홈의 App Server `initialize`·`account/read(false)`, 첫 계정 등록을 통과했다. 실제 A→B 시도에서 rollback 경합을 재현했고, 수정 앱으로 A 복구 후 수정된 native 전환 확인창을 통해 A→B→A 왕복을 완료했다.
@@ -343,7 +345,7 @@ cd codex-account-switcher-spike
 
 ADR-027의 개발 승인에 따라 시작한다. B-010 정식 증거 공백은 릴리스 게이트로 남긴다.
 
-현재 1~6과 실제 provider 주입·등록·활성 인증 동기화·durable phase 진행 표시·inactive target 재로그인, recovery mutation gate·시작 자동 복구·상세 표시·exact transaction/previous-profile 수동 복구, ad-hoc 소스 앱 설치와 synthetic Keychain host smoke까지 완료됐다. 실계정 제품 flow·재부팅·잔존 프로세스 2차 확인·ad-hoc 재빌드 ACL Black-box 검증이 다음 작업이다.
+현재 1~6과 실제 provider 주입·등록·활성 인증 동기화·durable phase 진행 표시·inactive target 재로그인·inactive-only 로컬 삭제, recovery mutation gate·시작 자동 복구·상세 표시·exact transaction/previous-profile 수동 복구, ad-hoc 소스 앱 설치와 synthetic Keychain host smoke까지 완료됐다. 삭제·재등록을 포함한 실계정 제품 flow, 재부팅, 잔존 프로세스 2차 확인, ad-hoc 재빌드 ACL Black-box 검증이 다음 작업이다.
 
 구현 순서:
 
@@ -410,6 +412,16 @@ registration slice의 완료 기준:
 - capture가 durable commit 뒤 실패해도 profile 목록을 다시 읽어 중복 재시도를 막는다.
 - 추가 등록 commit 뒤 앱 launch만 실패하고 recovery가 없으면 새 profile ID를 등록 완료로 판정하고 폼을 닫되 launch 실패를 알린다.
 - 테스트는 fake provider만 사용하며 실제 홈·Keychain·공식 앱을 건드리지 않는다.
+
+inactive profile removal slice의 완료 기준:
+
+- 활성 카드에는 삭제 UI를 노출하지 않고 Core도 활성 profile ID를 거부한다.
+- 비활성 카드의 휴지통은 메뉴 팝오버와 독립된 native modal을 열며 취소가 첫/default 동작, 삭제가 destructive action이다.
+- 확인문은 로컬 registry와 해당 Keychain item만 삭제하고 OpenAI 계정·현재 Codex 로그인은 바뀌지 않음을 알린다.
+- ViewModel은 exact snapshot을 보존하고 호출 직전 profile·recovery를 재조회한다. 취소·활성·stale·recovery 상태는 Core 호출 0회다.
+- Core는 transaction lock 아래 secret-free 삭제 marker를 먼저 내구 기록하고 Keychain item→registry profile→marker 순서로 멱등 삭제한다. active auth는 쓰지 않는다.
+- Keychain 거부·중단은 marker와 registry를 보존하고 시작 자동 복구가 재개한다. switch journal과 공존하면 둘 다 보존하고 STOP한다.
+- 삭제 뒤 같은 라벨·이메일로 재등록할 수 있고 새 profile ID가 발급된다. 이 실제 Keychain 삭제·재등록 흐름은 Black-box 검증 전까지 미확인이다.
 
 active credential sync slice의 완료 기준:
 

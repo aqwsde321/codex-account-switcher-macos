@@ -539,6 +539,27 @@
   - Developer ID 릴리스와 provisioning profile을 포함한 배포 경로가 확정됨
   - App Store sandbox 또는 여러 executable 사이 Keychain access group 공유가 필요함
 
+## ADR-031: 비활성 계정 삭제는 로컬 저장본만 제거한다
+
+- 상태: 승인 (2026-08-02)
+- 결정:
+  - 삭제는 비활성 프로필에만 허용한다. 활성 프로필에는 삭제 UI를 노출하지 않고 Core도 거부한다.
+  - 삭제 범위는 메뉴바 registry의 해당 프로필과 profile UUID로 저장한 Keychain item이다. OpenAI 계정, 현재 `~/.codex/auth.json`, 현재 Codex 로그인은 변경하지 않는다.
+  - `profile-removal.json`을 먼저 내구 기록한 뒤 Keychain item→registry profile→삭제 marker 순서로 제거한다. 중단되면 시작 자동 복구가 같은 순서를 멱등 재개한다.
+  - 삭제 marker와 전환 journal이 함께 존재하는 모순 상태는 둘 다 보존하고 `STOP`한다.
+  - 삭제 뒤 같은 계정으로 공식 앱에 로그인해 같은 라벨·이메일로 다시 등록할 수 있다. 재등록은 새 profile UUID를 사용하며 기존 활성 프로필로 복귀한다.
+- 이유:
+  - 활성 프로필 삭제는 현재 로그인과 registry의 기준점을 불명확하게 만든다.
+  - Keychain과 registry는 원자 transaction을 공유하지 않으므로 삭제 의도를 먼저 남겨야 crash 뒤 고아 credential 또는 깨진 profile을 정리할 수 있다.
+  - 로컬 전환기 항목 삭제와 OpenAI 계정 삭제를 분리해야 사용자가 파괴 범위를 정확히 알 수 있다.
+- 기각 대안:
+  - 활성 프로필도 삭제: 현재 로그인 보존과 active ID 불변조건을 깨뜨린다.
+  - registry만 삭제: Keychain item이 고아로 남는다.
+  - marker 없이 Keychain부터 삭제: crash 뒤 삭제 의도와 손상 상태를 구분할 수 없다.
+- 재검토 트리거:
+  - 공식 앱이 안정적인 다중 계정 제거 API를 제공함
+  - OpenAI 계정 로그아웃·폐기까지 포함한 별도 명시 기능 요구가 확정됨
+
 ## 2. 결정 간 핵심 제약
 
 아래 제약은 하나라도 깨지면 구현을 계속하지 않는다.
@@ -555,6 +576,7 @@
 10. MVP는 사용량, 자동 전환, 계정별 환경을 포함하지 않는다.
 11. 실제 인증값과 이메일을 문서·로그·fixture에 넣지 않는다.
 12. 재로그인 반영은 exact inactive target만 허용하며 성공 후 앱을 자동 실행하지 않는다.
+13. 계정 삭제는 비활성 로컬 프로필과 해당 Keychain item에만 적용하고 현재 로그인은 바꾸지 않는다.
 
 ## 3. 재검토 절차
 
@@ -570,4 +592,4 @@
 
 ## 4. 구현 task 시작용 요약
 
-Swift CLI Core와 메뉴바의 등록·전환·복구·재로그인 연결은 완료됐다. 기본 `~/.codex`만 지원하고 비활성 인증은 Keychain에 둔다. 공식 앱 정상 종료, 독립 CLI 차단, `flock`, 비밀 없는 저널, `account/read` 이메일 검증, 전체 롤백 불변조건은 유지한다. 최대 3개 프로필을 노출하고 사용량은 후속이다. ADR-027에 따라 개발은 진행하되 B-010 정식 증거는 MVP 완료·배포 전 확보한다.
+Swift CLI Core와 메뉴바의 등록·전환·복구·재로그인·비활성 프로필 삭제 연결은 완료됐다. 기본 `~/.codex`만 지원하고 비활성 인증은 Keychain에 둔다. 공식 앱 정상 종료, 독립 CLI 차단, `flock`, 비밀 없는 저널, `account/read` 이메일 검증, 전체 롤백 불변조건은 유지한다. 최대 3개 프로필을 노출하고 사용량은 후속이다. ADR-027에 따라 개발은 진행하되 B-010 정식 증거는 MVP 완료·배포 전 확보한다.

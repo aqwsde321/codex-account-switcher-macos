@@ -37,6 +37,7 @@
 - 메뉴바 상태 조회 전 미완료 journal 자동 복구, 불확실 상태 STOP, 복구 중 앱 자동 실행 금지
 - 비종결 recovery pending을 exact transaction에 묶어 공식 앱 정상 종료 뒤 다시 처리하는 메뉴바 복구 재시도
 - 메뉴바의 native 비동기 잔존 앱 프로세스 2차 확인, 취소 기본, 종료 전 exact snapshot 대상에만 `SIGTERM` 1회
+- 메뉴바 비활성 계정의 로컬 profile·Keychain item 삭제, 중단 자동 복구, 같은 계정 재등록 허용
 - Command Line Tools만으로 만드는 ad-hoc 서명 `.app`, 고정 경로 설치·LaunchAgent 자동 실행·보존형 제거
 - 번들·설치 실행파일의 random synthetic Keychain create/read/update/read/delete/notFound smoke; 제품 service·실제 auth 접근 0회
 
@@ -135,6 +136,12 @@ cd codex-account-switcher-spike
 메뉴바는 시작과 mutation 실패 뒤 상태를 새로 읽을 때 자동 복구를 먼저 한 번 시도하고, 그 다음 profile과 recovery 상태를 읽는다. 자동 복구는 공식 앱을 실행하지 않는다. CLI `recovery status`는 일반 auth/registry 복구를 시작하지 않는 관찰 명령이며, 이미 증명된 journal finalization 정리만 재개할 수 있다.
 
 자동 복구가 실행 중인 공식 앱 때문에 멈춘 비종결 phase에서는 `Codex 종료하고 복구 재시도`를 누른다. 메뉴바는 표시 당시 transaction ID가 그대로인지 lock 안에서 확인하고 공식 앱에 정상 종료를 요청한 뒤 기존 복구를 다시 실행한다. 종료 후에도 남은 exact 앱 소유 프로세스만 별도 확인 뒤 `SIGTERM`하며, 새·독립·분류 불명 프로세스가 나타나면 쓰기 없이 STOP한다. 복구 성공 뒤 Codex는 자동 실행하지 않는다. `rollbackFailed`는 이 버튼 대신 기존 이전 계정 수동 복구만 사용한다.
+
+### 메뉴바에서 비활성 계정 삭제·재등록
+
+비활성 카드 오른쪽 휴지통을 누르면 독립 확인창이 열린다. `취소`가 기본 동작이며 `삭제`를 승인하면 이 앱의 profile과 해당 Keychain item만 제거한다. OpenAI 계정, 현재 `auth.json`, 현재 Codex 로그인은 바뀌지 않으므로 삭제를 위해 Codex를 종료하거나 로그아웃할 필요가 없다. 활성 카드에는 휴지통이 없고 Core도 활성 profile 삭제를 거부한다.
+
+삭제한 계정을 다시 등록하려면 공식 Codex 앱에서 그 계정으로 로그인한 뒤 메뉴바의 `계정 등록`을 사용한다. 같은 라벨·이메일을 다시 쓸 수 있지만 새 profile ID가 발급되며, 추가 등록이 끝나면 등록 시작 전 활성 계정으로 복귀한다.
 
 ### 저장된 계정으로 전환
 

@@ -88,6 +88,7 @@ Unit/Integration test는 실제 `~/.codex/auth.json`을 읽거나 쓰지 않는�
 - 일반 switch의 target active-ID commit은 target 이메일 일치와 `targetVerified` durability 전 없음. 재로그인만 exact B credential 저장과 A-active registry의 B marker 해제 뒤 private `validatingTarget→targetVerified`를 허용하며 active ID는 그 뒤 commit
 - 성공 registry가 durable한 뒤 journal unlink→parent fsync
 - auth mutation 전 취소/차단은 journal unlink→parent fsync로 durable cleanup
+- 프로필 삭제는 inactive exact target만 허용하고 `profile-removal` marker→Keychain→registry→marker 순서를 유지하며 active auth는 쓰지 않음
 - 실행 중 일반 switch 실패 후 롤백은 source auth 복원→source 이메일 검증→registry previous durable commit→journal durable delete→source 앱 재실행 순서. 시작 자동 복구는 앱 미실행
 - 종료 전 확인한 exact 앱 소유 잔존도 1초 유예와 별도 승인 뒤에만 `SIGTERM` 1회
 - `SIGKILL` 없음
@@ -153,6 +154,9 @@ Unit/Integration test는 실제 `~/.codex/auth.json`을 읽거나 쓰지 않는�
 | U-047 | transient 조회 실패와 wrong-ID outcome | catch 재조회 뒤에도 payload exact ID 검증, 불일치 blocked·성공 표시 없음 | 예 |
 | U-048 | 메뉴바 시작 자동 복구 순서 | recovery 시도→profile 조회→read-only status 조회, stopped/throw도 상태 조회 뒤 fail-closed, 앱 launch 0회 | 예 |
 | U-049 | 메뉴바 잔존 프로세스 2차 확인 | native async 응답을 기다리고 취소는 signal 0회; 종료 전 exact 후보만 승인하며 새·독립 process는 확인 callback·signal 0회 | 예 |
+| U-050 | 메뉴바 비활성 계정 삭제 확인 | inactive exact snapshot만 확인, 취소·활성·stale 상태 Core 호출 0회 | 예 |
+| U-051 | 삭제 Core throw 뒤 상태 재조회 | target 부재+recovery none+단일 active일 때만 완료 재확인, 그 밖에는 실패 또는 STOP | 예 |
+| U-052 | 삭제 성공 UI | 대상 카드 제거, 기존 active 하나 유지, 로컬 저장본 삭제 안내 | 예 |
 
 ## 6. Integration 테스트 매트릭스
 
@@ -222,6 +226,10 @@ Unit/Integration test는 실제 `~/.codex/auth.json`을 읽거나 쓰지 않는�
 | I-060 | phase/registry/marker 모순과 `rollbackFailed` | 모순은 상태 보존 STOP, terminal phase는 locator·workspace·auth·registry side effect 0회 | 예 |
 | I-061 | `refreshingCurrent` 복구 실패 | `rollbackStarted→rollbackFailed` 내구 기록, 다음 자동 복구는 terminal STOP | 예 |
 | I-062 | 번들 Keychain host smoke | exact ad-hoc bundled executable이 random service/profile의 synthetic blob을 create→read→update→read→delete→notFound; cleanup 성공, 제품 service·실제 auth 접근 0회 | 예 |
+| I-063 | 비활성 프로필 정상 삭제 | 삭제 marker→target credential 삭제→registry 삭제→marker 삭제, active credential·auth 불변 | 예 |
+| I-064 | 활성 프로필 삭제 요청 | typed 거부, credential·registry·active auth mutation 0회 | 예 |
+| I-065 | Keychain 삭제 거부·중단 뒤 재시작 | marker와 registry 보존, 다음 복구가 credential·registry 정리를 멱등 완료 | 예 |
+| I-066 | 삭제 marker와 switch journal 공존 | 명시·자동 switch 복구 mutation 0회, 두 artifact 보존 STOP | 예 |
 
 I-062는 custom debug harness 129개와 별도의 host integration smoke다. 현재 build bundle과 `~/Applications` 설치본에서 각각 통과했지만, ad-hoc 재빌드 뒤 기존 item ACL·잠금·접근 거부·실계정 제품 flow는 입증하지 않는다.
 
@@ -416,6 +424,9 @@ current refresh crash window에서는 refresh 실행 여부를 phase만으로 �
 | A-007 | C 등록 | C 저장 후 등록 시작 전 active 복귀, 기존 A/B 보존 |
 | A-008 | 네 번째 계정 등록 | 무변경 거부, 기존 A/B/C 불변 |
 | A-009 | 3계정 model fixture | profile array가 세 항목을 안전하게 round-trip |
+| A-010 | 비활성 B 삭제 취소 | B profile·Keychain item 유지, A active·현재 로그인 불변 |
+| A-011 | 비활성 B 삭제 승인 | B profile·Keychain item 제거, A active·현재 로그인·OpenAI 계정 불변 |
+| A-012 | 삭제한 B 재등록 | B로 공식 로그인 후 같은 라벨·이메일 등록 성공, 새 profile ID, 등록 시작 전 active 복귀 |
 
 MVP는 최대 3개 계정을 노출하며 `personalAuth`, `workAuth` 같은 고정 secret field로 구현하지 않는다.
 

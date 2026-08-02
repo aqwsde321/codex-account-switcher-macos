@@ -133,6 +133,7 @@ CLI 기능 검증과 ADR-027의 개발 승인 뒤 시작한다. B-010 정식 증
 - 이미 활성인 계정 선택 시 파일을 쓰지 않고 Codex 창 활성화
 - 전환 진행 단계와 오류 표시
 - Keychain 인증 보관
+- 비활성 프로필의 로컬 저장본 삭제와 같은 계정 재등록
 - 파일 lock, 전환 저널, 시작 시 복구
 - 대상 검증 실패 시 자동 롤백
 
@@ -211,6 +212,14 @@ MVP는 등록 프로필을 최대 3개로 제한한다. 네 번째 등록은 기
 - 앱이나 app-server를 재시작하지 않는다.
 - 실행 중인 공식 Codex 창만 활성화한다.
 - 앱이 닫혀 있으면 검증 후 앱을 연다.
+
+### 8.4.1 비활성 프로필 삭제
+
+- 활성 프로필에는 삭제 동작을 제공하지 않는다.
+- 비활성 프로필 삭제 전 로컬 profile과 Keychain item만 제거하며 OpenAI 계정·현재 Codex 로그인은 바뀌지 않음을 확인한다.
+- 취소를 기본 동작으로 두고, 승인 시 삭제 marker→Keychain item→registry profile→marker 순서로 처리한다.
+- 중단된 삭제는 시작 자동 복구가 재개하며 switch journal과 충돌하면 둘 다 보존하고 STOP한다.
+- 삭제한 계정은 같은 라벨·이메일로 다시 등록할 수 있으며 새 profile ID를 사용한다.
 
 ### 8.5 전환 실패와 롤백
 
@@ -354,6 +363,14 @@ MVP가 이미 3개 프로필을 보유하면 새 등록은 제한 안내 후 중
 - `account/rateLimits/read` 기반 사용량 표시는 후속 읽기 전용 기능이어야 한다.
 - 조회 실패가 프로필 삭제, 전환 실패, 자동 계정 선택을 유발하면 안 된다.
 
+### FR-16 로컬 프로필 삭제
+
+- 삭제는 exact inactive profile ID에만 허용해야 한다. 활성 프로필은 UI에서 숨기고 Core에서도 거부해야 한다.
+- 해당 Keychain item과 registry profile만 삭제하고 현재 `auth.json`, active profile, OpenAI 계정은 변경하지 않아야 한다.
+- secret-free 삭제 marker를 side effect 전에 내구 기록하고 Keychain→registry→marker 순서로 멱등 완료해야 한다.
+- Keychain 거부나 crash 뒤 marker와 registry를 보존하고 다음 자동 복구에서 재개해야 한다.
+- 삭제 marker와 switch journal이 공존하거나 expected active가 달라지면 자동 추정·삭제 없이 STOP해야 한다.
+
 ## 10. 비기능 요구사항
 
 ### NFR-01 보안
@@ -479,6 +496,7 @@ MVP가 이미 3개 프로필을 보유하면 새 등록은 제한 안내 후 중
 - 최대 3개 프로필 등록·표시·전환
 - Keychain 저장
 - 전환 확인, 진행, 오류, 재로그인 UI
+- 비활성 프로필 삭제·재등록 UI
 - 시작 시 저널 복구
 - 개인 배포용 GitHub 저장소와 설치 지침
 
@@ -503,6 +521,7 @@ MVP가 이미 3개 프로필을 보유하면 새 등록은 제한 안내 후 중
 - 원자 교체, lock, 저널, 자동 롤백 검증
 - 만료 토큰과 미등록 외부 로그인 처리 검증
 - `needsRelogin` 비활성 대상의 exact-ID 재로그인 반영, 대상 즉시 활성화, 앱 수동 실행 검증
+- 비활성 프로필의 Keychain·registry 삭제, 활성 로그인 불변, 같은 계정 재등록 검증
 - Codex 버전 변경 사전 검사
 - 실제 task 왕복 성공 기준 유지
 - 로그·테스트 산출물에서 인증 비밀 미검출
