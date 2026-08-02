@@ -18,6 +18,8 @@
 
 `./Scripts/dev.sh test`는 140개를 통과했다. 수정 앱 설치 뒤 A→B→A 왕복을 완료했고, 각 단계에서 native 전환 확인창·앱 재실행·registry active·journal 부재를 확인했다. 현재 registry는 A active이며 사용자는 공식 Codex의 A 로그인을 확인했다. 다음 task는 [10_incident_2026-08-02_switch_rollback_race.md](10_incident_2026-08-02_switch_rollback_race.md)를 먼저 읽고 작업을 이어간다.
 
+비활성 삭제 구현 뒤 최신 설치본에서 A-011을 실제 확인했다. B 로컬 저장본 삭제 성공 문구와 B 카드 제거, A 단일 active, 현재 Codex A 로그인 유지, recovery 오류 부재를 확인했다. 삭제 취소 A-010과 같은 계정 재등록 A-012는 아직 확인하지 않았다.
+
 ## 1. 새 task에서 시작하는 방법
 
 새 Codex task는 먼저 다음 순서로 읽는다.

@@ -428,6 +428,8 @@ current refresh crash window에서는 refresh 실행 여부를 phase만으로 �
 | A-011 | 비활성 B 삭제 승인 | B profile·Keychain item 제거, A active·현재 로그인·OpenAI 계정 불변 |
 | A-012 | 삭제한 B 재등록 | B로 공식 로그인 후 같은 라벨·이메일 등록 성공, 새 profile ID, 등록 시작 전 active 복귀 |
 
+2026-08-02 실제 설치본에서 A-011 PASS를 확인했다. 비활성 B 삭제 뒤 B 카드가 사라졌고 A가 단일 active로 유지됐으며 현재 Codex 로그인과 recovery 오류가 바뀌지 않았다. A-010과 A-012는 미검증이다.
+
 MVP는 최대 3개 계정을 노출하며 `personalAuth`, `workAuth` 같은 고정 secret field로 구현하지 않는다.
 
 ## 14. 롤백 테스트
