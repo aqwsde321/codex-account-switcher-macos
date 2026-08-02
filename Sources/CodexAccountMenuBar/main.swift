@@ -56,6 +56,12 @@ struct CodexAccountMenuBarApp: App {
                     }
                     return try await provider.captureProfile(label: $0)
                 },
+                removeProfile: { profileID in
+                    guard let provider else {
+                        throw MenuBarStartupFailure.credentialStoreConfiguration
+                    }
+                    return try await provider.removeProfile(profileID)
+                },
                 syncActiveProfile: {
                     guard let provider else {
                         throw MenuBarStartupFailure.credentialStoreConfiguration
@@ -139,24 +145,43 @@ private struct AccountMenuView: View {
                     .foregroundStyle(.secondary)
             } else {
                 ForEach(model.profiles, id: \.id) { profile in
-                    Button {
-                        Task {
-                            await model.select(profile)
-                            guard let confirmation = model.pendingProfile else { return }
-                            guard confirmAccountSwitch(confirmation) else {
-                                model.cancelSwitch()
-                                return
+                    HStack(spacing: 8) {
+                        Button {
+                            Task {
+                                await model.select(profile)
+                                guard let confirmation = model.pendingProfile else { return }
+                                guard confirmAccountSwitch(confirmation) else {
+                                    model.cancelSwitch()
+                                    return
+                                }
+                                await model.confirmSwitch(confirmation)
                             }
-                            await model.confirmSwitch(confirmation)
+                        } label: {
+                            ProfileCard(profile: profile)
                         }
-                    } label: {
-                        ProfileCard(profile: profile)
+                        .buttonStyle(.plain)
+                        .frame(maxWidth: .infinity)
+
+                        if !profile.active {
+                            Button(role: .destructive) {
+                                model.requestRemoval(profile)
+                                guard let confirmation = model.pendingRemovalProfile else { return }
+                                guard confirmProfileRemoval(confirmation) else {
+                                    model.cancelRemoval()
+                                    return
+                                }
+                                Task { await model.confirmRemoval(confirmation) }
+                            } label: {
+                                Image(systemName: "trash")
+                                    .frame(width: 28, height: 28)
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(.red)
+                            .help("\(profile.label) 계정 삭제")
+                            .accessibilityLabel("\(profile.label) 계정 삭제")
+                        }
                     }
-                    .buttonStyle(.plain)
-                    .disabled(
-                        model.isWorking
-                            || model.recoveryRequired
-                    )
+                    .disabled(model.isWorking || model.recoveryRequired)
                 }
             }
 
@@ -465,6 +490,20 @@ private func confirmAccountSwitch(_ profile: ProfileListItem) -> Bool {
     let cancel = alert.addButton(withTitle: "취소")
     cancel.keyEquivalent = "\u{1b}"
     alert.addButton(withTitle: "전환")
+    NSApp.activate(ignoringOtherApps: true)
+    return alert.runModal() == .alertSecondButtonReturn
+}
+
+@MainActor
+private func confirmProfileRemoval(_ profile: ProfileListItem) -> Bool {
+    let alert = NSAlert()
+    alert.alertStyle = .warning
+    alert.messageText = "\(profile.label) 계정을 삭제할까요?"
+    alert.informativeText = "이 앱에 저장된 계정 정보와 키체인 자격증명만 삭제합니다. OpenAI 계정은 삭제되지 않고 현재 Codex 로그인도 바뀌지 않습니다. 나중에 같은 계정으로 로그인해 다시 등록할 수 있습니다."
+    let cancel = alert.addButton(withTitle: "취소")
+    cancel.keyEquivalent = "\u{1b}"
+    let remove = alert.addButton(withTitle: "삭제")
+    remove.hasDestructiveAction = true
     NSApp.activate(ignoringOtherApps: true)
     return alert.runModal() == .alertSecondButtonReturn
 }
