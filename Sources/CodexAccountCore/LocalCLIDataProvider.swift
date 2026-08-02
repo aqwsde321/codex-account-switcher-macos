@@ -215,6 +215,54 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
         }
     }
 
+    public func removeProfile(_ profileID: ProfileID) async throws -> ProfileListItem {
+        guard !switchInProgress else {
+            throw LocalCLIDataProviderFailure.switchAlreadyRunning
+        }
+        switchInProgress = true
+        defer { switchInProgress = false }
+
+        guard let store = try openStoreIfPresent(),
+              let lock = try store.tryAcquireTransactionLock() else {
+            throw LocalCLIDataProviderFailure.lockBusy
+        }
+        defer { lock.release() }
+
+        let registry = try store.loadRegistry()
+        guard let activeProfileID = registry.activeProfileID,
+              let target = registry.profiles.first(where: { $0.id == profileID }) else {
+            throw LocalCLIDataProviderFailure.targetProfileUnavailable
+        }
+        guard activeProfileID != profileID else {
+            throw LocalCLIDataProviderFailure.activeProfileRemovalForbidden
+        }
+        guard
+              try journalIsDurablyAbsent(in: store),
+              try store.loadCaptureProfileIDIfPresent() == nil,
+              try !verificationWorkspaceExists() else {
+            throw LocalCLIDataProviderFailure.pendingRecovery
+        }
+
+        let removal = ProfileRemovalRecord(
+            transactionID: UUID(),
+            profileID: target.id,
+            expectedActiveProfileID: activeProfileID
+        )
+        guard try store.createProfileRemovalIfAbsent(removal) != nil,
+              try store.loadProfileRemovalIfPresent() == removal,
+              try store.loadRegistry() == registry else {
+            throw LocalCLIDataProviderFailure.pendingRecovery
+        }
+        try finishProfileRemoval(removal, in: store)
+        return ProfileListItem(
+            id: target.id,
+            label: target.label,
+            email: target.email,
+            active: false,
+            needsRelogin: target.needsRelogin
+        )
+    }
+
     public func captureProfile(label: String) async throws -> ProfileListItem {
         let profile = try await ProfileCaptureCoordinator(driver: self).capture(label: label)
         let registry = try SpikeStore.openExisting(at: storeURL).loadRegistry()
@@ -525,7 +573,8 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
         let registry = try store.loadRegistry()
         let captureProfileID = try store.loadCaptureProfileIDIfPresent()
         let journalFinalizationEvidence = try store.loadJournalFinalizationEvidenceIfPresent()
-        guard let journal = try store.loadJournalIfPresent(),
+        guard try store.loadProfileRemovalIfPresent() == nil,
+              let journal = try store.loadJournalIfPresent(),
               journal.phase == .rollbackFailed,
               expectedTransactionID == nil || journal.transactionID.uuidString == expectedTransactionID,
               journalFinalizationEvidence == nil,
@@ -569,6 +618,7 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
         }
         guard try await locateApp() == descriptor,
               try store.loadRegistry() == registry,
+              try store.loadProfileRemovalIfPresent() == nil,
               try store.loadJournalIfPresent() == journal,
               try store.loadJournalFinalizationEvidenceIfPresent() == journalFinalizationEvidence,
               try store.loadCaptureProfileIDIfPresent() == captureProfileID else {
@@ -724,7 +774,8 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
     }
 
     public func recoverPendingTransaction() async throws -> RecoveryOutcome {
-        try await performPendingRecovery(
+        _ = try recoverPendingProfileRemoval()
+        return try await performPendingRecovery(
             expectedTransactionID: nil,
             requestApplicationQuiescence: false
         )
@@ -1124,6 +1175,7 @@ public enum LocalCLIDataProviderFailure: Error, Equatable, Sendable {
     case pendingRecovery
     case profileAlreadyExists
     case activeProfileUnavailable
+    case activeProfileRemovalForbidden
     case targetProfileUnavailable
     case targetNeedsRelogin
     case switchAlreadyRunning
@@ -1577,6 +1629,9 @@ extension LocalCLIDataProvider: RecoveryExecuting {
     public func loadSnapshot() async throws -> RecoverySnapshot? {
         guard let store = switchStore, switchLock != nil else {
             throw LocalCLIDataProviderFailure.invalidSwitchState
+        }
+        guard try store.loadProfileRemovalIfPresent() == nil else {
+            throw LocalCLIDataProviderFailure.pendingRecovery
         }
         if try journalIsDurablyAbsent(in: store) {
             return nil
@@ -2615,6 +2670,55 @@ private extension LocalCLIDataProvider {
         return try SpikeStore.openExisting(at: storeURL)
     }
 
+    func recoverPendingProfileRemoval() throws -> Bool {
+        guard !switchInProgress else {
+            throw LocalCLIDataProviderFailure.switchAlreadyRunning
+        }
+        guard let store = try openStoreIfPresent() else { return false }
+        guard let lock = try store.tryAcquireTransactionLock() else {
+            throw LocalCLIDataProviderFailure.lockBusy
+        }
+        defer { lock.release() }
+        guard let removal = try store.loadProfileRemovalIfPresent() else { return false }
+        guard try store.loadJournalIfPresent() == nil,
+              try store.loadJournalFinalizationEvidenceIfPresent() == nil,
+              try store.loadCaptureProfileIDIfPresent() == nil,
+              try !verificationWorkspaceExists() else {
+            throw LocalCLIDataProviderFailure.pendingRecovery
+        }
+        try finishProfileRemoval(removal, in: store)
+        return true
+    }
+
+    func finishProfileRemoval(_ removal: ProfileRemovalRecord, in store: SpikeStore) throws {
+        guard try store.loadProfileRemovalIfPresent() == removal else {
+            throw LocalCLIDataProviderFailure.pendingRecovery
+        }
+        let registry = try store.loadRegistry()
+        guard registry.activeProfileID == removal.expectedActiveProfileID,
+              registry.activeProfileID != removal.profileID else {
+            throw LocalCLIDataProviderFailure.pendingRecovery
+        }
+        try credentialStore.removeCredential(for: removal.profileID)
+        if registry.profiles.contains(where: { $0.id == removal.profileID }) {
+            let updated = try ProfileRegistry(
+                activeProfileID: removal.expectedActiveProfileID,
+                profiles: registry.profiles.filter { $0.id != removal.profileID }
+            )
+            _ = try store.saveRegistry(updated)
+            guard try store.loadRegistry() == updated else {
+                throw LocalCLIDataProviderFailure.registryRoundTripFailed
+            }
+        }
+        guard try store.loadProfileRemovalIfPresent() == removal else {
+            throw LocalCLIDataProviderFailure.pendingRecovery
+        }
+        _ = try store.removeProfileRemoval()
+        guard try store.loadProfileRemovalIfPresent() == nil else {
+            throw LocalCLIDataProviderFailure.pendingRecovery
+        }
+    }
+
     func finalizeJournal(
         in store: SpikeStore,
         expectedActiveProfileID: ProfileID,
@@ -2666,6 +2770,7 @@ private extension LocalCLIDataProvider {
     }
 
     func journalIsDurablyAbsent(in store: SpikeStore) throws -> Bool {
+        guard try store.loadProfileRemovalIfPresent() == nil else { return false }
         let journal = try store.loadJournalIfPresent()
         guard let evidence = try store.loadJournalFinalizationEvidenceIfPresent() else {
             guard journal == nil else { return false }
@@ -2723,6 +2828,7 @@ private extension LocalCLIDataProvider {
               registry.profiles.contains(where: {
                   $0.id == evidence.expectedActiveProfileID && !$0.needsRelogin
               }),
+              try store.loadProfileRemovalIfPresent() == nil,
               try store.loadCaptureProfileIDIfPresent() == nil,
               try !verificationWorkspaceExists(),
               case let .exact(activeIdentity) = try files.snapshot(at: activeAuthURL),
@@ -2739,6 +2845,7 @@ private extension LocalCLIDataProvider {
             }
         }
         return try store.loadRegistry() == registry
+            && store.loadProfileRemovalIfPresent() == nil
             && store.loadCaptureProfileIDIfPresent() == nil
             && !verificationWorkspaceExists()
             && files.snapshot(at: activeAuthURL) == .exact(activeIdentity)

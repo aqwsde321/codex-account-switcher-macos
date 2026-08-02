@@ -111,6 +111,38 @@ public struct SpikeStore {
         return try files.remove(at: captureProfileIDURL, expecting: expected)
     }
 
+    package func createProfileRemovalIfAbsent(
+        _ record: ProfileRemovalRecord
+    ) throws -> FileIdentity? {
+        do {
+            return try files.replace(
+                contents: SensitiveBytes(try ProfileRemovalCodec.encode(record)),
+                at: profileRemovalURL,
+                expecting: .absent
+            )
+        } catch let failure as DurableFileFailure
+            where failure.mutation == .replace
+                && failure.stage == .inspect
+                && failure.errno == ESTALE
+                && failure.certainty == .destinationUnchanged
+        {
+            return nil
+        }
+    }
+
+    package func loadProfileRemovalIfPresent() throws -> ProfileRemovalRecord? {
+        guard try files.snapshot(at: profileRemovalURL) != .absent else {
+            return nil
+        }
+        let result = try files.read(at: profileRemovalURL, maximumBytes: 1_024)
+        return try ProfileRemovalCodec.decode(result.contents.data)
+    }
+
+    package func removeProfileRemoval() throws -> DurableRemoval {
+        let expected = try files.snapshot(at: profileRemovalURL)
+        return try files.remove(at: profileRemovalURL, expecting: expected)
+    }
+
     public func createJournalIfAbsent(_ journal: SwitchJournalRecord) throws -> FileIdentity? {
         let data = try JournalCodec.encode(journal)
         do {
@@ -239,6 +271,10 @@ public struct SpikeStore {
 
     private var captureProfileIDURL: URL {
         rootURL.appendingPathComponent("capture-profile-id", isDirectory: false)
+    }
+
+    private var profileRemovalURL: URL {
+        rootURL.appendingPathComponent("profile-removal.json", isDirectory: false)
     }
 
     private var journalFinalizationEvidenceURL: URL {
