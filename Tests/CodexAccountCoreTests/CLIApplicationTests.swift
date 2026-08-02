@@ -1281,7 +1281,7 @@ func cliApplicationTests() -> [TestCase] {
                 try expect(staleEvidencePreserved, "manual recovery changed verifier evidence")
             }
         },
-        TestCase("CLI additional capture stops before restoring an unrefreshable previous credential") {
+        TestCase("CLI additional capture recovers after a fresh previous login") {
             try await withCaptureTemporaryDirectory { directory in
                 let codexHome = directory.appendingPathComponent(".codex", isDirectory: true)
                 try FileManager.default.createDirectory(at: codexHome, withIntermediateDirectories: false)
@@ -1316,10 +1316,12 @@ func cliApplicationTests() -> [TestCase] {
                     "credential-verification-workspace",
                     isDirectory: true
                 )
+                let probeCountURL = directory.appendingPathComponent("probe-count")
                 let executable = try makeCaptureAppServer(
                     in: directory,
                     rotateToOtherAccount: false,
                     failRefreshHomeURL: verificationHome,
+                    probeCountURL: probeCountURL,
                     requiredJournalURL: storeURL.appendingPathComponent("switch-journal.json")
                 )
                 let bundleURL = directory.appendingPathComponent("ChatGPT.app", isDirectory: true)
@@ -1363,8 +1365,11 @@ func cliApplicationTests() -> [TestCase] {
                 }
                 let storedB = try store.loadCredential(for: profileB.id)
                 let launchCount = await MainActor.run { launches.count }
+                let captureProbeCount = try String(contentsOf: probeCountURL, encoding: .utf8)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
 
                 try expect(captured.standardError == "error=rollback_failed\n", "invalid A restore was accepted")
+                try expect(captureProbeCount == "5", "failed rollback was retried during capture abort")
                 try expect(registry.profiles.count == 2, "failed restore lost a registered profile")
                 try expect(registry.activeProfileID == profileB.id, "failed restore changed the active registry")
                 try expect(journal?.phase == .rollbackFailed, "failed restore lost recovery evidence")
@@ -1376,6 +1381,47 @@ func cliApplicationTests() -> [TestCase] {
                     !FileManager.default.fileExists(atPath: verificationHome.path),
                     "failed verifier workspace was not cleaned"
                 )
+
+                let freshAData = Data(
+                    #"{"auth_mode":"chatgpt","test_account":"a","tokens":{"id_token":"fresh-a-id","access_token":"fresh-a-access","refresh_token":"fresh-a-refresh"}}"#.utf8
+                )
+                let refreshedA = try CredentialBlob(validating: Data(
+                    #"{"auth_mode":"chatgpt","test_account":"a","tokens":{"id_token":"fixture-id-rotated","access_token":"fixture-access-rotated","refresh_token":"fixture-refresh-rotated"}}"#.utf8
+                ))
+                try freshAData.write(to: authURL)
+                let recoveryProvider = LocalCLIDataProvider(
+                    storeURL: storeURL,
+                    activeAuthURL: authURL,
+                    processProvider: EmptyProcessSnapshotProvider(),
+                    locateApp: { descriptor },
+                    runningApplicationPIDs: { _ in [] },
+                    launchApplication: { _ in
+                        launches.record()
+                        return 42
+                    }
+                )
+
+                let recovered = try await recoveryProvider.recoverPendingTransaction()
+                let recoveredRegistry = try store.loadRegistry()
+                let recoveredActive = try CredentialBlob(validating: Data(contentsOf: authURL))
+                let recoveredA = try store.loadCredential(for: profileA.id)
+                let recoveredB = try store.loadCredential(for: profileB.id)
+                let recoveredJournal = try store.loadJournalIfPresent()
+                let recoveredCaptureProfileID = try store.loadCaptureProfileIDIfPresent()
+                let recoveredLaunchCount = await MainActor.run { launches.count }
+
+                try expect(
+                    recovered == .completed(.repairCurrentThenCancel),
+                    "fresh A login did not complete capture recovery"
+                )
+                try expect(recoveredRegistry.activeProfileID == profileA.id, "fresh A did not become active")
+                try expect(recoveredRegistry.profiles.count == 2, "fresh A recovery lost B")
+                try expect(recoveredActive == refreshedA, "fresh A login was replaced during recovery")
+                try expect(recoveredA == refreshedA, "fresh A login was not saved")
+                try expect(recoveredB == storedB, "fresh A recovery changed B")
+                try expect(recoveredJournal == nil, "fresh A recovery left the journal")
+                try expect(recoveredCaptureProfileID == nil, "fresh A recovery left the capture marker")
+                try expect(recoveredLaunchCount == 0, "automatic recovery launched Codex")
             }
         },
         TestCase("CLI capture stores a third profile, restores the active profile, and rejects a fourth") {

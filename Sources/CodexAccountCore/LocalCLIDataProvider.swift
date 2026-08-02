@@ -1233,6 +1233,17 @@ extension LocalCLIDataProvider: SwitchTransactionDriving {
         guard try context.store.loadRegistry() == context.registry else {
             throw LocalCLIDataProviderFailure.invalidSwitchState
         }
+        if let current = try context.store.loadJournalIfPresent(),
+           current.phase == .rollbackFailed,
+           record.phase == .rollbackStarted {
+            guard current.transactionID == record.transactionID,
+                  current.previousProfileID == record.previousProfileID,
+                  current.targetProfileID == record.targetProfileID,
+                  try context.store.loadCaptureProfileIDIfPresent() == current.targetProfileID,
+                  context.registry.profiles.last?.id == current.targetProfileID else {
+                throw LocalCLIDataProviderFailure.invalidSwitchState
+            }
+        }
         _ = try context.store.updateJournal(record)
         guard try context.store.loadRegistry() == context.registry else {
             throw LocalCLIDataProviderFailure.invalidSwitchState
@@ -1356,8 +1367,18 @@ extension LocalCLIDataProvider: SwitchTransactionDriving {
     }
 
     public func refreshAndSaveCurrent(profile: ProfileMetadata) async throws {
+        try await refreshAndSaveCurrent(
+            profile: profile,
+            expectedRegistryActiveProfileID: profile.id
+        )
+    }
+
+    func refreshAndSaveCurrent(
+        profile: ProfileMetadata,
+        expectedRegistryActiveProfileID: ProfileID
+    ) async throws {
         let context = try requireSwitchContext()
-        guard context.registry.activeProfileID == profile.id,
+        guard context.registry.activeProfileID == expectedRegistryActiveProfileID,
               context.registry.profiles.contains(profile),
               let expectedDestination = switchActiveAuthDestination,
               try files.snapshot(at: activeAuthURL) == expectedDestination else {
@@ -1517,6 +1538,17 @@ extension LocalCLIDataProvider: SwitchTransactionDriving {
         guard try context.store.loadRegistry() == context.registry else {
             throw LocalCLIDataProviderFailure.registryRoundTripFailed
         }
+        if let captureProfileID = try context.store.loadCaptureProfileIDIfPresent() {
+            guard let journal = try context.store.loadJournalIfPresent(),
+                  captureProfileID == journal.targetProfileID,
+                  context.registry.profiles.last?.id == captureProfileID else {
+                throw LocalCLIDataProviderFailure.pendingRecovery
+            }
+            _ = try context.store.removeCaptureProfileID()
+            guard try context.store.loadCaptureProfileIDIfPresent() == nil else {
+                throw LocalCLIDataProviderFailure.pendingRecovery
+            }
+        }
         guard case let .exact(expectedIdentity) = switchActiveAuthDestination,
               try files.snapshot(at: activeAuthURL) == .exact(expectedIdentity),
               let activeProfileID = context.registry.activeProfileID else {
@@ -1636,12 +1668,23 @@ extension LocalCLIDataProvider: RecoveryExecuting {
         if try journalIsDurablyAbsent(in: store) {
             return nil
         }
-        guard let journal = try store.loadJournalIfPresent(),
-              try store.loadCaptureProfileIDIfPresent() == nil else {
+        guard let journal = try store.loadJournalIfPresent() else {
             throw LocalCLIDataProviderFailure.pendingRecovery
         }
         recoveryLogger.notice("event=journal_loaded phase=\(journal.phase.rawValue, privacy: .public)")
         let registry = try store.loadRegistry()
+        let captureProfileID = try store.loadCaptureProfileIDIfPresent()
+        let captureMarkerIsRecoverable: Bool
+        if let captureProfileID {
+            captureMarkerIsRecoverable = captureProfileID == journal.targetProfileID
+                && registry.profiles.last?.id == captureProfileID
+                && (journal.phase == .rollbackStarted || journal.phase == .rollbackFailed)
+        } else {
+            captureMarkerIsRecoverable = true
+        }
+        guard captureMarkerIsRecoverable else {
+            throw LocalCLIDataProviderFailure.pendingRecovery
+        }
         guard let activeProfileID = registry.activeProfileID else {
             throw LocalCLIDataProviderFailure.activeProfileUnavailable
         }
@@ -1683,7 +1726,7 @@ extension LocalCLIDataProvider: RecoveryExecuting {
               journal.phase != .targetVerified || !target.needsRelogin else {
             throw LocalCLIDataProviderFailure.pendingRecovery
         }
-        if journal.phase == .rollbackFailed {
+        if journal.phase == .rollbackFailed, captureProfileID == nil {
             return RecoverySnapshot(
                 journal: journal,
                 knownProfileIDs: knownProfileIDs,
@@ -1693,7 +1736,6 @@ extension LocalCLIDataProvider: RecoveryExecuting {
                 activeCredential: .unreadable
             )
         }
-
         let descriptor = try await locateApp()
         guard ApprovedResidentRule.codexCrashpad(for: descriptor) != nil else {
             throw LocalCLIDataProviderFailure.incompatibleApplication
@@ -1779,7 +1821,7 @@ extension LocalCLIDataProvider: RecoveryExecuting {
         guard try store.loadRegistry() == registry,
               try store.loadJournalIfPresent() == journal,
               try store.loadJournalFinalizationEvidenceIfPresent() == nil,
-              try store.loadCaptureProfileIDIfPresent() == nil,
+              try store.loadCaptureProfileIDIfPresent() == captureProfileID,
               try files.snapshot(at: activeAuthURL) == activeAuthDestination else {
             throw LocalCLIDataProviderFailure.pendingRecovery
         }
@@ -1789,7 +1831,8 @@ extension LocalCLIDataProvider: RecoveryExecuting {
             registryActiveProfileID: activeProfileID,
             helperChildAlive: probeChildUnconfirmed,
             durabilityUnknown: false,
-            activeCredential: activeCredential
+            activeCredential: activeCredential,
+            captureRecoveryPending: captureProfileID != nil
         )
     }
 
@@ -1808,8 +1851,18 @@ extension LocalCLIDataProvider: RecoveryExecuting {
 
     public func repairCurrentCredential(_ profileID: ProfileID) async throws {
         let context = try requireSwitchContext()
-        guard let profile = context.registry.profiles.first(where: { $0.id == profileID }) else {
+        guard let profile = context.registry.profiles.first(where: { $0.id == profileID }),
+              let registryActiveProfileID = context.registry.activeProfileID else {
             throw LocalCLIDataProviderFailure.rollbackFailed
+        }
+        if registryActiveProfileID != profile.id {
+            guard let journal = try context.store.loadJournalIfPresent(),
+                  journal.previousProfileID == profile.id,
+                  registryActiveProfileID == journal.targetProfileID,
+                  try context.store.loadCaptureProfileIDIfPresent() == journal.targetProfileID,
+                  journal.phase == .rollbackStarted || journal.phase == .rollbackFailed else {
+                throw LocalCLIDataProviderFailure.rollbackFailed
+            }
         }
         do {
             try await revalidateCredentialMutationGate()
@@ -1820,7 +1873,10 @@ extension LocalCLIDataProvider: RecoveryExecuting {
                 )
             )
             try await revalidateCredentialMutationGate()
-            try await refreshAndSaveCurrent(profile: profile)
+            try await refreshAndSaveCurrent(
+                profile: profile,
+                expectedRegistryActiveProfileID: registryActiveProfileID
+            )
         } catch {
             if appServerExitIsUnconfirmed(error) {
                 throw error
@@ -2566,6 +2622,7 @@ private extension LocalCLIDataProvider {
     ) async throws {
         guard let descriptor = captureDescriptor,
               let journal = try store.loadJournalIfPresent(),
+              journal.phase != .rollbackFailed,
               journal.previousProfileID == originalRegistry.activeProfileID,
               journal.targetProfileID == captureProfileID else {
             throw LocalCLIDataProviderFailure.rollbackUnavailable

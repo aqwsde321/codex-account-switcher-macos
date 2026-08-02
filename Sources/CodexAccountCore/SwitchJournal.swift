@@ -36,7 +36,8 @@ public enum SwitchStateMachine {
     ]
 
     public static func validateTransition(from: SwitchPhase, to: SwitchPhase) throws {
-        if from == .rollbackStarted, to == .rollbackFailed {
+        if (from == .rollbackStarted && to == .rollbackFailed)
+            || (from == .rollbackFailed && to == .rollbackStarted) {
             return
         }
 

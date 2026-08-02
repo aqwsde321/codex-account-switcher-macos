@@ -14,6 +14,7 @@ public struct RecoverySnapshot: Equatable, Sendable {
     public let durabilityUnknown: Bool
     public let activeCredential: ActiveCredentialEvidence
     public let processBlockerPresent: Bool
+    public let captureRecoveryPending: Bool
 
     public init(
         journal: SwitchJournalRecord,
@@ -22,7 +23,8 @@ public struct RecoverySnapshot: Equatable, Sendable {
         helperChildAlive: Bool,
         durabilityUnknown: Bool,
         activeCredential: ActiveCredentialEvidence,
-        processBlockerPresent: Bool = false
+        processBlockerPresent: Bool = false,
+        captureRecoveryPending: Bool = false
     ) {
         self.journal = journal
         self.knownProfileIDs = knownProfileIDs
@@ -31,6 +33,7 @@ public struct RecoverySnapshot: Equatable, Sendable {
         self.durabilityUnknown = durabilityUnknown
         self.activeCredential = activeCredential
         self.processBlockerPresent = processBlockerPresent
+        self.captureRecoveryPending = captureRecoveryPending
     }
 }
 
@@ -132,7 +135,10 @@ public enum RecoveryPlanner {
                 return .stop(.activeCredentialUnverified)
             }
         case .rollbackFailed:
-            return .stop(.rollbackPreviouslyFailed)
+            return snapshot.captureRecoveryPending
+                && snapshot.activeCredential == .previousCredentialChanged
+                ? .repairCurrentThenCancel
+                : .stop(.rollbackPreviouslyFailed)
         }
     }
 
