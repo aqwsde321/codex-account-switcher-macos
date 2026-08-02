@@ -11,11 +11,12 @@
 
 수정 커밋:
 
+- `0759fad`: 전환 확인을 native modal로 변경
 - `8f5de1f`: 복구 확인을 native modal로 변경
 - `86e8eac`: LaunchServices PID 가시성 지연을 bounded wait로 처리
 - `fa022e3`: 종료 중 생성된 앱 소유 자식의 자연 종료 대기
 
-`./Scripts/dev.sh test`는 140개를 통과했고 수정 앱 설치 뒤 A 복구도 완료했다. 제품 journal은 없고 registry는 A active이며 사용자가 공식 Codex의 A 로그인을 확인했다. 다음 task는 [10_incident_2026-08-02_switch_rollback_race.md](10_incident_2026-08-02_switch_rollback_race.md)를 먼저 읽고 작업을 이어간다. 수정 뒤 A→B 정상 전환은 아직 재검증하지 않았다.
+`./Scripts/dev.sh test`는 140개를 통과했다. 수정 앱 설치 뒤 A→B→A 왕복을 완료했고, 각 단계에서 native 전환 확인창·앱 재실행·registry active·journal 부재를 확인했다. 현재 registry는 A active이며 사용자는 공식 Codex의 A 로그인을 확인했다. 다음 task는 [10_incident_2026-08-02_switch_rollback_race.md](10_incident_2026-08-02_switch_rollback_race.md)를 먼저 읽고 작업을 이어간다.
 
 ## 1. 새 task에서 시작하는 방법
 
@@ -83,7 +84,7 @@ ADR-027·ADR-029·ADR-030과 기존 안전 결정을 유지한 채 Step 9 메뉴
 - B-015~B-017 세 프로필 전환·재로그인 실계정 Black-box 검증
 - MVP 완료·배포 전 `07_test_acceptance.md` §16 형식의 동일 task 왕복 증거 보존
 
-version/build 번호는 호환성 hard gate가 아니다. 앱 검사 시 `Versions/Current` Crashpad를 canonicalize해 bundle 내부 regular executable과 정적 OpenAI 서명을 확인하고, 실행 process의 exact path·서명도 다시 확인한다. 현재 설치된 `26.727.51351`/`6119`는 이 검사, read-only process 검증, 빈 임시 홈의 App Server `initialize`·`account/read(false)`, 첫 계정 등록을 통과했다. 실제 A→B 시도에서 rollback 경합을 재현하고 수정 앱으로 A 복구를 완료했으며, 수정 뒤 정상 A→B 전환은 아직 재검증하지 않았다.
+version/build 번호는 호환성 hard gate가 아니다. 앱 검사 시 `Versions/Current` Crashpad를 canonicalize해 bundle 내부 regular executable과 정적 OpenAI 서명을 확인하고, 실행 process의 exact path·서명도 다시 확인한다. 현재 설치된 `26.727.51351`/`6119`는 이 검사, read-only process 검증, 빈 임시 홈의 App Server `initialize`·`account/read(false)`, 첫 계정 등록을 통과했다. 실제 A→B 시도에서 rollback 경합을 재현했고, 수정 앱으로 A 복구 후 수정된 native 전환 확인창을 통해 A→B→A 왕복을 완료했다.
 
 재개 명령과 구현 범위는 루트 `README.md`를 먼저 읽는다.
 

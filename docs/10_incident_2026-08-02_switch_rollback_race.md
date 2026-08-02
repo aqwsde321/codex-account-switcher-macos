@@ -112,4 +112,25 @@ registry=A active
 사용자 확인 Codex 로그인=A
 ```
 
-실제 A 복구는 PASS다. 수정 뒤 A→B 정상 전환은 아직 재검증하지 않았다.
+실제 A 복구는 PASS다. 수정 뒤 왕복 결과는 다음 절에 기록한다.
+
+## 수정 후 A→B→A 왕복 검증
+
+수정 커밋 `0759fad` 설치 뒤 native 전환 확인창으로 왕복을 수행했다. MenuBarExtra가 닫혀도 확인창이 유지됐고, 전환 승인 후 공식 Codex가 대상 계정으로 재실행됐다.
+
+```text
+13:36:40  A→B  active_profile_commit_finished
+13:36:40  A→B  journal_removal_finished
+13:39:38  B→A  active_profile_commit_finished
+13:39:38  B→A  journal_removal_finished
+```
+
+읽기 전용 최종 확인:
+
+```text
+active_label=개인-qr
+journal=absent
+사용자 확인 Codex 로그인=A
+```
+
+수정 후 A→B→A 왕복은 PASS다. 설치 앱의 전환 확인창 소멸 문제는 재현되지 않았다.
