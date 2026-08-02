@@ -725,6 +725,12 @@ func cliApplicationTests() -> [TestCase] {
                     executablePath: descriptor.mainExecutableURL.path,
                     nameHint: "ChatGPT"
                 )
+                let faultTransientChild = ProcessRecord(
+                    identity: ProcessIdentity(pid: 106, startSeconds: 305, startMicroseconds: 1),
+                    parentPID: faultTargetRoot.identity.pid,
+                    executablePath: bundleURL.appendingPathComponent("Contents/Helpers/Codex Service").path,
+                    nameHint: "Codex Service"
+                )
                 let faultSourceRoot = ProcessRecord(
                     identity: ProcessIdentity(pid: 104, startSeconds: 303, startMicroseconds: 1),
                     parentPID: 1,
@@ -750,6 +756,8 @@ func cliApplicationTests() -> [TestCase] {
                                 .filter { faultProcesses.contains(pid: $0.identity.pid) }
                             if running.contains(faultInitialRoot) {
                                 faultRunningPIDs.requestRootExit()
+                            } else if running.contains(faultTargetRoot) {
+                                faultProcesses.install([faultTargetRoot, faultTransientChild])
                             } else if running.contains(faultSourceRoot) {
                                 running.forEach(faultProcesses.terminate)
                             }
@@ -760,7 +768,11 @@ func cliApplicationTests() -> [TestCase] {
                             faultProcesses.terminate(process)
                         },
                         normalTerminationGracePolls: 0,
-                        quiescenceSleep: { _ in },
+                        quiescenceSleep: { _ in
+                            if faultProcesses.contains(pid: faultTransientChild.identity.pid) {
+                                faultProcesses.install(faultTargetRoot)
+                            }
+                        },
                         launchApplication: { _ in
                             faultLaunches.record()
                             let root = faultLaunches.count == 1 ? faultTargetRoot : faultSourceRoot
@@ -797,6 +809,10 @@ func cliApplicationTests() -> [TestCase] {
                 try expect(faultRecovery.standardOutput == "recovery=none\n", "B-011 left recovery state")
                 try expect(faultLaunchCount == 2, "B-011 did not launch target and restored source")
                 try expect(faultConfirmations.counts == [1], "rollback survivor confirmation changed")
+                try expect(
+                    !faultProcesses.terminatedPIDs.contains(faultTransientChild.identity.pid),
+                    "transient child received SIGTERM"
+                )
                 try expect(!faultProcesses.contains(pid: faultTargetRoot.identity.pid), "target app remained running")
                 try expect(faultProcesses.contains(pid: faultSourceRoot.identity.pid), "source app was not relaunched")
 #endif
@@ -3562,6 +3578,7 @@ private func rollbackTestConfirmationTest() -> TestCase {
         try expect(targets == ["B"], "rollback test was dispatched before confirmation")
     }
 }
+
 #endif
 
 private struct EmptyProcessSnapshotProvider: ProcessSnapshotProviding {

@@ -1251,8 +1251,12 @@ extension LocalCLIDataProvider: SwitchTransactionDriving {
                 $0.disposition.blocksAuthMutation
                     && terminationCandidates[$0.record.identity] == nil
             }
-            guard newlyDiscovered.isEmpty else {
+            guard newlyDiscovered.allSatisfy({ $0.disposition == .appOwnedBlocker }) else {
                 throw ApplicationQuiescenceFailure.processBlocked
+            }
+            if !newlyDiscovered.isEmpty {
+                try await quiescenceSleep(.milliseconds(250))
+                continue
             }
             let survivors = try capturedAppOwnedSurvivors(
                 in: inventory,
