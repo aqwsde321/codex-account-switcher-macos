@@ -140,7 +140,15 @@ private struct AccountMenuView: View {
             } else {
                 ForEach(model.profiles, id: \.id) { profile in
                     Button {
-                        Task { await model.select(profile) }
+                        Task {
+                            await model.select(profile)
+                            guard let confirmation = model.pendingProfile else { return }
+                            guard confirmAccountSwitch(confirmation) else {
+                                model.cancelSwitch()
+                                return
+                            }
+                            await model.confirmSwitch(confirmation)
+                        }
                     } label: {
                         ProfileCard(profile: profile)
                     }
@@ -264,21 +272,6 @@ private struct AccountMenuView: View {
         .frame(width: 320)
         .task { await model.load() }
         .confirmationDialog(
-            "계정을 전환할까요?",
-            isPresented: confirmationPresented,
-            titleVisibility: .visible,
-            presenting: model.pendingProfile
-        ) { profile in
-            Button("전환") {
-                Task { await model.confirmSwitch(profile) }
-            }
-            Button("취소", role: .cancel) {
-                model.cancelSwitch()
-            }
-        } message: { profile in
-            Text("\(profile.label) 계정으로 전환합니다.")
-        }
-        .confirmationDialog(
             "\(model.pendingReloginProfile?.label ?? "선택한") 계정의 재로그인을 반영할까요?",
             isPresented: reloginConfirmationPresented,
             titleVisibility: .visible,
@@ -293,17 +286,6 @@ private struct AccountMenuView: View {
         } message: { profile in
             Text("먼저 공식 Codex 앱에서 \(profile.label) 계정으로 로그인하세요. 앱과 독립 Codex 프로세스를 모두 종료한 뒤 진행하세요. 완료 후 앱은 직접 열어야 합니다.")
         }
-    }
-
-    private var confirmationPresented: Binding<Bool> {
-        Binding(
-            get: { model.pendingProfile != nil },
-            set: { presented in
-                if !presented {
-                    model.cancelSwitch()
-                }
-            }
-        )
     }
 
     private var reloginConfirmationPresented: Binding<Bool> {
@@ -472,6 +454,19 @@ private func confirmRegistration() -> Bool {
     cancel.keyEquivalent = "\u{1b}"
     NSApp.activate(ignoringOtherApps: true)
     return alert.runModal() == .alertFirstButtonReturn
+}
+
+@MainActor
+private func confirmAccountSwitch(_ profile: ProfileListItem) -> Bool {
+    let alert = NSAlert()
+    alert.alertStyle = .warning
+    alert.messageText = "계정을 전환할까요?"
+    alert.informativeText = "\(profile.label) 계정으로 전환합니다."
+    let cancel = alert.addButton(withTitle: "취소")
+    cancel.keyEquivalent = "\u{1b}"
+    alert.addButton(withTitle: "전환")
+    NSApp.activate(ignoringOtherApps: true)
+    return alert.runModal() == .alertSecondButtonReturn
 }
 
 @MainActor
