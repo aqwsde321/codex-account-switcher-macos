@@ -1405,9 +1405,7 @@ extension LocalCLIDataProvider: SwitchTransactionDriving {
         let descriptor = try requireSwitchContext().descriptor
         try await revalidateCredentialMutationGate()
         let pid = try await launchApplication(descriptor)
-        guard try await runningApplicationPIDs(descriptor).contains(pid) else {
-            throw CodexAppLifecycleFailure.launchFailed
-        }
+        try await confirmLaunchedApplication(pid, descriptor: descriptor)
         switchLaunchedApplicationPID = pid
     }
 
@@ -1535,9 +1533,7 @@ extension LocalCLIDataProvider: SwitchTransactionDriving {
         let descriptor = try requireSwitchContext().descriptor
         try await revalidateCredentialMutationGate()
         let pid = try await launchApplication(descriptor)
-        guard try await runningApplicationPIDs(descriptor).contains(pid) else {
-            throw CodexAppLifecycleFailure.launchFailed
-        }
+        try await confirmLaunchedApplication(pid, descriptor: descriptor)
     }
 }
 
@@ -1910,6 +1906,24 @@ extension LocalCLIDataProvider: TargetCredentialValidationDriving {
 }
 
 private extension LocalCLIDataProvider {
+    func confirmLaunchedApplication(
+        _ pid: Int32,
+        descriptor: CodexAppDescriptor
+    ) async throws {
+        guard pid > 0 else {
+            throw CodexAppLifecycleFailure.launchFailed
+        }
+        for poll in 0..<20 {
+            if try await runningApplicationPIDs(descriptor).contains(pid) {
+                return
+            }
+            if poll < 19 {
+                try await quiescenceSleep(.milliseconds(250))
+            }
+        }
+        throw CodexAppLifecycleFailure.launchFailed
+    }
+
     func switchProcessInventory(for descriptor: CodexAppDescriptor) async throws -> ProcessInventory {
         do {
             return try await processInventory(for: descriptor)

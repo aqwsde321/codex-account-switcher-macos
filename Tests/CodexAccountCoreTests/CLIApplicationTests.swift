@@ -1609,6 +1609,66 @@ func cliApplicationTests() -> [TestCase] {
                 try expect(journal == nil, "identity failure left recovery pending")
             }
         },
+        TestCase("CLI switch waits for delayed application PID visibility") {
+            try await withCaptureTemporaryDirectory { directory in
+                let fixture = try makeReloginFixture(in: directory)
+                let store = try SpikeStore.openExisting(at: fixture.storeURL)
+                let target = ProfileMetadata(
+                    id: fixture.target.id,
+                    label: fixture.target.label,
+                    email: fixture.target.email,
+                    planType: fixture.target.planType,
+                    needsRelogin: false,
+                    createdAt: fixture.target.createdAt,
+                    updatedAt: fixture.target.updatedAt
+                )
+                _ = try store.saveRegistry(
+                    ProfileRegistry(
+                        activeProfileID: fixture.source.id,
+                        profiles: [fixture.source, target]
+                    )
+                )
+                try fixture.sourceAuthData.write(to: fixture.authURL)
+
+                let launchVisibility = await MainActor.run {
+                    DelayedLaunchPIDVisibility(pid: 42)
+                }
+                let application = CLIApplication(
+                    provider: LocalCLIDataProvider(
+                        storeURL: fixture.storeURL,
+                        activeAuthURL: fixture.authURL,
+                        processProvider: EmptyProcessSnapshotProvider(),
+                        locateApp: { fixture.descriptor },
+                        runningApplicationPIDs: { _ in launchVisibility.current() },
+                        requestApplicationTermination: { _ in [] },
+                        normalTerminationGracePolls: 0,
+                        quiescenceSleep: { _ in },
+                        launchApplication: { _ in launchVisibility.launch() }
+                    )
+                )
+
+                let result = await application.run(
+                    arguments: ["switch", "--target", target.label],
+                    mutationConfirmed: true
+                )
+                let registry = try store.loadRegistry()
+                let active = try CredentialBlob(validating: Data(contentsOf: fixture.authURL))
+                let storedTarget = try store.loadCredential(for: target.id)
+                let journal = try store.loadJournalIfPresent()
+                let launchCount = await MainActor.run { launchVisibility.launchCount }
+                let observations = await MainActor.run { launchVisibility.observations }
+
+                try expect(result.exitCode == 0, "delayed PID visibility failed: \(result.standardError)")
+                try expect(registry.activeProfileID == target.id, "delayed launch did not activate B")
+                try expect(active == storedTarget, "delayed launch left the wrong active credential")
+                try expect(journal == nil, "delayed launch left recovery pending")
+                try expect(launchCount == 1, "delayed launch retried the application")
+                try expect(
+                    Array(observations.prefix(3)) == [[], [], [42]],
+                    "launch PID visibility was not delayed for two checks"
+                )
+            }
+        },
         TestCase("Local provider activates an exactly verified relogin target") {
             try await withCaptureTemporaryDirectory { directory in
                 let fixture = try makeReloginFixture(in: directory)
@@ -3693,6 +3753,29 @@ private final class AppLaunchRecorder {
 
     func record() {
         count += 1
+    }
+}
+
+@MainActor
+private final class DelayedLaunchPIDVisibility {
+    private let pid: Int32
+    private(set) var launchCount = 0
+    private(set) var observations: [[Int32]] = []
+
+    init(pid: Int32) {
+        self.pid = pid
+    }
+
+    func launch() -> Int32 {
+        launchCount += 1
+        return pid
+    }
+
+    func current() -> [Int32] {
+        guard launchCount > 0 else { return [] }
+        let visiblePIDs = observations.count < 2 ? [] : [pid]
+        observations.append(visiblePIDs)
+        return visiblePIDs
     }
 }
 
