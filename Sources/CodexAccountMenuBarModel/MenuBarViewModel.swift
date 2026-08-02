@@ -11,6 +11,7 @@ public final class MenuBarViewModel: ObservableObject {
     public typealias LoadProfiles = @Sendable () async throws -> [ProfileListItem]
     public typealias LoadRecoveryStatus = @Sendable () async throws -> RecoveryCLIStatus
     public typealias CaptureProfile = @Sendable (String) async throws -> ProfileListItem
+    public typealias RemoveProfile = @Sendable (ProfileID) async throws -> ProfileListItem
     public typealias SyncActiveProfile = @Sendable () async throws -> ProfileListItem
     public typealias SwitchProgress = @Sendable (SwitchPhase) async -> Void
     public typealias SwitchProfile = @Sendable (
@@ -24,6 +25,7 @@ public final class MenuBarViewModel: ObservableObject {
 
     @Published public private(set) var profiles = [ProfileListItem]()
     @Published public private(set) var pendingProfile: ProfileListItem?
+    @Published public private(set) var pendingRemovalProfile: ProfileListItem?
     @Published public private(set) var pendingReloginProfile: ProfileListItem?
     @Published public private(set) var pendingRecoveryConfirmation: RecoveryConfirmation?
     @Published public private(set) var recoveryStatus = RecoveryCLIStatus.blocked
@@ -35,6 +37,7 @@ public final class MenuBarViewModel: ObservableObject {
     private let loadProfiles: LoadProfiles
     private let loadRecoveryStatus: LoadRecoveryStatus
     private let captureProfile: CaptureProfile
+    private let removeProfile: RemoveProfile?
     private let syncActiveProfile: SyncActiveProfile
     private let switchProfile: SwitchProfile
     private let reloginProfile: ReloginProfile
@@ -46,6 +49,7 @@ public final class MenuBarViewModel: ObservableObject {
         loadProfiles: @escaping LoadProfiles,
         loadRecoveryStatus: @escaping LoadRecoveryStatus,
         captureProfile: @escaping CaptureProfile,
+        removeProfile: RemoveProfile? = nil,
         syncActiveProfile: @escaping SyncActiveProfile,
         switchProfile: @escaping SwitchProfile,
         reloginProfile: @escaping ReloginProfile,
@@ -56,6 +60,7 @@ public final class MenuBarViewModel: ObservableObject {
         self.loadProfiles = loadProfiles
         self.loadRecoveryStatus = loadRecoveryStatus
         self.captureProfile = captureProfile
+        self.removeProfile = removeProfile
         self.syncActiveProfile = syncActiveProfile
         self.switchProfile = switchProfile
         self.reloginProfile = reloginProfile
@@ -104,6 +109,67 @@ public final class MenuBarViewModel: ObservableObject {
 
     public func cancelSwitch() {
         pendingProfile = nil
+    }
+
+    public func requestRemoval(_ profile: ProfileListItem) {
+        statusMessage = nil
+        pendingRemovalProfile = nil
+        guard !isWorking, !recoveryRequired,
+              let current = profiles.first(where: { $0.id == profile.id }),
+              current == profile,
+              !current.active else {
+            if recoveryRequired { errorMessage = recoveryErrorMessage }
+            return
+        }
+        pendingRemovalProfile = current
+    }
+
+    public func confirmRemoval(_ confirmedProfile: ProfileListItem? = nil) async {
+        guard !isWorking, !recoveryRequired,
+              let removeProfile,
+              let profile = confirmedProfile ?? pendingRemovalProfile else {
+            cancelRemoval()
+            if recoveryRequired { errorMessage = recoveryErrorMessage }
+            return
+        }
+        cancelRemoval()
+        isWorking = true
+        defer { isWorking = false }
+        do {
+            try await refreshState()
+            guard !recoveryRequired,
+                  let current = profiles.first(where: { $0.id == profile.id }),
+                  current == profile,
+                  !current.active else {
+                errorMessage = recoveryRequired
+                    ? recoveryErrorMessage
+                    : "삭제 대상 상태가 변경되었습니다. 계정 정보를 다시 확인하세요."
+                return
+            }
+            _ = try await removeProfile(current.id)
+            try await refreshState()
+            guard profileRemovalIsComplete(profile.id) else {
+                recoveryStatus = .blocked
+                errorMessage = "계정 삭제 결과를 확인하지 못했습니다. 계정 작업을 중단했습니다."
+                return
+            }
+            reportRemovalSuccess(profile)
+        } catch {
+            await refreshAfterMutationFailure()
+            if profileRemovalIsComplete(profile.id) {
+                reportRemovalSuccess(profile)
+            } else if recoveryRequired {
+                errorMessage = recoveryErrorMessage
+            } else if case LocalCLIDataProviderFailure.activeProfileRemovalForbidden = error {
+                errorMessage = "삭제 대상 상태가 변경되었습니다. 계정 정보를 다시 확인하세요."
+            } else {
+                errorMessage = "계정의 로컬 저장본을 삭제하지 못했습니다."
+            }
+        }
+    }
+
+    public func cancelRemoval() {
+        pendingRemovalProfile = nil
     }
 
     public func confirmRelogin(_ confirmedProfile: ProfileListItem? = nil) async {
@@ -496,6 +562,17 @@ public final class MenuBarViewModel: ObservableObject {
             && profiles.contains { $0.id == profileID && $0.active && !$0.needsRelogin }
     }
 
+    private func profileRemovalIsComplete(_ profileID: ProfileID) -> Bool {
+        recoveryStatus == .none
+            && !profiles.contains(where: { $0.id == profileID })
+            && profiles.filter(\.active).count == 1
+    }
+
+    private func reportRemovalSuccess(_ profile: ProfileListItem) {
+        errorMessage = nil
+        statusMessage = "\(profile.label) 계정의 로컬 저장본을 삭제했습니다."
+    }
+
     private func setSwitchPhase(_ phase: SwitchPhase) {
         switchPhase = phase
     }
@@ -545,6 +622,7 @@ public final class MenuBarViewModel: ObservableObject {
     private func refreshAfterMutationFailure() async {
         try? await refreshState()
         pendingProfile = nil
+        cancelRemoval()
         cancelRelogin()
         cancelRecovery()
     }

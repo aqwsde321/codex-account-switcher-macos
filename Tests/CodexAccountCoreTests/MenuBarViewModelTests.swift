@@ -911,6 +911,108 @@ func menuBarViewModelTests() -> [TestCase] {
             try expect(recoveryStatus == .blocked, "wrong outcome ID bypassed STOP after reload failure")
             try expect(statusMessage == nil, "wrong outcome ID reported relogin success")
         },
+        TestCase("MenuBarViewModel confirms and removes the exact inactive profile") {
+            let provider = MenuBarProviderSpy(profiles: menuBarProfiles())
+            let model = await makeMenuBarModel(provider: provider)
+            await model.load()
+            guard let target = await MainActor.run(body: {
+                model.profiles.first(where: { !$0.active })
+            }) else {
+                throw TestFailure(description: "removal fixture has no inactive target")
+            }
+
+            await MainActor.run { model.requestRemoval(target) }
+            let pending = await MainActor.run { model.pendingRemovalProfile }
+            await model.confirmRemoval()
+
+            let removedProfileIDs = await provider.removedProfileIDs
+            let remainingProfiles = await MainActor.run { model.profiles }
+            let statusMessage = await MainActor.run { model.statusMessage }
+            try expect(pending == target, "removal confirmation changed the target")
+            try expect(removedProfileIDs == [target.id], "removal reached Core with another target")
+            try expect(
+                !remainingProfiles.contains(where: { $0.id == target.id }),
+                "removed profile remains in the menu"
+            )
+            try expect(
+                remainingProfiles.filter(\.active).count == 1,
+                "removal changed the active profile invariant"
+            )
+            try expect(
+                statusMessage == "\(target.label) 계정의 로컬 저장본을 삭제했습니다.",
+                "removal success was not reported"
+            )
+        },
+        TestCase("MenuBarViewModel blocks cancelled active and stale removals") {
+            let provider = MenuBarProviderSpy(profiles: menuBarProfiles())
+            let model = await makeMenuBarModel(provider: provider)
+            await model.load()
+            let loaded = await MainActor.run { model.profiles }
+            guard let active = loaded.first(where: \.active),
+                  let target = loaded.first(where: { !$0.active }) else {
+                throw TestFailure(description: "removal gate fixture is incomplete")
+            }
+
+            await MainActor.run { model.requestRemoval(active) }
+            let activePending = await MainActor.run { model.pendingRemovalProfile }
+            try expect(activePending == nil, "active profile exposed removal confirmation")
+
+            await MainActor.run {
+                model.requestRemoval(target)
+                model.cancelRemoval()
+            }
+            await model.confirmRemoval()
+            let removedAfterCancel = await provider.removedProfileIDs
+            try expect(removedAfterCancel.isEmpty, "cancelled removal reached Core")
+
+            await MainActor.run { model.requestRemoval(target) }
+            await provider.setProfiles(loaded.map { profile in
+                guard profile.id == target.id else { return profile }
+                return ProfileListItem(
+                    id: profile.id,
+                    label: "변경됨",
+                    email: profile.email,
+                    active: profile.active,
+                    needsRelogin: profile.needsRelogin
+                )
+            })
+            await model.confirmRemoval()
+
+            let removedProfileIDs = await provider.removedProfileIDs
+            let errorMessage = await MainActor.run { model.errorMessage }
+            try expect(removedProfileIDs.isEmpty, "stale removal reached Core")
+            try expect(
+                errorMessage == "삭제 대상 상태가 변경되었습니다. 계정 정보를 다시 확인하세요.",
+                "stale removal did not explain the rejection"
+            )
+        },
+        TestCase("MenuBarViewModel reconciles a committed removal throw") {
+            let provider = MenuBarProviderSpy(profiles: menuBarProfiles())
+            let model = await makeMenuBarModel(
+                provider: provider,
+                removeProfile: { profileID in
+                    _ = try await provider.removeProfile(profileID)
+                    throw MenuBarProviderSpyFailure.removeFailed
+                }
+            )
+            await model.load()
+            guard let target = await MainActor.run(body: {
+                model.profiles.first(where: { !$0.active })
+            }) else {
+                throw TestFailure(description: "committed removal fixture has no inactive target")
+            }
+
+            await MainActor.run { model.requestRemoval(target) }
+            await model.confirmRemoval()
+
+            let statusMessage = await MainActor.run { model.statusMessage }
+            let errorMessage = await MainActor.run { model.errorMessage }
+            try expect(
+                statusMessage == "\(target.label) 계정의 로컬 저장본을 삭제했습니다.",
+                "committed removal throw was not reconciled"
+            )
+            try expect(errorMessage == nil, "committed removal throw remained an error")
+        },
     ]
 }
 
@@ -926,6 +1028,7 @@ private func makeMenuBarModel(
     provider: MenuBarProviderSpy,
     useInjectedProfileLoad: Bool = false,
     captureProfile: MenuBarViewModel.CaptureProfile? = nil,
+    removeProfile: MenuBarViewModel.RemoveProfile? = nil,
     retryPendingRecovery: MenuBarViewModel.RetryPendingRecovery? = nil
 ) async -> MenuBarViewModel {
     await MainActor.run {
@@ -938,6 +1041,7 @@ private func makeMenuBarModel(
             },
             loadRecoveryStatus: { await provider.recoveryStatus() },
             captureProfile: captureProfile ?? { try await provider.captureProfile(label: $0) },
+            removeProfile: removeProfile ?? { try await provider.removeProfile($0) },
             syncActiveProfile: { try await provider.syncActiveProfile() },
             switchProfile: { try await provider.switchProfile(target: $0, onPhaseChange: $1) },
             reloginProfile: { try await provider.reloginProfile(target: $0) },
@@ -982,6 +1086,7 @@ private actor MenuBarProviderSpy {
     private(set) var capturedLabels = [String]()
     private(set) var switchPhases = [SwitchPhase]()
     private(set) var reloginTargets = [String]()
+    private(set) var removedProfileIDs = [ProfileID]()
     private(set) var restoreTargets = [String]()
     private(set) var restoreTransactionIDs = [String]()
     private(set) var mutationCount = 0
@@ -1045,6 +1150,10 @@ private actor MenuBarProviderSpy {
         storedRecoveryStatus = status
     }
 
+    func setProfiles(_ profiles: [ProfileListItem]) {
+        storedProfiles = profiles
+    }
+
     func failNextProfileLoad() {
         injectedProfileLoadFailurePending = true
     }
@@ -1067,6 +1176,15 @@ private actor MenuBarProviderSpy {
             throw MenuBarProviderSpyFailure.captureFailed
         }
         return profile
+    }
+
+    func removeProfile(_ profileID: ProfileID) throws -> ProfileListItem {
+        guard let index = storedProfiles.firstIndex(where: { $0.id == profileID }),
+              !storedProfiles[index].active else {
+            throw MenuBarProviderSpyFailure.removeFailed
+        }
+        removedProfileIDs.append(profileID)
+        return storedProfiles.remove(at: index)
     }
 
     func syncActiveProfile() throws -> ProfileListItem {
@@ -1188,6 +1306,7 @@ private enum MenuBarProviderSpyFailure: Error {
     case missingProfile
     case profileLoadFailed
     case captureFailed
+    case removeFailed
     case syncFailed
     case switchFailed
     case reloginFailed
