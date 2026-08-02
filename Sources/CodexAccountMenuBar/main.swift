@@ -183,23 +183,14 @@ private struct AccountMenuView: View {
             if let recoveryProfile = model.recoveryProfile {
                 Button("\(recoveryProfile.label) 계정 복구…") {
                     model.requestRecovery()
+                    guard let confirmation = model.pendingRecoveryConfirmation else { return }
+                    guard confirmRecovery(confirmation) else {
+                        model.cancelRecovery()
+                        return
+                    }
+                    Task { await model.confirmRecovery(confirmation) }
                 }
                 .disabled(model.isWorking)
-                .confirmationDialog(
-                    "\(recoveryProfile.label) 계정을 복구할까요?",
-                    isPresented: recoveryConfirmationPresented,
-                    titleVisibility: .visible,
-                    presenting: model.pendingRecoveryConfirmation
-                ) { confirmation in
-                    Button("복구", role: .destructive) {
-                        Task { await model.confirmRecovery(confirmation) }
-                    }
-                    Button("취소", role: .cancel) {
-                        model.cancelRecovery()
-                    }
-                } message: { _ in
-                    Text("공식 앱을 정상 종료하고 저장된 이전 인증으로 복구합니다. 독립 Codex CLI와 IDE 작업은 먼저 직접 종료하세요.")
-                }
             }
 
             if model.canRetryRecovery {
@@ -310,17 +301,6 @@ private struct AccountMenuView: View {
             set: { presented in
                 if !presented {
                     model.cancelSwitch()
-                }
-            }
-        )
-    }
-
-    private var recoveryConfirmationPresented: Binding<Bool> {
-        Binding(
-            get: { model.pendingRecoveryConfirmation != nil },
-            set: { presented in
-                if !presented {
-                    model.cancelRecovery()
                 }
             }
         )
@@ -492,6 +472,20 @@ private func confirmRegistration() -> Bool {
     cancel.keyEquivalent = "\u{1b}"
     NSApp.activate(ignoringOtherApps: true)
     return alert.runModal() == .alertFirstButtonReturn
+}
+
+@MainActor
+private func confirmRecovery(_ confirmation: MenuBarViewModel.RecoveryConfirmation) -> Bool {
+    let alert = NSAlert()
+    alert.alertStyle = .warning
+    alert.messageText = "\(confirmation.profile.label) 계정을 복구할까요?"
+    alert.informativeText = "공식 앱을 정상 종료하고 저장된 이전 인증으로 복구합니다. 독립 Codex CLI와 IDE 작업은 먼저 직접 종료하세요."
+    let cancel = alert.addButton(withTitle: "취소")
+    cancel.keyEquivalent = "\u{1b}"
+    let restore = alert.addButton(withTitle: "복구")
+    restore.hasDestructiveAction = true
+    NSApp.activate(ignoringOtherApps: true)
+    return alert.runModal() == .alertSecondButtonReturn
 }
 
 @MainActor
