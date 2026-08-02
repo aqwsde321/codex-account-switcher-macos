@@ -5,6 +5,18 @@
 - 코드: 저장소 루트 `.`
 - 중요: 외부 Terminal에서 A↔B 기능 왕복 3회, 수동 A 복구 2회, B-011 자동 롤백을 완료했다. B-010 형식 증거는 보존하지 않았으며 ADR-027에 따라 개발에는 수용하고 MVP 완료·배포 전 게이트로 유지한다.
 
+## 0. 2026-08-02 현재 복구 대기 상태
+
+실계정 A→B 전환에서 B 인증·앱 실행 뒤 롤백이 중단됐다. 작성 시점 제품 상태는 `registry=A`, `active auth=B`, `journal=rollbackFailed`다. 사용자는 B로 Codex를 직접 열었으며 수동 로그아웃하지 않았다.
+
+수정 커밋:
+
+- `8f5de1f`: 복구 확인을 native modal로 변경
+- `86e8eac`: LaunchServices PID 가시성 지연을 bounded wait로 처리
+- `fa022e3`: 종료 중 생성된 앱 소유 자식의 자연 종료 대기
+
+`./Scripts/dev.sh test`는 140개를 통과했다. 소스 수정은 아직 설치 앱과 실제 제품 상태에 반영하지 않았다. 다음 task는 [10_incident_2026-08-02_switch_rollback_race.md](10_incident_2026-08-02_switch_rollback_race.md)를 먼저 읽고, 최신 앱 설치 → A 명시 복구 → journal 부재·A 로그인 확인 순서로 진행한다. 제품 journal 삭제, auth 직접 복사, B 수동 로그아웃으로 우회하지 않는다.
+
 ## 1. 새 task에서 시작하는 방법
 
 새 Codex task는 먼저 다음 순서로 읽는다.
