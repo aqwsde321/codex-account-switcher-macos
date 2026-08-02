@@ -506,6 +506,37 @@ func menuBarViewModelTests() -> [TestCase] {
             try expect(statusMessage == "중단된 계정 작업을 복구했습니다. Codex 앱을 직접 여세요.", "recovery success message changed")
             try expect(errorMessage == nil, "completed recovery left an error")
         },
+        TestCase("MenuBarViewModel exposes an explicit rollbackFailed retry") {
+            let previous = menuBarProfiles()[0]
+            let transactionID = "00000000-0000-0000-0000-000000000014"
+            let pending = RecoveryCLIStatus.pending(
+                transactionID: transactionID,
+                phase: .rollbackFailed,
+                previousProfileID: previous.id
+            )
+            let provider = MenuBarProviderSpy(profiles: menuBarProfiles(), recoveryStatus: pending)
+            let retries = RefreshOrderRecorder()
+            let model = await makeMenuBarModel(
+                provider: provider,
+                retryPendingRecovery: { requestedTransactionID in
+                    await retries.record(requestedTransactionID)
+                    return .stopped(.processBlockerPresent)
+                }
+            )
+
+            await model.load()
+            let available = await MainActor.run { model.canRetryRecovery }
+            await model.retryRecovery()
+            let requestedTransactions = await retries.events
+            let errorMessage = await MainActor.run { model.errorMessage }
+
+            try expect(available, "rollbackFailed recovery did not expose the safe retry")
+            try expect(requestedTransactions == [transactionID], "rollbackFailed retry used the wrong transaction")
+            try expect(
+                errorMessage == "Codex 앱 또는 관련 프로세스가 남아 복구하지 못했습니다.",
+                "rollbackFailed retry did not explain the process blocker"
+            )
+        },
         TestCase("MenuBarViewModel explains an unverified explicit recovery") {
             let previous = menuBarProfiles()[0]
             let pending = RecoveryCLIStatus.pending(

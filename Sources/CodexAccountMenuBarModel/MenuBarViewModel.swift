@@ -477,8 +477,7 @@ public final class MenuBarViewModel: ObservableObject {
     }
 
     private var retryRecoveryTransactionID: String? {
-        guard case let .pending(transactionID, phase, _) = recoveryStatus,
-              phase != .rollbackFailed else {
+        guard case let .pending(transactionID, _, _) = recoveryStatus else {
             return nil
         }
         return transactionID
