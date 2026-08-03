@@ -180,8 +180,8 @@ flowchart LR
 - 대상 처리 전 journal을 `validatingTarget`으로 내구 기록한다. 대상 Keychain blob을 격리 홈에서 먼저 `account/read(refreshToken: false)`로 식별하고, 같은 격리 홈에서 `refreshToken: true`로 갱신한다.
 - 두 응답의 이메일이 모두 대상 프로필과 완전 일치할 때만 갱신된 대상 blob을 Keychain에 저장한다. Keychain 쓰기 성공을 확인한 뒤 journal을 `targetValidated`로 내구 기록한다.
 - 대상 식별·갱신·Keychain 저장 중 하나라도 실패하면 공용 active auth는 변경하지 않고 대상 프로필과 기존 저장본을 보존한다. 명시적 인증 만료·폐기·로그아웃·identity 불일치만 재로그인 상태로 바꾼다. timeout·network/server 오류는 retryable 검증 실패, Keychain write 실패는 저장소 오류이며 둘 다 token 폐기나 재로그인 근거가 아니다.
-- 비활성 B 재로그인은 사용자가 공식 앱에서 B 로그인을 완료하고 모든 관련 프로세스를 종료한 뒤 exact profile ID 확인으로만 시작한다. 첫 verifier 전에 `validatingTarget`을 기록하고 공용 auth의 B identity·refresh·동일 file identity를 검증한 뒤에만 B Keychain item을 교체한다.
-- 재로그인 성공 경로는 A active를 유지한 registry에서 B marker를 먼저 해제하고 `targetVerified`를 내구 기록한 뒤 active ID를 B로 바꾼다. 성공 뒤 앱은 자동 실행하지 않는다. pending·blocked·wrong-ID outcome·내구 상태 불일치에서는 자동 재시도하지 않는다.
+- 비활성 B 재로그인은 exact profile ID 확인 뒤 별도 `CODEX_HOME`의 브라우저 로그인으로 시작한다. 격리 홈에서 B identity를 false→true→false로 확인한 뒤에만 B Keychain item을 교체한다.
+- 재로그인 성공 경로는 A active·공용 auth·A credential을 유지하고 B marker만 해제한다. 공식 앱은 종료·실행하지 않으며 pending·blocked·wrong-ID outcome·내구 상태 불일치에서는 자동 재시도하지 않는다.
 - 비활성 프로필 삭제는 해당 profile UUID의 Keychain item과 registry 항목만 제거한다. 활성 `auth.json`, active ID, OpenAI 계정은 변경하지 않으며 활성 프로필 삭제는 거부한다.
 - 삭제는 secret-free `profile-removal.json`을 먼저 내구 기록하고 Keychain item→registry profile→marker 순서로 멱등 수행한다. Keychain 거부·중단 시 marker와 registry를 보존하고 다음 자동 복구에서 재개한다.
 - 공식 앱 재실행 후 검증은 공용 active auth를 임시 격리 홈에 복사해 `account/read(refreshToken: false)`를 호출한다. private Electron IPC에는 연결하지 않으며, 이 검증은 공용 active auth의 이메일만 직접 입증한다.
@@ -217,7 +217,7 @@ preparing
 
 롤백 시작은 `rollbackStarted`, 자동 복구 불능은 `rollbackFailed`다. `committed`, `rolledBack`, `blocked`, `idle`은 진단/UI 상태이며 persisted phase가 아니다.
 
-재로그인만 private store API로 `validatingTarget → targetVerified`를 허용한다. exact B credential 저장과 A-active registry의 B marker 해제까지 검증된 뒤에만 호출한다. public `SwitchStateMachine`의 canonical transition은 완화하지 않는다.
+ADR-033 이후 새 재로그인은 switch journal을 만들지 않는다. 기존 `validatingTarget → targetVerified` 단축 전이는 이전 버전 journal의 복구 호환성에만 남기며 public `SwitchStateMachine`의 canonical transition은 완화하지 않는다.
 
 ### 6.2 내구 쓰기 계약
 
@@ -296,7 +296,7 @@ preparing
 | `quiescent` | exact source면 안전 취소한다. active가 source 이메일이지만 configured blob과 다르면 `rollbackStarted` 기록 후 `refreshToken: true`로 갱신·저장하고 취소하며, 갱신 실패 시 configured source를 복원한다. exact target이면 이전본 롤백, 다른 신원·판독 불가는 `STOP` |
 | `refreshingCurrent` | process gate 후 active가 source로 유효하면 `refreshToken: true`와 configured-store 저장을 멱등 완료하고, active가 missing/corrupt/mismatch면 configured-store source를 복원한다. 어느 분기든 source 이메일·registry previous를 확인하고 journal을 내구 삭제해 안전 취소 |
 | `currentSaved` | exact source면 configured store의 최신 source를 확인하고 안전 취소, exact target이면 이전본 롤백, 다른 신원·판독 불가는 `STOP` |
-| `validatingTarget` | 남은 verifier·임시 홈을 정리한다. exact source인 일반 switch는 안전 취소하고, exact target인 재로그인은 configured source credential을 복원·검증한다. 다른 신원·판독 불가는 `STOP`한다. registry previous를 유지하며 검증 저장된 target blob·해제된 marker는 보존 가능 |
+| `validatingTarget` | 남은 verifier·임시 홈을 정리한다. exact source인 일반 switch는 안전 취소하고, 이전 버전 재로그인 journal의 exact target은 configured source credential을 복원·검증한다. 다른 신원·판독 불가는 `STOP`한다. registry previous를 유지하며 검증 저장된 target blob·해제된 marker는 보존 가능 |
 | `targetValidated` | 일반 switch는 source면 journal을 내구 삭제해 안전 취소하고 target이면 `rollbackStarted`로 전환해 source 롤백한다. 추가 등록은 registry target·exact target auth·target capture marker가 함께 일치할 때만 `targetVerified`로 전진해 정리하며, 그 외는 `STOP` |
 | `authReplaced` | 관련 process가 실행 중이면 종료하지 않고 `STOP`; gate가 깨끗할 때만 이전본 롤백 |
 | `targetLaunched`~`verifyingTarget` | 관련 process가 실행 중이면 종료하지 않고 `STOP`; 사용자가 모두 종료한 뒤 다음 자동 복구에서 이전본 롤백 |

@@ -156,20 +156,16 @@ JWT를 디코딩하거나 token field를 로그에 출력해 신원을 추정하
 
 ### 7.2 B 등록
 
-초기 Spike에서는 별도 `CODEX_HOME` 기반 자동 로그인을 구현하지 않는다. A를 먼저 안전하게 보존한 후 공식 Codex 로그인 흐름으로 B를 로그인하고 캡처한다.
-
-1. `profile-a` 저장본과 `recovery=none`을 먼저 확인한다.
-2. 독립 Codex CLI·IDE 작업을 종료한다.
-3. 사용자가 공식 앱의 interactive login 흐름으로 B에 로그인한다.
-4. 사용자가 `CAPTURE`로 등록과 공식 앱 정상 종료·B 활성 유지를 승인한다. helper는 A 등록과 같은 잔존 프로세스 경계를 적용한다.
-5. 기본 `~/.codex`를 사용하는 Helper 소유 verifier의 `account/read(refreshToken: true)`로 B 이메일을 확인한다.
-6. B 이메일이 A와 같으면 등록을 거부한다.
-7. active auth를 Spike private store의 `profile-b` 파일에 durable하게 저장하고 JSON 가독성·round-trip 동일성을 확인한다.
-8. registry의 active profile을 B로 durable하게 기록하고 journal을 `targetVerified`로 확정한다.
-9. active B 인증과 저장 B가 동일한지 재확인한 뒤 capture marker와 journal을 durable delete한다.
-10. 위 정리가 끝난 후에만 공식 앱을 B로 재실행한다.
-11. 성공 경로에서는 A 저장본을 갱신하거나 공용 인증으로 복원하지 않는다.
-12. A가 필요하면 등록 완료 뒤 일반 전환을 별도로 실행한다.
+1. `profile-a`, 활성 A, `recovery=none`, 공용 `auth.json`의 exact identity를 확인한다.
+2. 별도 `CODEX_HOME`을 `0700`으로 만들고 번들된 공식 `codex login`을 실행한다.
+3. 사용자는 열린 브라우저에서 B로 로그인한다. 공식 앱은 종료하거나 로그아웃하지 않는다.
+4. 격리 홈에서 B 이메일을 `account/read(refreshToken: false→true→false)`로 확인한다.
+5. B 이메일이 기존 프로필과 같거나 확인 사이 바뀌면 저장하지 않고 격리 홈을 제거한다.
+6. 새 UUID의 비활성 `needsRelogin` 프로필을 registry에 먼저 durable하게 기록한다.
+7. B credential을 저장하고 round-trip을 확인한 뒤 같은 프로필의 `needsRelogin`을 해제한다.
+8. 공용 `auth.json`, A 저장본, registry active A가 모두 시작 상태와 같은지 확인한다.
+9. 정상 종료 뒤 격리 홈을 제거한다. child 종료 미확인은 홈을 보존하고 STOP한다.
+10. B로 바꾸려면 등록 완료 뒤 일반 전환을 별도로 실행한다.
 
 예정 인터페이스 예시:
 
@@ -177,7 +173,7 @@ JWT를 디코딩하거나 token field를 로그에 출력해 신원을 추정하
 [예정 인터페이스] switcher register-second --profile profile-b
 ```
 
-등록 중 사용한 공식 로그인 프로세스는 controlled exception이다. 캡처나 교체 전에는 반드시 종료되어야 하며, 이후 잔존하면 프로세스 게이트가 차단한다.
+격리 로그인 child는 helper가 exact PID로만 취소·종료한다. 독립 CLI·IDE와 공식 앱 프로세스는 추가 등록에서 종료하지 않는다.
 
 ### 외부 로그인 감지
 
@@ -582,10 +578,10 @@ journal은 §9의 고정 7필드만 가진다: `schemaVersion`, `transactionId`,
 ### 계정 등록
 
 - [ ] A 이메일 검증 후 profile-a 저장
-- [ ] 공식 로그인 흐름으로 B 등록
+- [ ] 격리 `CODEX_HOME` 브라우저 로그인으로 B 등록
 - [ ] B 이메일이 A와 다름
 - [ ] profile-b 저장
-- [ ] B active·재실행, A 저장본 무변경, recovery none 확인
+- [ ] A active·공용 auth·공식 앱 유지, B inactive 저장, recovery none 확인
 
 ### 매 전환
 

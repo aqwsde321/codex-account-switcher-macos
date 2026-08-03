@@ -129,20 +129,17 @@ flowchart TD
 
 ### 3.2 추가 계정 등록
 
-1. 등록 시작 전 활성 프로필의 저장 인증이 존재하는지 확인한다.
-2. 사용자가 명시적으로 추가 계정 등록을 시작한다.
-3. 공식 `codex login` 또는 공식 로그인 UI로 다른 ChatGPT 계정에 로그인한다.
-4. 사용자가 공식 앱 정상 종료·등록·새 계정 활성 유지를 승인한다.
-5. Helper가 recovery 부재·3계정 상한·앱 호환성을 먼저 확인한다.
-6. Helper가 정상 종료와 ADR-009의 잔존 프로세스 경계를 적용한다. 독립 Codex CLI·IDE가 있으면 자동 종료하지 않고 중단한다.
-7. Helper가 활성 이메일이 기존 프로필과 다르고 아직 등록되지 않았음을 감지한다.
-8. 자동 덮어쓰지 않고 다음 행동을 요구한다.
-   - 새 프로필로 등록
-   - 현재 외부 로그인 변경을 폐기하고 기존 프로필 복구
-9. 등록을 선택하면 새 프로필 인증을 검증·저장한다.
-10. 새 프로필을 active로 확정하고 capture marker와 journal을 내구 삭제한 뒤 새 계정으로 앱을 다시 연다. 성공 경로에서는 이전 프로필을 온라인 갱신하거나 복원하지 않는다.
+1. 등록 시작 전 recovery 부재·3계정 상한·활성 프로필 저장본·공용 auth identity·앱 서명을 확인한다.
+2. 사용자가 명시적으로 추가 등록을 승인한다.
+3. Helper가 `0700` 격리 `CODEX_HOME`에서 번들된 공식 `codex login`을 실행한다.
+4. 사용자는 열린 브라우저에서 아직 등록하지 않은 ChatGPT 계정으로 로그인한다.
+5. Helper가 격리 홈에서 `account/read`를 false→true→false로 실행해 이메일 안정성과 중복 여부를 확인한다.
+6. 시작 상태의 registry·공용 auth·활성 저장본이 그대로인지 다시 확인한다.
+7. 새 UUID의 inactive·`needsRelogin` metadata를 먼저 durable 저장한다.
+8. 새 credential round-trip 뒤 같은 metadata의 marker를 해제한다.
+9. 기존 active와 공식 앱은 유지한다. 사용자가 새 카드를 선택할 때만 일반 전환한다.
 
-후속 버전에서는 격리된 임시 `CODEX_HOME`의 App Server 로그인 흐름으로 프로필을 추가할 수 있다. 이 기능은 기본 전환 Spike가 통과한 뒤에만 추가한다.
+취소와 credential 저장 전 실패는 격리 홈만 제거한다. metadata 또는 credential 저장 사이 중단은 `needsRelogin` 프로필을 남겨 재로그인·삭제가 가능하며 고아 credential을 만들지 않는다.
 
 ### 3.3 일반 계정 전환
 
@@ -169,16 +166,14 @@ flowchart TD
 
 ### 3.4 비활성 대상 재로그인 반영
 
-1. 사용자가 공식 Codex 앱에서 `needsRelogin`인 비활성 B로 로그인한 뒤 앱과 독립 Codex 프로세스를 모두 종료한다.
-2. 메뉴바에서 B 카드를 선택하고 별도 확인을 승인한다. 확인 snapshot은 exact profile ID를 보존하며 일반 switch 경로를 호출하지 않는다.
-3. Helper는 profile·recovery를 다시 읽고 B가 여전히 비활성·재로그인 필요이며 recovery가 없는지 확인한 뒤 단일 transaction lock을 획득해 같은 조건을 재검증한다.
-4. 첫 verifier 실행 전에 source A와 target B를 담은 `validatingTarget` journal을 내구 저장한다.
-5. 공용 `auth.json`이 exact B인지 확인하고 `account/read(refreshToken: true)`로 갱신한다. 갱신 직후 읽은 동일 blob을 다시 B 이메일로 검증한다.
-6. 검증된 blob을 B credential에 저장하고 round-trip을 확인한다.
-7. A를 active로 유지한 registry에서 B의 `needsRelogin`을 먼저 해제한다. 그 뒤 재로그인 전용 내부 전이로 journal을 `targetVerified`로 바꾼다.
-8. registry active ID를 B로 커밋하고 journal을 내구 삭제한다. 공식 앱은 자동 실행하지 않으며 사용자가 직접 연다.
-9. `targetVerified` 전 확정 실패는 A credential·active ID를 검증 복원한다. verifier 종료를 확인하지 못하면 auth를 다시 쓰지 않고 pending으로 남긴다. Core throw 뒤 recovery가 없으면 수동 재시도를 허용하고, pending·blocked면 재시도하지 않는다.
-10. journal 삭제 내구성이 불명확하면 profile·recovery를 다시 읽는다. B 하나만 active이고 marker가 해제됐으며 recovery가 없을 때만 완료를 재확인한다. 그 밖에는 STOP한다.
+1. 메뉴바에서 `needsRelogin`인 비활성 B 카드를 선택하고 별도 확인을 승인한다. 확인 snapshot은 exact profile ID를 보존하며 일반 switch 경로를 호출하지 않는다.
+2. Helper는 profile·recovery를 다시 읽고 B가 여전히 비활성·재로그인 필요이며 source A가 단일 active인지 transaction lock 안에서 재검증한다.
+3. 공용 auth identity와 A credential을 확인한 뒤 별도 `CODEX_HOME`에서 번들된 공식 `codex login`을 실행한다.
+4. 사용자는 열린 브라우저에서 exact B로 로그인한다.
+5. 격리 홈의 `account/read`를 false→true→false로 실행해 B identity와 refresh 안정성을 확인한다.
+6. 시작 상태의 registry·공용 auth·A credential이 그대로인지 확인한 뒤 검증된 blob을 B credential에 저장한다.
+7. B marker만 해제하고 A active를 유지한다. journal과 공식 앱 종료·실행은 사용하지 않는다.
+8. 취소·identity mismatch·저장 실패는 기존 B credential과 registry를 복원한다. child 종료 미확인은 격리 홈을 보존하고 STOP한다.
 
 ### 3.4.1 비활성 계정 삭제·재등록
 
@@ -189,7 +184,7 @@ flowchart TD
 5. `profile-removal.json`에 `schemaVersion, transactionId, profileId, expectedActiveProfileId`만 내구 기록한다.
 6. Keychain item 멱등 삭제→registry profile 내구 삭제→삭제 marker 내구 삭제 순서로 완료한다. `auth.json`과 활성 프로필은 쓰지 않는다.
 7. 중단되면 시작 자동 복구가 같은 순서를 재개한다. 삭제 marker와 전환 journal이 함께 있거나 예상 active ID가 바뀌었으면 자동 추정 없이 둘 다 보존하고 STOP한다.
-8. 완료 뒤 프로필 슬롯과 라벨·이메일 중복 제약이 해제된다. 사용자는 같은 계정으로 공식 앱에 로그인해 같은 라벨·이메일로 다시 등록할 수 있으며 새 profile ID가 발급되고 재등록 계정이 active로 유지된다.
+8. 완료 뒤 프로필 슬롯과 라벨·이메일 중복 제약이 해제된다. 사용자는 격리 브라우저 로그인으로 같은 라벨·이메일을 다시 등록할 수 있으며 새 profile ID가 발급되고 기존 active가 유지된다.
 
 ### 3.5 전환 실패와 자동 롤백
 
@@ -322,7 +317,7 @@ preparing → quitRequested → quiescent → refreshingCurrent → currentSaved
 → authReplaced → targetLaunched → verifyingTarget → targetVerified
 ```
 
-롤백은 `rollbackStarted`, 자동 복구 불능은 `rollbackFailed`다. 재로그인만 검증된 B credential 저장과 A-active registry의 B marker 해제 뒤 private store API로 `validatingTarget → targetVerified` 단축 전이를 허용한다. 성공 시 `targetVerified`에서 active ID를 커밋한 뒤 journal을 삭제한다. 앞 절의 `idle`, `blocked`, `committed`, `rolledBack` 등은 UI/runtime 상태이며 persisted journal phase가 아니다.
+롤백은 `rollbackStarted`, 자동 복구 불능은 `rollbackFailed`다. ADR-033 이후 새 격리 재로그인은 journal을 만들지 않는다. 이전 버전 재로그인 journal 복구만 private store API의 `validatingTarget → targetVerified` 단축 전이를 허용한다. 앞 절의 `idle`, `blocked`, `committed`, `rolledBack` 등은 UI/runtime 상태이며 persisted journal phase가 아니다.
 
 ### journal·registry 내구성
 

@@ -37,8 +37,8 @@ public struct ProfileCaptureCoordinator: Sendable {
 
         let profileID = try await driver.prepareCapture()
         do {
-            let initial = try identity(from: await driver.probeAccount(refreshToken: false))
-            let refreshed = try identity(from: await driver.probeAccount(refreshToken: true))
+            let initial = try capturedProfileIdentity(from: await driver.probeAccount(refreshToken: false))
+            let refreshed = try capturedProfileIdentity(from: await driver.probeAccount(refreshToken: true))
             guard refreshed.email == initial.email else {
                 throw ProfileCaptureFailure.identityMismatch
             }
@@ -70,20 +70,20 @@ public struct ProfileCaptureCoordinator: Sendable {
     }
 }
 
-private extension ProfileCaptureCoordinator {
-    func identity(from account: AppServerAccountRead) throws -> (email: String, planType: String?) {
-        switch account {
-        case .signedOut:
-            throw ProfileCaptureFailure.signedOut
-        case let .chatGPT(email, planType, _):
-            guard let email, !email.isEmpty else {
-                throw ProfileCaptureFailure.missingEmail
-            }
-            guard email.unicodeScalars.count <= 320,
-                  !email.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else {
-                throw ProfileCaptureFailure.invalidEmail
-            }
-            return (email, planType)
+package func capturedProfileIdentity(
+    from account: AppServerAccountRead
+) throws -> (email: String, planType: String?) {
+    switch account {
+    case .signedOut:
+        throw ProfileCaptureFailure.signedOut
+    case let .chatGPT(email, planType, _):
+        guard let email, !email.isEmpty else {
+            throw ProfileCaptureFailure.missingEmail
         }
+        guard email.unicodeScalars.count <= 320,
+              !email.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else {
+            throw ProfileCaptureFailure.invalidEmail
+        }
+        return (email, planType)
     }
 }

@@ -467,14 +467,13 @@ Spike에서 다음을 확인했다.
 
 ### 추가 프로필
 
-- 등록 시작 전 활성 프로필 저장본 존재 확인
-- 사용자의 공식 로그인 후 미등록 이메일 감지
-- 명시 확인 뒤 capture marker·credential·journal 생성 전에 공용 정상 종료·quiescence 경계 적용
-- 자동 overwrite 금지
-- 명시적 등록 동작에서만 새 프로필 저장
-- 새 프로필을 active로 기록하고 동일 lock/journal에서 `targetVerified`로 확정
-- active auth와 새 저장본 일치, capture marker와 journal 정리까지 끝난 뒤에만 lock 해제·새 계정 앱 실행
-- 정상 성공 경로에서는 등록 전 프로필을 갱신·복원하지 않으며, 커밋 전 실패와 기존 중단 상태에만 rollback 경로 사용
+- 등록 시작 전 recovery 부재, 활성 프로필 저장본, 공용 auth exact identity, 앱·번들 CLI 서명 확인
+- 격리 `CODEX_HOME`의 공식 `codex login` 실행과 helper 소유 child만 exact PID로 취소
+- 격리 App Server false→true→false probe의 동일 이메일과 기존 이메일 비중복 확인
+- 새 credential보다 같은 UUID의 inactive·`needsRelogin` registry intent를 먼저 durable 저장
+- credential round-trip 뒤 marker를 해제하고 registry round-trip 확인
+- 기존 active profile ID·공용 auth·기존 저장본을 전후 비교하고 공식 앱 종료·재실행 없음
+- 취소·실패는 새 credential/metadata를 함께 rollback하며, 중단된 intent는 재로그인·삭제 가능
 
 등록 한도 초과는 `ProfileRegistry`와 capture gate에서 모두 거부한다.
 
@@ -513,7 +512,7 @@ previous rollback 중 어떤 단계든 실패하면 `rollbackFailed`를 durable�
 
 ## 11. CLI 인터페이스
 
-`inspect`, `profiles list`, 최대 3개의 `profile capture`, 추가 등록 계정 활성 유지, `profile sync-active`, 일반 `switch`, `recovery status`, `recovery restore`는 구현됐다. `verify`, `cleanup`은 예정 인터페이스다.
+`inspect`, `profiles list`, 최대 3개의 `profile capture`, 추가 등록 격리 로그인·비활성 저장, `profile sync-active`, 일반 `switch`, `recovery status`, `recovery restore`는 구현됐다. `verify`, `cleanup`은 예정 인터페이스다.
 
 ```text
 codex-account-spike inspect
@@ -548,22 +547,21 @@ ADR-027의 개발 승인에 따라 다음 최소 기능만 추가한다.
 - 단계별 상태와 안전한 오류 표시
 - 이미 활성 카드 클릭 시 Codex 창 활성화
 - 재로그인 필요 표시
-- 재로그인 필요 비활성 카드의 exact-ID 확인·반영과 B 활성화
+- 재로그인 필요 비활성 카드의 exact-ID 격리 로그인과 기존 active 유지
 - `rollbackFailed` journal의 exact transaction ID와 previous profile을 확인 snapshot에 묶고, Core lock 안에서 둘 다 재검증한 뒤에만 수동 복구
 - 복구 성공·앱 launch 미확인·journal finalization 불확실을 typed outcome으로 구분하고 마지막 두 분기에서 auth 복구 재시도 금지
 
 전환 진행 표시는 `SwitchCoordinator`가 각 journal create/update의 내구 성공 직후 내보내는 `SwitchPhase` callback만 사용한다. UI는 이를 현재 단계 문구로 매핑하며 퍼센트·예상 시간·실행 중 취소를 추정하지 않는다. 이미 활성인 프로필의 무변경 경로는 journal phase를 만들지 않으므로 진행 callback도 내보내지 않는다.
 
-재로그인은 일반 switch와 다른 최소 경로다. 사용자가 공식 앱에서 inactive B 로그인을 끝내고 모든 관련 프로세스를 종료한 상태에서만 시작한다. Core는 첫 verifier 전에 `validatingTarget`을 기록하고 공용 auth의 exact B identity와 refresh 결과의 동일 blob을 검증한 뒤 B Keychain item을 교체한다. registry는 A active를 유지한 채 B marker를 먼저 해제하고, 내부에서만 허용한 `validatingTarget → targetVerified` 전이 뒤 active ID를 B로 커밋한다. 이 순서는 `targetVerified` 이후 기존 forward recovery가 marker 없는 B를 완료할 수 있게 한다. 성공 뒤 앱 launch는 수행하지 않는다.
+재로그인은 추가 등록과 같은 격리 로그인 helper를 사용한다. exact inactive profile ID와 active source를 확인하고, 별도 `CODEX_HOME`의 브라우저 로그인에서 대상 이메일을 false→true→false로 검증한 뒤 대상 Keychain item과 marker만 교체한다. 공용 auth, active ID, source credential, 공식 앱 process는 전후 exact 상태를 유지한다.
 
-메뉴바는 재로그인 확인을 일반 전환 pending과 분리하고 `presenting` snapshot의 opaque ID를 Core에 한 번만 전달한다. 호출 직전과 반환·throw 뒤 profile/recovery를 다시 읽는다. `recovery=none`, B 단일 active, B `needsRelogin=false`일 때만 성공이다. 안전 rollback 뒤 Core throw는 수동 재시도를 허용하지만 pending·blocked, wrong-ID outcome, 반환 뒤 상태 불일치는 STOP이다.
+메뉴바는 재로그인 확인을 일반 전환 pending과 분리하고 `presenting` snapshot의 opaque ID를 Core에 한 번만 전달한다. 호출 직전과 반환·throw 뒤 profile/recovery를 다시 읽는다. `recovery=none`, 기존 source 단일 active, 대상 `needsRelogin=false`일 때만 성공이다. wrong-ID outcome, pending·blocked, 반환 뒤 상태 불일치는 STOP이다.
 
 잔존 프로세스 2차 확인은 기존 Core confirmation 경계를 async로 연결한다. 취소가 기본 동작이며, 승인해도 정상 종료 요청 전에 캡처한 PID·시작 시각·실행 경로가 signal 직전까지 모두 같은 앱 소유 대상에만 `SIGTERM`을 한 번 보낸다. 새 process, identity가 바뀐 process, 독립 CLI, 분류 불명 process는 확인 후보로 넓히지 않고 STOP한다.
 
 후속 범위:
 
 - `account/rateLimits/read` 기반 5시간·주간 사용량
-- 격리 App Server login을 통한 계정 추가
 - 4개 이상 계정 UI
 - Developer ID 서명·공증·업데이트
 
@@ -605,10 +603,9 @@ Core protocol로 다음 실패를 결정적으로 주입할 수 있어야 한다
 - 대상 refresh 실패
 - 대상 `false` identity 성공 뒤 `true` refresh의 이메일 변경
 - 대상 network 실패가 `needsRelogin`을 바꾸지 않음
-- 재로그인 첫 verifier보다 `validatingTarget` journal이 먼저 기록됨
-- 재로그인 refresh 직후 읽은 B blob과 verifier가 확인한 file identity 불일치
-- B credential 저장 뒤 marker 해제·`targetVerified`·active ID commit 사이 중단
-- 재로그인 journal finalization 불확실의 restart 재조정
+- 재로그인 false→true→false 사이 identity 변경과 공용 auth/source credential race
+- B credential 저장 뒤 marker 해제 실패의 기존 저장본·registry rollback
+- 로그인 시작 직전과 각 probe 뒤 취소
 - 메뉴바 재로그인 확인 취소·stale snapshot·wrong-ID outcome·mutation 뒤 throw
 - refreshed target configured-store 저장 후 `targetValidated` 기록 전 crash
 - 현재 refresh 후 crash

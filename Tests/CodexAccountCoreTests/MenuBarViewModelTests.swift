@@ -204,14 +204,19 @@ func menuBarViewModelTests() -> [TestCase] {
 
             let additionalRegistered = await model.register(label: "회사")
             let profilesAfterAdditional = await MainActor.run { model.profiles }
+            let additionalStatus = await MainActor.run { model.statusMessage }
             let labelsAfterAdditional = await provider.capturedLabels
             try expect(additionalRegistered, "additional menu bar registration reported failure")
             try expect(labelsAfterAdditional == ["개인", "회사"], "additional registration label changed")
             try expect(
                 profilesAfterAdditional.count == 2
-                    && !profilesAfterAdditional[0].active
-                    && profilesAfterAdditional[1].active,
-                "additional registration did not activate the new profile"
+                    && profilesAfterAdditional[0].active
+                    && !profilesAfterAdditional[1].active,
+                "additional registration changed the active profile"
+            )
+            try expect(
+                additionalStatus == "회사 계정을 등록했습니다. 현재 계정은 유지됩니다. 전환하려면 계정을 선택하세요.",
+                "additional registration status changed"
             )
 
             let launchFailureProvider = MenuBarProviderSpy(
@@ -239,18 +244,37 @@ func menuBarViewModelTests() -> [TestCase] {
             let committedDespiteLaunchFailure = await launchFailureModel.register(label: "회사")
             let launchFailureProfiles = await MainActor.run { launchFailureModel.profiles }
             let launchFailureMessage = await MainActor.run { launchFailureModel.errorMessage }
-            try expect(committedDespiteLaunchFailure, "durably committed registration allowed a duplicate retry")
+            let launchFailureRecovery = await MainActor.run { launchFailureModel.recoveryStatus }
+            try expect(!committedDespiteLaunchFailure, "thrown Core registration was reported successful")
             try expect(launchFailureProfiles.count == 2, "committed profile was not reloaded after launch failure")
             try expect(
-                launchFailureMessage == "계정은 등록했지만 Codex 앱을 다시 열지 못했습니다.",
-                "post-commit launch failure was not distinguished from registration failure"
+                launchFailureMessage == "계정 등록 완료 여부를 확인하지 못했습니다. 계정 작업을 중단했습니다.",
+                "thrown Core registration did not fail closed"
+            )
+            try expect(launchFailureRecovery == .blocked, "uncertain registration did not block mutations")
+
+            let refreshFailureProvider = MenuBarProviderSpy(profiles: [menuBarProfiles()[0]])
+            let refreshFailureModel = await makeMenuBarModel(
+                provider: refreshFailureProvider,
+                useInjectedProfileLoad: true
+            )
+            await refreshFailureModel.load()
+            await refreshFailureProvider.failNextProfileLoad()
+            let reconciledRefreshFailure = await refreshFailureModel.register(label: "회사")
+            let refreshFailureMessage = await MainActor.run { refreshFailureModel.errorMessage }
+            let refreshFailureStatus = await MainActor.run { refreshFailureModel.statusMessage }
+            try expect(reconciledRefreshFailure, "returned registration was lost after reload failure")
+            try expect(refreshFailureMessage == nil, "reconciled registration left an error")
+            try expect(
+                refreshFailureStatus == "회사 계정을 등록했습니다. 현재 계정은 유지됩니다. 전환하려면 계정을 선택하세요.",
+                "reconciled registration status changed"
             )
 
             let precommitFailureProvider = MenuBarProviderSpy(
                 profiles: [menuBarProfiles()[0]],
                 captureFailureAfterMutation: true,
                 captureRecoveryStatusAfterFailure: .none,
-                captureActivatesProfile: false
+                captureNeedsRelogin: true
             )
             let precommitFailureModel = await makeMenuBarModel(provider: precommitFailureProvider)
             await precommitFailureModel.load()
@@ -262,7 +286,8 @@ func menuBarViewModelTests() -> [TestCase] {
             try expect(
                 precommitProfiles.count == 2
                     && precommitProfiles[0].active
-                    && !precommitProfiles[1].active,
+                    && !precommitProfiles[1].active
+                    && precommitProfiles[1].needsRelogin,
                 "pre-commit rollback state was not reloaded"
             )
             try expect(
@@ -845,6 +870,76 @@ func menuBarViewModelTests() -> [TestCase] {
             try expect(!isWorking, "cancelled login left the menu busy")
             try expect(!isLoginInProgress, "cancelled login left cancellation controls visible")
         },
+        TestCase("MenuBarViewModel cancels isolated account registration without mutation") {
+            let initialProfiles = [menuBarProfiles()[0]]
+            let provider = MenuBarProviderSpy(profiles: initialProfiles)
+            let cancellation = ProfileLoginCancellationProbe()
+            let model = await makeMenuBarModel(
+                provider: provider,
+                captureProfile: { try await cancellation.capture(label: $0) },
+                cancelProfileLogin: { await cancellation.cancel() }
+            )
+            await model.load()
+
+            let registrationTask = Task { await model.register(label: "회사") }
+            await cancellation.waitUntilStarted()
+            let inProgress = await MainActor.run { model.isProfileLoginInProgress }
+            try expect(inProgress, "additional registration did not expose cancellable progress")
+
+            await model.cancelProfileLogin()
+            let registered = await registrationTask.value
+
+            let cancelCount = await cancellation.cancelCount
+            let labels = await cancellation.labels
+            let profiles = await MainActor.run { model.profiles }
+            let statusMessage = await MainActor.run { model.statusMessage }
+            let errorMessage = await MainActor.run { model.errorMessage }
+            let isWorking = await MainActor.run { model.isWorking }
+            let isLoginInProgress = await MainActor.run { model.isProfileLoginInProgress }
+            try expect(!registered, "cancelled registration reported success")
+            try expect(cancelCount == 1, "registration cancellation did not reach Core exactly once")
+            try expect(labels == ["회사"], "cancelled registration changed its label")
+            try expect(profiles == initialProfiles, "cancelled registration mutated profiles")
+            try expect(
+                statusMessage == "로그인을 취소했습니다. 현재 계정과 저장된 인증은 바뀌지 않았습니다.",
+                "cancelled registration did not report preserved account state"
+            )
+            try expect(errorMessage == nil, "cancelled registration was reported as an error")
+            try expect(!isWorking, "cancelled registration left the menu busy")
+            try expect(!isLoginInProgress, "cancelled registration left cancellation controls visible")
+        },
+        TestCase("MenuBarViewModel does not lose cancellation before registration starts") {
+            let initialProfiles = [menuBarProfiles()[0]]
+            let provider = MenuBarProviderSpy(profiles: initialProfiles)
+            let model = await makeMenuBarModel(
+                provider: provider,
+                captureProfile: { _ in
+                    do {
+                        try await Task.sleep(for: .seconds(10))
+                    } catch is CancellationError {
+                        throw CodexLoginFailure(code: .cancelled, childDisposition: .notStarted)
+                    }
+                    throw MenuBarProviderSpyFailure.captureFailed
+                }
+            )
+            await model.load()
+
+            let registrationTask = Task { await model.register(label: "회사") }
+            while await MainActor.run(body: { !model.isProfileLoginInProgress }) {
+                await Task.yield()
+            }
+            await model.cancelProfileLogin()
+            let registered = await registrationTask.value
+
+            let profiles = await MainActor.run { model.profiles }
+            let statusMessage = await MainActor.run { model.statusMessage }
+            try expect(!registered, "early cancellation reported registration success")
+            try expect(profiles == initialProfiles, "early cancellation mutated profiles")
+            try expect(
+                statusMessage == "로그인을 취소했습니다. 현재 계정과 저장된 인증은 바뀌지 않았습니다.",
+                "early cancellation was lost before Core started"
+            )
+        },
         TestCase("MenuBarViewModel rejects a stale relogin confirmation") {
             let profiles = menuBarReloginProfiles()
             let provider = MenuBarProviderSpy(profiles: profiles)
@@ -874,7 +969,7 @@ func menuBarViewModelTests() -> [TestCase] {
             try expect(reloginTargets.isEmpty, "stale relogin confirmation reached Core")
             try expect(recoveryRequired, "stale relogin confirmation ignored recovery state")
         },
-        TestCase("MenuBarViewModel reconciles relogin throws from durable state") {
+        TestCase("MenuBarViewModel fails closed when relogin throws after mutation") {
             let committedProvider = MenuBarProviderSpy(
                 profiles: menuBarReloginProfiles(),
                 reloginFailurePoint: .afterMutation
@@ -891,12 +986,14 @@ func menuBarViewModelTests() -> [TestCase] {
             let committedTargets = await committedProvider.reloginTargets
             let committedStatus = await MainActor.run { committedModel.statusMessage }
             let committedError = await MainActor.run { committedModel.errorMessage }
+            let committedRecovery = await MainActor.run { committedModel.recoveryStatus }
             try expect(committedTargets == [committedTarget.id.description], "committed throw retried relogin")
             try expect(
-                committedStatus == "회사 계정 인증을 갱신했습니다. 현재 계정은 유지됩니다. 전환하려면 계정을 다시 선택하세요.",
-                "committed throw was not reconciled from durable state"
+                committedError == "계정 재로그인 완료 여부를 확인하지 못했습니다. 계정 작업을 중단했습니다.",
+                "committed throw was reported as successful"
             )
-            try expect(committedError == nil, "committed throw remained an error")
+            try expect(committedStatus == nil, "committed throw kept a success status")
+            try expect(committedRecovery == .blocked, "committed throw did not fail closed")
 
             let rolledBackProvider = MenuBarProviderSpy(
                 profiles: menuBarReloginProfiles(),
@@ -1096,9 +1193,21 @@ private actor ProfileLoginCancellationProbe {
     private var cancellationRequested = false
     private(set) var cancelCount = 0
     private(set) var targets = [String]()
+    private(set) var labels = [String]()
+
+    func capture(label: String) async throws -> ProfileListItem {
+        labels.append(label)
+        try await suspendUntilCancelled()
+        throw CodexLoginFailure(code: .cancelled, childDisposition: .confirmedExited)
+    }
 
     func relogin(target: String) async throws -> ProfileReloginOutcome {
         targets.append(target)
+        try await suspendUntilCancelled()
+        throw CodexLoginFailure(code: .cancelled, childDisposition: .confirmedExited)
+    }
+
+    private func suspendUntilCancelled() async throws {
         started = true
         startedContinuation?.resume()
         startedContinuation = nil
@@ -1109,7 +1218,6 @@ private actor ProfileLoginCancellationProbe {
                 loginContinuation = continuation
             }
         }
-        throw CodexLoginFailure(code: .cancelled, childDisposition: .confirmedExited)
     }
 
     func waitUntilStarted() async {
@@ -1173,7 +1281,8 @@ private actor MenuBarProviderSpy {
     private var storedProfiles: [ProfileListItem]
     private let applicationIsRunning: Bool
     private let captureFailureAfterMutation: Bool
-    private let captureActivatesProfile: Bool
+    private let captureActivatesProfile: Bool?
+    private let captureNeedsRelogin: Bool
     private let captureRecoveryStatusAfterFailure: RecoveryCLIStatus
     private let syncFailureAfterMutation: Bool
     private let switchFailureAfterProgress: Bool
@@ -1209,7 +1318,8 @@ private actor MenuBarProviderSpy {
                 UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
             )
         ),
-        captureActivatesProfile: Bool = true,
+        captureActivatesProfile: Bool? = nil,
+        captureNeedsRelogin: Bool = false,
         syncFailureAfterMutation: Bool = false,
         switchFailureAfterProgress: Bool = false,
         recoveryStatus: RecoveryCLIStatus = .none,
@@ -1224,6 +1334,7 @@ private actor MenuBarProviderSpy {
         self.applicationIsRunning = applicationIsRunning
         self.captureFailureAfterMutation = captureFailureAfterMutation
         self.captureActivatesProfile = captureActivatesProfile
+        self.captureNeedsRelogin = captureNeedsRelogin
         self.captureRecoveryStatusAfterFailure = captureRecoveryStatusAfterFailure
         self.syncFailureAfterMutation = syncFailureAfterMutation
         self.switchFailureAfterProgress = switchFailureAfterProgress
@@ -1272,7 +1383,8 @@ private actor MenuBarProviderSpy {
             throw MenuBarProviderSpyFailure.captureFailed
         }
         capturedLabels.append(label)
-        if captureActivatesProfile {
+        let activatesProfile = captureActivatesProfile ?? storedProfiles.isEmpty
+        if activatesProfile {
             storedProfiles = storedProfiles.map {
                 ProfileListItem(
                     id: $0.id,
@@ -1287,8 +1399,8 @@ private actor MenuBarProviderSpy {
             id: ProfileID(UUID()),
             label: label,
             email: "captured@example.invalid",
-            active: captureActivatesProfile,
-            needsRelogin: false
+            active: activatesProfile,
+            needsRelogin: captureNeedsRelogin
         )
         storedProfiles.append(profile)
         if captureFailureAfterMutation {

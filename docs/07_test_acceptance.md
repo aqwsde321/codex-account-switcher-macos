@@ -85,7 +85,7 @@ Unit/Integration test는 실제 `~/.codex/auth.json`을 읽거나 쓰지 않는�
 - rollback phase는 `rollbackStarted`, 자동 복구 불능은 `rollbackFailed`
 - journal 필드는 정확히 `schemaVersion, transactionId, phase, previousProfileId, targetProfileId, startedAt, updatedAt`
 - 모든 journal/registry write는 same-directory `0600` temp→file fsync→atomic rename→parent fsync 후 다음 side effect 진행
-- 일반 switch의 target active-ID commit은 target 이메일 일치와 `targetVerified` durability 전 없음. 재로그인만 exact B credential 저장과 A-active registry의 B marker 해제 뒤 private `validatingTarget→targetVerified`를 허용하며 active ID는 그 뒤 commit
+- 일반 switch의 target active-ID commit은 target 이메일 일치와 `targetVerified` durability 전 없음. 새 격리 재로그인은 journal·active-ID mutation 없이 target credential과 marker만 갱신
 - 성공 registry가 durable한 뒤 journal unlink→parent fsync
 - auth mutation 전 취소/차단은 journal unlink→parent fsync로 durable cleanup
 - 프로필 삭제는 inactive exact target만 허용하고 `profile-removal` marker→Keychain→registry→marker 순서를 유지하며 active auth는 쓰지 않음
@@ -149,8 +149,8 @@ Unit/Integration test는 실제 `~/.codex/auth.json`을 읽거나 쓰지 않는�
 | U-042 | 메뉴바 전환 진행 표시 | durable journal 성공 뒤 canonical phase 순서로만 표시, 확인 취소·활성 무변경 경로 callback 0회, 완료 뒤 상태 제거 | 예 |
 | U-043 | 메뉴바 재로그인 카드 확인 | inactive `needsRelogin`만 별도 snapshot, 취소 0회, exact ID Core 호출 1회, normal switch 0회 | 예 |
 | U-044 | 재로그인 확인 뒤 상태 변경 | profile/recovery 재조회, stale 확인 Core 호출 0회 | 예 |
-| U-045 | 재로그인 성공·finalization 불확실 | recovery none+B 단일 active+marker 해제일 때만 성공 또는 재확인, 앱 수동 실행 안내 | 예 |
-| U-046 | 재로그인 Core throw | durable B commit은 성공 재확인, A 안전 rollback은 수동 재시도, pending은 STOP·재호출 0회 | 예 |
+| U-045 | 재로그인 성공·finalization 불확실 | recovery none+기존 source 단일 active+B marker 해제일 때만 성공, 별도 전환 안내 | 예 |
+| U-046 | 재로그인 Core throw | A active/auth와 B marker 보존이면 수동 재시도, pending은 STOP·재호출 0회 | 예 |
 | U-047 | transient 조회 실패와 wrong-ID outcome | catch 재조회 뒤에도 payload exact ID 검증, 불일치 blocked·성공 표시 없음 | 예 |
 | U-048 | 메뉴바 시작 자동 복구 순서 | recovery 시도→profile 조회→read-only status 조회, stopped/throw도 상태 조회 뒤 fail-closed, 앱 launch 0회 | 예 |
 | U-049 | 메뉴바 잔존 프로세스 2차 확인 | native async 응답을 기다리고 취소는 signal 0회; 종료 전 exact 후보만 승인하며 새·독립 process는 확인 callback·signal 0회 | 예 |
@@ -187,9 +187,9 @@ Unit/Integration test는 실제 `~/.codex/auth.json`을 읽거나 쓰지 않는�
 | I-021 | post-launch 이메일 mismatch | target app 종료→source 롤백→source 검증 | 예 |
 | I-022 | app launch 실패 | source 롤백, target 미활성 | 예 |
 | I-023 | rollback source 검증 실패 | `rollbackFailed`, STOP, 앱 재실행 반복 없음 | 예 |
-| I-024 | B 등록 성공 | B configured-store 저장·B active·A 저장본 무변경·recovery none | 예 |
-| I-025 | B가 A와 같은 이메일 | 등록 거부, A 유지 | 예 |
-| I-026 | B 등록 커밋 전 실패 | A 롤백 또는 명확한 STOP | 예 |
+| I-024 | B 격리 등록 성공 | B configured-store inactive 저장·A active/auth/저장본·공식 앱 불변·recovery none | 예 |
+| I-025 | 격리 로그인 B가 기존 이메일 | true refresh 전 등록 거부, 기존 상태 유지 | 예 |
+| I-026 | B 격리 등록 취소·실패 | 공용 auth·기존 credential·registry 불변, 격리 홈 제거 또는 child 미확인 시 보존 STOP | 예 |
 | I-027 | 이미 활성인 account 선택 | 파일 write 0회, restart 0회 | 예 |
 | I-028 | 앱 닫힌 상태 정상 switch | process gate 후 swap·launch·검증 | 예 |
 | I-029 | journal temp/file fsync 실패 | 다음 side effect 0회, 기존 durable journal 유지 | 예 |
@@ -199,7 +199,7 @@ Unit/Integration test는 실제 `~/.codex/auth.json`을 읽거나 쓰지 않는�
 | I-033 | 성공 후 journal unlink 실패 | journal 보존, 다음 시작에서 `targetVerified` 재판정 | 예 |
 | I-034 | journal unlink 후 parent fsync 실패 | 완료로 단정하지 않고 recovery에서 registry/active 재검증 | 예 |
 | I-035 | 사용자가 종료 확인 취소 | auth mutation 0회, journal unlink+parent fsync 완료 | 예 |
-| I-036 | process gate 차단 | switch는 auth mutation 0회+journal durable delete; capture는 기존 저장본 존재 확인 뒤에도 재검사해 새 credential·marker·journal 0개, 독립 process 불변 | 예 |
+| I-036 | process gate 차단 | switch·첫 capture는 기존 경계대로 무변경 차단; 추가 격리 등록은 무관한 공식 앱·독립 process를 종료하지 않음 | 예 |
 | I-037 | malformed/torn/unknown journal | 자동 삭제·복구 없이 STOP | 예 |
 | I-038 | 두 process가 같은 transaction 재개 | 단일 lock, 중복 rename/launch 없음 | 예 |
 | I-039 | 진단 error에 auth blob 포함 | persisted log에 민감값 0건 | 예 |
@@ -208,18 +208,18 @@ Unit/Integration test는 실제 `~/.codex/auth.json`을 읽거나 쓰지 않는�
 | I-042 | `currentSaved` 뒤 target validation 실패 | active source 유지 확인→registry previous→journal durable cleanup | 예 |
 | I-043 | `SIGTERM` 뒤 앱 소유 process 잔존 또는 identity 변경 | switch 차단, active auth unchanged | 예 |
 | I-044 | 사용자가 잔존 앱 process `SIGTERM` 거부 | signal 0회, auth·registry 불변, journal 내구 삭제 | 예 |
-| I-045 | A/B 등록 상태에서 C capture | C 저장·active, A/B 저장본 무변경, A/B/C credential 보존 | 예 |
+| I-045 | A/B 등록 상태에서 C 격리 capture | C inactive 저장, 기존 active와 A/B 저장본 무변경, A/B/C credential 보존 | 예 |
 | I-046 | 세 프로필 상태에서 네 번째 capture | auth·credential·registry·journal mutation 0회 | 예 |
 | I-047 | 제3 프로필이 있는 `rollbackFailed` 복구 | previous 복구, 무관한 프로필과 credential 보존 | 예 |
 | I-048 | 수동 복구 commit 뒤 앱 launch 실패 | exit 1과 `application_launch_unconfirmed`, previous active·auth와 journal 내구 삭제 보존 | 예 |
 | I-049 | journal unlink가 보이나 parent `fsync` 실패 | exit 1과 `recovery_uncertain`, durable phase/profile+auth-digest evidence 보존, registry/auth digest 불일치나 fsync 실패 시 blocked·mutation 0회; 모두 재검증 뒤에만 none | 예 |
 | I-050 | evidence 저장 뒤 journal unlink 전 중단 | 무관한 phase/profile은 blocked+양쪽 보존, exact 또는 `rollbackStarted` evidence/`rollbackFailed` journal 조합이면 status 선행 없이 공통 mutation gate가 cleanup 재개 | 예 |
-| I-051 | exact B 수동 로그인 뒤 재로그인 반영 | B credential·marker 해제·active ID를 순서대로 내구 저장, B 활성, journal 없음, 앱 launch 0회 | 예 |
-| I-052 | 재로그인 B identity mismatch | A credential·active ID 검증 복원, B 기존 저장본·marker 보존 | 예 |
-| I-053 | 재로그인 중 process 또는 recovery 존재 | verifier·credential·registry mutation 0회 | 예 |
-| I-054 | 재로그인 verifier 종료 미확인 | 첫 child 전 `validatingTarget` journal 존재, recovery pending, workspace-only 상태 없음 | 예 |
-| I-055 | refresh 응답 B 뒤 공용 auth file identity 변경 | B 저장본을 덮지 않고 A rollback, journal 정리 | 예 |
-| I-056 | 재로그인 journal finalization 불확실 | 자동 재시도·앱 launch 없음, restart 재조정이 exact B 상태에서만 recovery none | 예 |
+| I-051 | exact B 격리 재로그인 | B credential·marker 해제, A active/auth/저장본 유지, journal·앱 launch 0회 | 예 |
+| I-052 | 격리 재로그인 B identity mismatch | A와 B 저장본·active ID·공용 auth·marker 불변 | 예 |
+| I-053 | 재로그인 중 recovery 존재 | login child·credential·registry mutation 0회 | 예 |
+| I-054 | 재로그인 verifier 종료 미확인 | 격리 workspace 보존, 공용 auth·registry·credential 불변, recovery blocked | 예 |
+| I-055 | 격리 refresh 뒤 공용 auth file identity 변경 | B 저장본을 덮지 않고 A active와 상태 보존 STOP | 예 |
+| I-056 | 재로그인 credential/registry finalization 실패 | 기존 B 저장본과 marker rollback 또는 명확한 STOP, 앱 launch 0회 | 예 |
 | I-057 | `targetVerified` 재시작, registry A 또는 B | exact B면 target commit 또는 중복 registry write 없는 finalization, 앱 launch 0회 | 예 |
 | I-058 | `validatingTarget` 재로그인 재시작 | 미저장 B와 저장·marker 해제 B를 구분해 A 복원, B의 검증 상태 보존, 앱 launch 0회 | 예 |
 | I-059 | `targetVerified` target mismatch와 불확실성 | typed `target-unverified`만 A rollback, process·registry race·verifier 종료 미확인은 STOP·unsafe write 0회 | 예 |
@@ -234,8 +234,11 @@ Unit/Integration test는 실제 `~/.codex/auth.json`을 읽거나 쓰지 않는�
 | I-068 | 추가 등록 `targetVerified` 뒤 journal unlink 실패 | generic abort가 source rollback하지 않고 target commit·evidence 보존, 재시작에서 finalization 완료 | 예 |
 | I-069 | 추가 등록 `targetValidated` target 검증 직후 auth race | `targetVerified` 승격·finalization 금지, capture marker와 journal 보존 후 STOP | 예 |
 | I-070 | 등록 throw 뒤 새 profile은 있으나 기존 profile active | pre-commit 실패로 처리, launch 실패 성공 문구·중복 방지 성공 반환 금지 | 예 |
+| I-071 | 추가 등록 intent 직후 또는 credential 저장 직후 중단 | inactive `needsRelogin` UUID로 재로그인·삭제 가능, A active/auth 보존, 고아 credential 없음 | 예 |
+| I-072 | 진행 UI 표시 직후 작업 시작 전 취소 | 실제 login task cancellation 유지, credential·registry·공용 auth mutation 0회 | 예 |
+| I-073 | 추가 등록·재로그인 credential 저장 중 공용 auth 변경 | marker 해제 전 감지, 새 credential rollback, 외부 auth와 기존 active·저장본 보존 | 예 |
 
-I-062는 custom debug harness 151개와 별도의 host integration smoke다. 현재 build bundle과 `~/Applications` 설치본에서 각각 통과했지만, ad-hoc 재빌드 뒤 기존 item ACL·잠금·접근 거부·실계정 제품 flow는 입증하지 않는다.
+I-062는 custom debug harness와 별도의 host integration smoke다. 현재 build bundle과 `~/Applications` 설치본에서 각각 통과했지만, ad-hoc 재빌드 뒤 기존 item ACL·잠금·접근 거부·실계정 제품 flow는 입증하지 않는다.
 
 ## 7. 공식 앱 Black-box 매트릭스
 
@@ -245,7 +248,7 @@ I-062는 custom debug harness 151개와 별도의 host integration smoke다. 현
 |---|---|---|---|
 | B-001 | compatibility preflight | bundle ID/path/App Server identity 계약 확인, auth mutation 0회 | STOP |
 | B-002 | A 등록 | A 이메일 확인, profile-a Spike private-store 저장·registry durability 확인 | STOP |
-| B-003 | B 등록 후 B 활성 유지 | 서로 다른 이메일, profile-b 저장, B active, A 저장본 무변경, recovery none | A 롤백 또는 STOP |
+| B-003 | B 격리 등록 | 서로 다른 이메일, profile-b inactive 저장, A active/auth/저장본·공식 앱 불변, recovery none | 무변경 또는 STOP |
 | B-004 | 실행 중 앱에서 switch 취소 | 앱·auth·active 계정 변화 없음, journal durable cleanup | case FAIL |
 | B-005 | 앱 정상 종료 switch | 필요 시 별도 승인 후 exact 앱 소유 잔존만 `SIGTERM`, quiescent 뒤 target 설치·검증 | 자동 롤백 |
 | B-006 | 이미 닫힌 앱에서 switch | 잔존 process 없음, target 실행·검증 | 자동 롤백 |
@@ -257,16 +260,16 @@ I-062는 custom debug harness 151개와 별도의 host integration smoke다. 현
 | B-012 | 최종 A 정리 | A 활성·재실행 유지, verifier/lock 없음 | STOP |
 | B-013 | target 사전 검증 실패 | active source 불변, profile 보존, 오류 정확 분류 | case FAIL |
 | B-014 | post-launch 검증 transport | active copy의 isolated Helper verifier false, private IPC 0회 | STOP |
-| B-015 | C 등록 후 C 활성 유지 | C 저장·active, A/B 저장본 무변경, A/B/C 보존 | 이전 active 롤백 또는 STOP |
+| B-015 | C 격리 등록 | C inactive 저장, 기존 active/auth와 A/B 저장본 불변, A/B/C 보존 | 무변경 또는 STOP |
 | B-016 | 세 프로필 수동 전환 | A→B→C→A 각 단계 이메일·UI active 일치 | 자동 롤백/FAIL |
-| B-017 | `needsRelogin` B 수동 재로그인 | 공식 앱 B 로그인·전체 종료 뒤 메뉴바 1회 확인, B active·marker 해제·앱 미실행 | A 자동 롤백 또는 STOP |
+| B-017 | `needsRelogin` B 격리 재로그인 | 메뉴바 확인→브라우저 B 로그인, A active/auth 유지, B marker 해제·앱 미실행 | 무변경 또는 STOP |
 
 ### 7.1 B-015~B-016 실행 절차
 
 `04_spike_runbook.md`의 A/B 실행 기록은 수정하지 않는다. 별도 clean run에서 §4~§6의 안전 원칙·preflight·백업을 다시 적용하고 다음을 수행한다.
 
-1. A/B가 등록된 상태에서 B를 active로 검증하고 registry·credential 보존 여부의 기준선을 기록한다.
-2. 공식 로그인으로 C를 활성화한 뒤 C를 등록한다. 완료 후 C가 active이고 journal·capture marker가 없는지 확인한다.
+1. A/B가 등록되고 하나만 active인 상태에서 registry·credential·공용 auth 기준선을 기록한다.
+2. 격리 로그인으로 C를 등록한다. 완료 후 기존 계정이 active, C가 inactive이고 journal·capture marker가 없는지 확인한다.
 3. A→B→C→A를 순서대로 전환한다. 각 단계에서 `account/read` 이메일과 UI active 카드가 같은 별칭을 가리키는지 확인한다.
 4. A/B/C profile ID·순서와 credential 보존 여부가 기준선 기대와 일치하는지 확인한다. 실제 이메일·인증 bytes·digest는 기록하지 않는다.
 
@@ -277,10 +280,10 @@ I-062는 custom debug harness 151개와 별도의 host integration smoke다. 현
 실제 인증 폐기가 필요한 사전조건은 전용 테스트 계정에서만 만든다. auth 원문을 수동 편집해 `needsRelogin` 상태를 위조하지 않는다.
 
 1. A active, B inactive·`needsRelogin`, recovery none을 확인한다.
-2. 공식 Codex 앱에서 B로 로그인한 뒤 앱과 독립 Codex CLI·IDE를 모두 정상 종료하고 process gate가 깨끗한지 확인한다.
-3. 메뉴바의 B 카드를 한 번 선택하고 재로그인 반영을 확인한다.
-4. B 하나만 active, B marker 해제, recovery none, 공식 앱 미실행을 확인한다.
-5. 공식 앱을 직접 열고 `account/read`가 B 이메일과 완전 일치하는지 확인한다.
+2. 메뉴바의 B 카드를 선택하고 재로그인을 확인한 뒤 열린 브라우저에서 B로 로그인한다.
+3. A active와 공용 auth가 유지되고 B marker만 해제됐는지 확인한다.
+4. B 카드를 다시 선택해 일반 전환을 승인한다.
+5. B 하나만 active, recovery none, 공식 앱 `account/read`가 B 이메일과 완전 일치하는지 확인한다.
 
 pending·blocked 또는 결과 불일치면 확인을 반복하지 않고 상태를 보존한다.
 
@@ -288,7 +291,7 @@ pending·blocked 또는 결과 불일치면 확인을 반복하지 않고 상태
 
 ### 준비
 
-- 기존 계약의 A/B 등록과 A 자동 복귀 완료; 현재 등록 성공 계약은 ADR-032의 B active 유지로 변경
+- A 등록 뒤 B/C는 ADR-033 격리 등록으로 inactive 저장하고, 전환 시나리오 시작 계정은 별도로 선택
 - 비민감 전용 workspace
 - 공개 가능한 nonce 생성
 - 공식 task/thread ID 관측 방법 확인
@@ -376,8 +379,8 @@ ID를 신뢰성 있게 관측할 수 없으면 실행하지 않고 INCONCLUSIVE/
 | C-019 | malformed/torn/unknown journal | 자동 삭제·추정 없이 STOP | PASS |
 | C-020 | journal과 active/registry 모순 | 해소 불가하면 STOP | PASS |
 | C-021 | macOS reboot after active replace | 앱 자동 실행 전에 recovery gate와 source rollback | PASS |
-| C-022 | 재로그인 `validatingTarget`, B 저장·marker 해제 전/후 | target 식별 뒤 A 복원, 검증된 B 상태 보존, 앱 launch 0회 | PASS |
-| C-023 | 재로그인 `targetVerified`, active ID commit 전/후 | exact B forward commit 또는 중복 write 없는 finalization; 불확실은 STOP | PASS/STOP |
+| C-022 | 이전 버전 재로그인 `validatingTarget`, B 저장·marker 해제 전/후 | target 식별 뒤 A 복원, 검증된 B 상태 보존, 앱 launch 0회 | PASS |
+| C-023 | 이전 버전 재로그인 `targetVerified`, active ID commit 전/후 | exact B forward commit 또는 중복 write 없는 finalization; 불확실은 STOP | PASS/STOP |
 | C-024 | `refreshingCurrent` 복구 실패 뒤 재시작 | `rollbackFailed` terminal 유지, 자동 재시도 side effect 0회 | STOP |
 | C-025 | 추가 등록 registry target commit 뒤 `targetValidated`/`targetVerified` + capture marker | exact target이면 `targetVerified` forward finalization, marker·journal 정리, 앱 launch 0회 | PASS |
 
@@ -421,17 +424,17 @@ current refresh crash window에서는 refresh 실행 여부를 phase만으로 �
 | ID | 시나리오 | PASS 기준 |
 |---|---|---|
 | A-001 | 실행 중 최초 A 등록 | 명시 확인→정상 종료→기본 홈 true refresh·이메일 검증→durable capture→A로 앱 재실행 |
-| A-002 | 실행 중 B 등록 | 명시 확인→정상 종료→exact 잔존 승인·`SIGTERM` 1회→B capture→B active·재실행 |
+| A-002 | 실행 중 B 등록 | 명시 확인→격리 브라우저 로그인→B inactive 저장, 기존 active/auth·공식 앱 불변 |
 | A-003 | B 등록 취소 | A profile/active auth 유지 |
 | A-004 | B 등록 커밋 전 실패 | A 롤백 또는 명시 STOP |
 | A-005 | 기존 profile ID 중복 | 덮어쓰기 전 명시 확인 또는 거부 |
 | A-006 | 외부 로그인으로 unknown email | 등록/폐기 선택 전 switch 차단 |
-| A-007 | C 등록 | C 저장·active 유지, 기존 A/B 저장본 보존 |
+| A-007 | C 등록 | C inactive 저장, 기존 active/auth와 A/B 저장본 보존 |
 | A-008 | 네 번째 계정 등록 | 무변경 거부, 기존 A/B/C 불변 |
 | A-009 | 3계정 model fixture | profile array가 세 항목을 안전하게 round-trip |
 | A-010 | 비활성 B 삭제 취소 | B profile·Keychain item 유지, A active·현재 로그인 불변 |
 | A-011 | 비활성 B 삭제 승인 | B profile·Keychain item 제거, A active·현재 로그인·OpenAI 계정 불변 |
-| A-012 | 삭제한 B 재등록 | B로 공식 로그인 후 같은 라벨·이메일 등록 성공, 새 profile ID, B active 유지 |
+| A-012 | 삭제한 B 재등록 | 격리 로그인 후 같은 라벨·이메일 등록 성공, 새 profile ID, 기존 active 유지 |
 
 2026-08-02 실제 설치본에서 A-011 PASS를 확인했다. 비활성 B 삭제 뒤 B 카드가 사라졌고 A가 단일 active로 유지됐으며 현재 Codex 로그인과 recovery 오류가 바뀌지 않았다. A-010과 A-012는 미검증이다.
 

@@ -267,9 +267,9 @@ private struct AccountMenuView: View {
                         }
                         .disabled(model.isWorking)
                         Spacer()
-                        Button("현재 로그인 등록") {
+                        Button(model.profiles.isEmpty ? "현재 로그인 등록" : "새 계정 등록") {
                             let label = registrationLabel
-                            guard confirmRegistration() else { return }
+                            guard confirmRegistration(additional: !model.profiles.isEmpty) else { return }
                             Task {
                                 let registered = await model.register(label: label)
                                 if registered || model.recoveryRequired {
@@ -329,7 +329,7 @@ private struct AccountMenuView: View {
         if model.profiles.isEmpty {
             return "등록하면 공식 Codex 앱을 정상 종료하고 현재 로그인을 저장한 뒤 다시 엽니다. 독립 Codex CLI와 IDE는 먼저 직접 종료하세요."
         }
-        return "등록하면 공식 Codex 앱을 정상 종료하고 현재 로그인을 새 활성 계정으로 저장한 뒤 다시 엽니다. 기존 계정 저장본은 유지됩니다. 독립 Codex CLI와 IDE는 먼저 직접 종료하세요."
+        return "브라우저에서 새 계정으로 로그인합니다. 현재 활성 계정은 유지되며 새 계정으로 자동 전환하지 않습니다."
     }
 }
 
@@ -465,12 +465,18 @@ private func confirmAppOwnedTermination(count: Int) -> Bool {
 }
 
 @MainActor
-private func confirmRegistration() -> Bool {
+private func confirmRegistration(additional: Bool) -> Bool {
     let alert = NSAlert()
     alert.alertStyle = .warning
-    alert.messageText = "현재 로그인을 등록할까요?"
-    alert.informativeText = "버튼을 누르면 공식 Codex 앱을 자동으로 정상 종료하고 현재 로그인을 저장한 뒤 다시 엽니다. 독립 Codex CLI와 IDE 작업은 먼저 직접 종료하세요."
-    alert.addButton(withTitle: "Codex 자동 종료하고 등록")
+    if additional {
+        alert.messageText = "새 계정을 등록할까요?"
+        alert.informativeText = "현재 활성 계정은 유지됩니다. 브라우저에서 등록할 새 계정으로 로그인하세요. 등록 후 자동 전환하지 않습니다."
+        alert.addButton(withTitle: "브라우저 로그인 시작")
+    } else {
+        alert.messageText = "현재 로그인을 등록할까요?"
+        alert.informativeText = "버튼을 누르면 공식 Codex 앱을 자동으로 정상 종료하고 현재 로그인을 저장한 뒤 다시 엽니다. 독립 Codex CLI와 IDE 작업은 먼저 직접 종료하세요."
+        alert.addButton(withTitle: "Codex 자동 종료하고 등록")
+    }
     let cancel = alert.addButton(withTitle: "취소")
     cancel.keyEquivalent = "\u{1b}"
     NSApp.activate(ignoringOtherApps: true)

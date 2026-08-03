@@ -40,6 +40,12 @@ private func sendSIGTERM(to expected: ProcessRecord) throws {
 
 private let verificationChildMarkerName = "helper-child"
 
+private struct IsolatedLoginResult {
+    let credential: CredentialBlob
+    let email: String
+    let planType: String?
+}
+
 private func verificationChildProcessIsAlive(_ pid: Int32) throws -> Bool {
     guard pid > 0 else { throw LocalCLIDataProviderFailure.verificationWorkspaceFailed }
     var result: Int32
@@ -95,6 +101,7 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
     private var capturedAuthIdentity: FileIdentity?
     private var probeChildUnconfirmed = false
     private var captureMutationUncertain = false
+    private var routedFirstCaptureCount = 0
     private var switchInProgress = false
     private var switchStore: SpikeStore?
     private var switchLock: ExclusiveFileLock?
@@ -107,6 +114,8 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
     private var recoveryRequestsApplicationQuiescence = false
     private var targetValidationProfileID: ProfileID?
     private var isolatedLoginSession: CodexLoginSession?
+    private var profileLoginOperationActive = false
+    private var profileLoginCancellationRequested = false
 #if SPIKE_FAULT_INJECTION
     private var injectPostLaunchVerificationFailure = false
     private var postLaunchVerificationFailureInjected = false
@@ -292,6 +301,13 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
     }
 
     public func captureProfile(label: String) async throws -> ProfileListItem {
+        if let store = try openStoreIfPresent(),
+           let registry = try store.loadRegistryIfPresent(),
+           !registry.profiles.isEmpty {
+            return try await registerAdditionalProfile(label: label, store: store)
+        }
+        routedFirstCaptureCount += 1
+        defer { routedFirstCaptureCount -= 1 }
         let profile = try await ProfileCaptureCoordinator(driver: self).capture(label: label)
         let registry = try SpikeStore.openExisting(at: storeURL).loadRegistry()
         let descriptor = try await locateApp()
@@ -305,16 +321,199 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
         )
     }
 
+    private func registerAdditionalProfile(label: String, store: SpikeStore) async throws -> ProfileListItem {
+        try requireProfileLoginNotCancelled()
+        guard !switchInProgress else {
+            throw LocalCLIDataProviderFailure.switchAlreadyRunning
+        }
+        guard !label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              label.unicodeScalars.count <= 64,
+              !label.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else {
+            throw ProfileCaptureFailure.invalidLabel
+        }
+        profileLoginOperationActive = true
+        profileLoginCancellationRequested = false
+        switchInProgress = true
+        defer {
+            profileLoginOperationActive = false
+            profileLoginCancellationRequested = false
+            switchInProgress = false
+        }
+
+        guard let lock = try store.tryAcquireTransactionLock() else {
+            throw LocalCLIDataProviderFailure.lockBusy
+        }
+        defer { lock.release() }
+
+        let registry = try store.loadRegistry()
+        guard !registry.profiles.isEmpty,
+              registry.profiles.count < ProfileRegistry.maximumProfileCount else {
+            throw LocalCLIDataProviderFailure.profileAlreadyExists
+        }
+        guard !registry.profiles.contains(where: { $0.label == label }) else {
+            throw LocalCLIDataProviderFailure.profileAlreadyExists
+        }
+        guard let sourceID = registry.activeProfileID,
+              let source = registry.profiles.first(where: { $0.id == sourceID }),
+              !source.needsRelogin else {
+            throw LocalCLIDataProviderFailure.activeProfileUnavailable
+        }
+        guard try journalIsDurablyAbsent(in: store),
+              try store.loadCaptureProfileIDIfPresent() == nil,
+              try store.loadProfileRemovalIfPresent() == nil,
+              try !verificationWorkspaceExists() else {
+            throw LocalCLIDataProviderFailure.pendingRecovery
+        }
+
+        let descriptor = try await locateApp()
+        guard ApprovedResidentRule.codexCrashpad(for: descriptor) != nil else {
+            throw LocalCLIDataProviderFailure.incompatibleApplication
+        }
+        let sourceCredential = try credentialStore.loadCredential(for: source.id)
+        let current = try readCurrentCredential()
+        _ = try await validatedCredential(
+            current.credential,
+            expectedEmail: source.email,
+            descriptor: descriptor
+        )
+        guard try await locateApp() == descriptor,
+              try store.loadRegistry() == registry,
+              try journalIsDurablyAbsent(in: store),
+              try store.loadCaptureProfileIDIfPresent() == nil,
+              try store.loadProfileRemovalIfPresent() == nil,
+              try files.snapshot(at: activeAuthURL) == .exact(current.identity),
+              try credentialStore.loadCredential(for: source.id) == sourceCredential else {
+            throw LocalCLIDataProviderFailure.activeAuthChanged
+        }
+
+        let login = try await runIsolatedLogin(
+            descriptor: descriptor,
+            disallowedEmails: Set(registry.profiles.map(\.email))
+        )
+        guard try await locateApp() == descriptor,
+              try store.loadRegistry() == registry,
+              try journalIsDurablyAbsent(in: store),
+              try store.loadCaptureProfileIDIfPresent() == nil,
+              try store.loadProfileRemovalIfPresent() == nil,
+              try files.snapshot(at: activeAuthURL) == .exact(current.identity),
+              try credentialStore.loadCredential(for: source.id) == sourceCredential else {
+            throw LocalCLIDataProviderFailure.activeAuthChanged
+        }
+        try requireProfileLoginNotCancelled()
+
+        let now = Date(timeIntervalSince1970: Date().timeIntervalSince1970.rounded(.down))
+        let profileID = ProfileID(UUID())
+        let pendingProfile = ProfileMetadata(
+            id: profileID,
+            label: label,
+            email: login.email,
+            planType: login.planType,
+            needsRelogin: true,
+            createdAt: now,
+            updatedAt: now
+        )
+        let profile = ProfileMetadata(
+            id: profileID,
+            label: label,
+            email: login.email,
+            planType: login.planType,
+            needsRelogin: false,
+            createdAt: now,
+            updatedAt: now
+        )
+        let pendingRegistry = try ProfileRegistry(
+            activeProfileID: source.id,
+            profiles: registry.profiles + [pendingProfile]
+        )
+        let updatedRegistry = try ProfileRegistry(
+            activeProfileID: source.id,
+            profiles: registry.profiles + [profile]
+        )
+        _ = try store.saveRegistry(pendingRegistry)
+        guard try store.loadRegistry() == pendingRegistry else {
+            throw LocalCLIDataProviderFailure.registryRoundTripFailed
+        }
+        do {
+            try requireProfileLoginNotCancelled()
+            do {
+                try credentialStore.saveCredential(login.credential, for: profile.id)
+            } catch {
+                guard (try? credentialStore.loadCredential(for: profile.id)) == login.credential else {
+                    throw error
+                }
+            }
+            guard try credentialStore.loadCredential(for: profile.id) == login.credential else {
+                throw LocalCLIDataProviderFailure.credentialRoundTripFailed
+            }
+            try requireProfileLoginNotCancelled()
+            guard try await locateApp() == descriptor,
+                  try store.loadRegistry() == pendingRegistry,
+                  try journalIsDurablyAbsent(in: store),
+                  try store.loadCaptureProfileIDIfPresent() == nil,
+                  try store.loadProfileRemovalIfPresent() == nil,
+                  try files.snapshot(at: activeAuthURL) == .exact(current.identity),
+                  try credentialStore.loadCredential(for: source.id) == sourceCredential else {
+                throw LocalCLIDataProviderFailure.activeAuthChanged
+            }
+            try requireProfileLoginNotCancelled()
+            try saveRegistryConfirming(updatedRegistry, in: store)
+        } catch {
+            let durableRegistry: ProfileRegistry
+            do {
+                durableRegistry = try store.loadRegistry()
+            } catch {
+                throw LocalCLIDataProviderFailure.registryRoundTripFailed
+            }
+            if durableRegistry == pendingRegistry {
+                do {
+                    try rollbackPendingRegistration(
+                        profileID: profile.id,
+                        pendingRegistry: pendingRegistry,
+                        originalRegistry: registry,
+                        store: store
+                    )
+                } catch {
+                    throw ProfileCaptureFailure.rollbackFailed
+                }
+                throw error
+            }
+            guard durableRegistry == updatedRegistry || durableRegistry == registry else {
+                throw LocalCLIDataProviderFailure.registryRoundTripFailed
+            }
+            if durableRegistry == registry {
+                throw error
+            }
+        }
+        guard try files.snapshot(at: activeAuthURL) == .exact(current.identity),
+              try store.loadRegistry() == updatedRegistry,
+              try credentialStore.loadCredential(for: source.id) == sourceCredential,
+              try credentialStore.loadCredential(for: profile.id) == login.credential else {
+            throw LocalCLIDataProviderFailure.registryRoundTripFailed
+        }
+        return ProfileListItem(
+            id: profile.id,
+            label: profile.label,
+            email: profile.email,
+            active: false,
+            needsRelogin: false
+        )
+    }
+
     public func switchProfile(target value: String) async throws -> ProfileListItem {
         try await switchProfile(target: value, onPhaseChange: { _ in })
     }
 
     public func reloginProfile(target value: String) async throws -> ProfileReloginOutcome {
+        try requireProfileLoginNotCancelled()
         guard !switchInProgress else {
             throw LocalCLIDataProviderFailure.switchAlreadyRunning
         }
+        profileLoginOperationActive = true
+        profileLoginCancellationRequested = false
         switchInProgress = true
         defer {
+            profileLoginOperationActive = false
+            profileLoginCancellationRequested = false
             switchInProgress = false
         }
 
@@ -365,77 +564,48 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
             throw LocalCLIDataProviderFailure.activeAuthChanged
         }
 
-        let loginHome = isolatedLoginHomeURL
-        try createVerificationHome(loginHome)
+        let login = try await runIsolatedLogin(
+            descriptor: descriptor,
+            expectedEmail: target.email
+        )
+        guard try store.loadRegistry() == registry,
+              try journalIsDurablyAbsent(in: store),
+              try store.loadCaptureProfileIDIfPresent() == nil,
+              try store.loadProfileRemovalIfPresent() == nil,
+              try files.snapshot(at: activeAuthURL) == .exact(current.identity),
+              try credentialStore.loadCredential(for: source.id) == sourceCredential else {
+            throw LocalCLIDataProviderFailure.activeAuthChanged
+        }
+
+        let previousTargetCredential = try loadCredentialIfPresent(for: target.id)
+        let updatedTarget = ProfileMetadata(
+            id: target.id,
+            label: target.label,
+            email: target.email,
+            planType: login.planType ?? target.planType,
+            needsRelogin: false,
+            createdAt: target.createdAt,
+            updatedAt: Date(timeIntervalSince1970: Date().timeIntervalSince1970.rounded(.down))
+        )
+        let updatedRegistry = try ProfileRegistry(
+            activeProfileID: source.id,
+            profiles: registry.profiles.map { $0.id == target.id ? updatedTarget : $0 }
+        )
         do {
-            let markerURL = isolatedLoginMarkerURL
-            try writeVerificationChildMarker(at: markerURL, value: "launching")
-            let session = CodexLoginSession(
-                configuration: CodexLoginConfiguration(
-                    executableURL: descriptor.bundledCodexURL,
-                    codexHomeURL: loginHome,
-                    timeouts: CodexLoginTimeouts(login: .seconds(600), terminateExit: .seconds(2))
-                ),
-                didLaunch: { pid in
-                    try writeVerificationChildMarker(at: markerURL, value: "pid=\(pid)")
+            try requireProfileLoginNotCancelled()
+            do {
+                try credentialStore.saveCredential(login.credential, for: target.id)
+            } catch {
+                guard (try? credentialStore.loadCredential(for: target.id)) == login.credential else {
+                    throw error
                 }
-            )
-            isolatedLoginSession = session
-            try await session.run()
-            isolatedLoginSession = nil
-            guard try await locateApp() == descriptor else {
-                throw LocalCLIDataProviderFailure.incompatibleApplication
             }
-
-            let initialAccount = try await probeAccount(
-                descriptor: descriptor,
-                codexHomeURL: loginHome
-            )
-            do {
-                try AccountIdentityValidator.validate(expectedEmail: target.email, account: initialAccount)
-            } catch {
-                throw ProfileCaptureFailure.identityMismatch
+            guard try credentialStore.loadCredential(for: target.id) == login.credential else {
+                throw LocalCLIDataProviderFailure.credentialRoundTripFailed
             }
-            guard try await locateApp() == descriptor else {
-                throw LocalCLIDataProviderFailure.incompatibleApplication
-            }
-            let refreshedAccount = try await probeAccount(
-                descriptor: descriptor,
-                codexHomeURL: loginHome,
-                refreshToken: true
-            )
-            do {
-                try AccountIdentityValidator.validate(expectedEmail: target.email, account: refreshedAccount)
-            } catch {
-                throw ProfileCaptureFailure.identityMismatch
-            }
-            guard try await locateApp() == descriptor else {
-                throw LocalCLIDataProviderFailure.incompatibleApplication
-            }
-            let verifiedAccount = try await probeAccount(
-                descriptor: descriptor,
-                codexHomeURL: loginHome
-            )
-            do {
-                try AccountIdentityValidator.validate(expectedEmail: target.email, account: verifiedAccount)
-            } catch {
-                throw ProfileCaptureFailure.identityMismatch
-            }
-            guard try await locateApp() == descriptor else {
-                throw LocalCLIDataProviderFailure.incompatibleApplication
-            }
-            let loginAuthURL = loginHome.appendingPathComponent("auth.json", isDirectory: false)
-            let loginAuth = try files.read(at: loginAuthURL)
-            let refreshedCredential = try CredentialBlob(validating: loginAuth.contents.data)
-            let refreshedPlanType: String? = if case let .chatGPT(_, planType, _) = verifiedAccount {
-                planType
-            } else {
-                nil
-            }
-            try removeVerificationHome(loginHome)
-            probeChildUnconfirmed = false
-
-            guard try store.loadRegistry() == registry,
+            try requireProfileLoginNotCancelled()
+            guard try await locateApp() == descriptor,
+                  try store.loadRegistry() == registry,
                   try journalIsDurablyAbsent(in: store),
                   try store.loadCaptureProfileIDIfPresent() == nil,
                   try store.loadProfileRemovalIfPresent() == nil,
@@ -443,82 +613,48 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
                   try credentialStore.loadCredential(for: source.id) == sourceCredential else {
                 throw LocalCLIDataProviderFailure.activeAuthChanged
             }
-
-            let previousTargetCredential = try credentialStore.loadCredential(for: target.id)
-            do {
-                try credentialStore.saveCredential(refreshedCredential, for: target.id)
-            } catch {
-                guard (try? credentialStore.loadCredential(for: target.id)) == refreshedCredential else {
-                    throw error
-                }
+            try requireProfileLoginNotCancelled()
+            _ = try store.saveRegistry(updatedRegistry)
+            guard try store.loadRegistry() == updatedRegistry else {
+                throw LocalCLIDataProviderFailure.registryRoundTripFailed
             }
-            guard try credentialStore.loadCredential(for: target.id) == refreshedCredential else {
-                throw LocalCLIDataProviderFailure.credentialRoundTripFailed
-            }
-
-            let updatedTarget = ProfileMetadata(
-                id: target.id,
-                label: target.label,
-                email: target.email,
-                planType: refreshedPlanType ?? target.planType,
-                needsRelogin: false,
-                createdAt: target.createdAt,
-                updatedAt: Date(timeIntervalSince1970: Date().timeIntervalSince1970.rounded(.down))
-            )
-            let updatedRegistry = try ProfileRegistry(
-                activeProfileID: source.id,
-                profiles: registry.profiles.map { $0.id == target.id ? updatedTarget : $0 }
-            )
-            do {
-                _ = try store.saveRegistry(updatedRegistry)
-                guard try store.loadRegistry() == updatedRegistry else {
-                    throw LocalCLIDataProviderFailure.registryRoundTripFailed
-                }
-            } catch {
-                if (try? store.loadRegistry()) == updatedRegistry {
-                    // The durable rename completed even though its final sync was uncertain.
-                } else if (try? store.loadRegistry()) == registry {
+        } catch {
+            if (try? store.loadRegistry()) == updatedRegistry {
+                // The durable rename completed even though its final sync was uncertain.
+            } else if (try? store.loadRegistry()) == registry {
+                if let previousTargetCredential {
                     try credentialStore.saveCredential(previousTargetCredential, for: target.id)
                     guard try credentialStore.loadCredential(for: target.id) == previousTargetCredential else {
                         throw LocalCLIDataProviderFailure.credentialRoundTripFailed
                     }
-                    throw error
                 } else {
-                    throw LocalCLIDataProviderFailure.registryRoundTripFailed
+                    try credentialStore.removeCredential(for: target.id)
                 }
-            }
-
-            guard try files.snapshot(at: activeAuthURL) == .exact(current.identity),
-                  try store.loadRegistry() == updatedRegistry,
-                  try credentialStore.loadCredential(for: target.id) == refreshedCredential else {
+                throw error
+            } else {
                 throw LocalCLIDataProviderFailure.registryRoundTripFailed
             }
-            return .refreshed(
-                ProfileListItem(
-                    id: updatedTarget.id,
-                    label: updatedTarget.label,
-                    email: updatedTarget.email,
-                    active: false,
-                    needsRelogin: false
-                )
-            )
-        } catch let failure as CodexLoginFailure where failure.childDisposition == .unconfirmed {
-            probeChildUnconfirmed = true
-            throw failure
-        } catch let failure as AppServerProbeFailure where failure.childDisposition == .unconfirmed {
-            probeChildUnconfirmed = true
-            throw failure
-        } catch {
-            if try pathExists(loginHome) {
-                try removeVerificationHome(loginHome)
-            }
-            isolatedLoginSession = nil
-            probeChildUnconfirmed = false
-            throw error
         }
+
+        guard try files.snapshot(at: activeAuthURL) == .exact(current.identity),
+              try store.loadRegistry() == updatedRegistry,
+              try credentialStore.loadCredential(for: target.id) == login.credential else {
+            throw LocalCLIDataProviderFailure.registryRoundTripFailed
+        }
+        return .refreshed(
+            ProfileListItem(
+                id: updatedTarget.id,
+                label: updatedTarget.label,
+                email: updatedTarget.email,
+                active: false,
+                needsRelogin: false
+            )
+        )
     }
 
     public func cancelProfileLogin() async {
+        guard profileLoginOperationActive else { return }
+        profileLoginCancellationRequested = true
         await isolatedLoginSession?.cancel()
     }
 
@@ -972,6 +1108,9 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
                 throw LocalCLIDataProviderFailure.pendingRecovery
             }
             let registry = try store.loadRegistryIfPresent()
+            guard routedFirstCaptureCount == 0 || registry?.profiles.isEmpty != false else {
+                throw LocalCLIDataProviderFailure.captureAlreadyRunning
+            }
             guard (registry?.profiles.count ?? 0) < ProfileRegistry.maximumProfileCount else {
                 throw LocalCLIDataProviderFailure.profileAlreadyExists
             }
@@ -2577,6 +2716,44 @@ private extension LocalCLIDataProvider {
         return failure.certainty != .destinationUnchanged
     }
 
+    func saveRegistryConfirming(_ registry: ProfileRegistry, in store: SpikeStore) throws {
+        do {
+            _ = try store.saveRegistry(registry)
+        } catch {
+            guard (try? store.loadRegistry()) == registry else { throw error }
+        }
+        guard try store.loadRegistry() == registry else {
+            throw LocalCLIDataProviderFailure.registryRoundTripFailed
+        }
+    }
+
+    func rollbackPendingRegistration(
+        profileID: ProfileID,
+        pendingRegistry: ProfileRegistry,
+        originalRegistry: ProfileRegistry,
+        store: SpikeStore
+    ) throws {
+        guard try store.loadRegistry() == pendingRegistry else {
+            throw LocalCLIDataProviderFailure.rollbackFailed
+        }
+        try credentialStore.removeCredential(for: profileID)
+        do {
+            try saveRegistryConfirming(originalRegistry, in: store)
+        } catch {
+            throw LocalCLIDataProviderFailure.rollbackFailed
+        }
+    }
+
+    func loadCredentialIfPresent(for profileID: ProfileID) throws -> CredentialBlob? {
+        do {
+            return try credentialStore.loadCredential(for: profileID)
+        } catch CredentialStoreError.notFound {
+            return nil
+        } catch let failure as DurableFileFailure where failure.errno == ENOENT {
+            return nil
+        }
+    }
+
     func verifyActiveCredential(
         expectedEmail: String,
         descriptor: CodexAppDescriptor
@@ -2628,6 +2805,108 @@ private extension LocalCLIDataProvider {
         } catch {
             try removeVerificationHome(homeURL)
             throw error
+        }
+    }
+
+    func runIsolatedLogin(
+        descriptor: CodexAppDescriptor,
+        expectedEmail: String? = nil,
+        disallowedEmails: Set<String> = []
+    ) async throws -> IsolatedLoginResult {
+        try requireProfileLoginNotCancelled(childDisposition: .notStarted)
+        let loginHome = isolatedLoginHomeURL
+        try createVerificationHome(loginHome)
+        do {
+            let markerURL = isolatedLoginMarkerURL
+            try writeVerificationChildMarker(at: markerURL, value: "launching")
+            let session = CodexLoginSession(
+                configuration: CodexLoginConfiguration(
+                    executableURL: descriptor.bundledCodexURL,
+                    codexHomeURL: loginHome,
+                    timeouts: CodexLoginTimeouts(login: .seconds(600), terminateExit: .seconds(2))
+                ),
+                didLaunch: { pid in
+                    try writeVerificationChildMarker(at: markerURL, value: "pid=\(pid)")
+                }
+            )
+            isolatedLoginSession = session
+            try await session.run()
+            isolatedLoginSession = nil
+            try requireProfileLoginNotCancelled()
+            guard try await locateApp() == descriptor else {
+                throw LocalCLIDataProviderFailure.incompatibleApplication
+            }
+
+            let initial = try capturedProfileIdentity(
+                from: try await probeAccount(descriptor: descriptor, codexHomeURL: loginHome)
+            )
+            try requireProfileLoginNotCancelled()
+            if let expectedEmail, initial.email != expectedEmail {
+                throw ProfileCaptureFailure.identityMismatch
+            }
+            guard !disallowedEmails.contains(initial.email) else {
+                throw ProfileCaptureFailure.accountAlreadyRegistered
+            }
+            guard try await locateApp() == descriptor else {
+                throw LocalCLIDataProviderFailure.incompatibleApplication
+            }
+            let refreshed = try capturedProfileIdentity(
+                from: try await probeAccount(
+                    descriptor: descriptor,
+                    codexHomeURL: loginHome,
+                    refreshToken: true
+                )
+            )
+            try requireProfileLoginNotCancelled()
+            guard refreshed.email == initial.email,
+                  expectedEmail == nil || refreshed.email == expectedEmail else {
+                throw ProfileCaptureFailure.identityMismatch
+            }
+            guard try await locateApp() == descriptor else {
+                throw LocalCLIDataProviderFailure.incompatibleApplication
+            }
+            let verified = try capturedProfileIdentity(
+                from: try await probeAccount(descriptor: descriptor, codexHomeURL: loginHome)
+            )
+            try requireProfileLoginNotCancelled()
+            guard verified.email == initial.email,
+                  expectedEmail == nil || verified.email == expectedEmail else {
+                throw ProfileCaptureFailure.identityMismatch
+            }
+            guard try await locateApp() == descriptor else {
+                throw LocalCLIDataProviderFailure.incompatibleApplication
+            }
+            try requireProfileLoginNotCancelled()
+            let loginAuthURL = loginHome.appendingPathComponent("auth.json", isDirectory: false)
+            let credential = try CredentialBlob(validating: files.read(at: loginAuthURL).contents.data)
+            try removeVerificationHome(loginHome)
+            probeChildUnconfirmed = false
+            return IsolatedLoginResult(
+                credential: credential,
+                email: verified.email,
+                planType: refreshed.planType ?? verified.planType
+            )
+        } catch let failure as CodexLoginFailure where failure.childDisposition == .unconfirmed {
+            probeChildUnconfirmed = true
+            throw failure
+        } catch let failure as AppServerProbeFailure where failure.childDisposition == .unconfirmed {
+            probeChildUnconfirmed = true
+            throw failure
+        } catch {
+            if try pathExists(loginHome) {
+                try removeVerificationHome(loginHome)
+            }
+            isolatedLoginSession = nil
+            probeChildUnconfirmed = false
+            throw error
+        }
+    }
+
+    func requireProfileLoginNotCancelled(
+        childDisposition: CodexLoginFailure.ChildDisposition = .confirmedExited
+    ) throws {
+        guard !profileLoginCancellationRequested, !Task.isCancelled else {
+            throw CodexLoginFailure(code: .cancelled, childDisposition: childDisposition)
         }
     }
 

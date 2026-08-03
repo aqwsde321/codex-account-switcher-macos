@@ -47,6 +47,7 @@ public final class MenuBarViewModel: ObservableObject {
     private let restoreRecoveryProfile: RestoreRecoveryProfile
     private let retryPendingRecovery: RetryPendingRecovery?
     private let attemptAutomaticRecovery: AttemptAutomaticRecovery
+    private var cancelCurrentProfileLoginTask: (() -> Void)?
 
     public init(
         loadProfiles: @escaping LoadProfiles,
@@ -205,9 +206,14 @@ public final class MenuBarViewModel: ObservableObject {
             }
             sourceID = currentSource.id
             reloginStarted = true
+            let task = Task { try await reloginProfile(current.id.description) }
+            cancelCurrentProfileLoginTask = { task.cancel() }
             isProfileLoginInProgress = true
-            defer { isProfileLoginInProgress = false }
-            let outcome = try await reloginProfile(current.id.description)
+            defer {
+                cancelCurrentProfileLoginTask = nil
+                isProfileLoginInProgress = false
+            }
+            let outcome = try await task.value
             reloginOutcome = outcome
             try await refreshState()
             guard reloginOutcomeMatches(outcome, targetID: current.id) else {
@@ -255,6 +261,11 @@ public final class MenuBarViewModel: ObservableObject {
                 }
                 return
             }
+            guard reloginOutcome != nil else {
+                recoveryStatus = .blocked
+                errorMessage = "계정 재로그인 완료 여부를 확인하지 못했습니다. 계정 작업을 중단했습니다."
+                return
+            }
             errorMessage = nil
             statusMessage = "\(profile.label) 계정 인증을 갱신했습니다. 현재 계정은 유지됩니다. 전환하려면 계정을 다시 선택하세요."
         }
@@ -262,6 +273,7 @@ public final class MenuBarViewModel: ObservableObject {
 
     public func cancelProfileLogin() async {
         guard isProfileLoginInProgress else { return }
+        cancelCurrentProfileLoginTask?()
         await cancelProfileLoginOperation()
     }
 
@@ -387,16 +399,49 @@ public final class MenuBarViewModel: ObservableObject {
             return false
         }
         let existingProfileIDs = Set(profiles.map(\.id))
+        let additional = !profiles.isEmpty
+        let activeProfiles = profiles.filter(\.active)
+        guard !additional || activeProfiles.count == 1 else {
+            errorMessage = "현재 활성 계정을 확인하지 못했습니다."
+            return false
+        }
+        let sourceID = activeProfiles.first?.id
         isWorking = true
-        defer { isWorking = false }
+        let task: Task<ProfileListItem, Error>? = additional
+            ? Task { try await captureProfile(label) }
+            : nil
+        cancelCurrentProfileLoginTask = task.map { task in { task.cancel() } }
+        isProfileLoginInProgress = additional
+        defer {
+            cancelCurrentProfileLoginTask = nil
+            isProfileLoginInProgress = false
+            isWorking = false
+        }
+        var captureReturned = false
         do {
-            _ = try await captureProfile(label)
+            let captured: ProfileListItem
+            if let task {
+                captured = try await task.value
+            } else {
+                captured = try await captureProfile(label)
+            }
+            captureReturned = true
             try await refreshState()
             guard !recoveryRequired else {
                 errorMessage = recoveryErrorMessage
                 return false
             }
-            errorMessage = nil
+            guard registrationIsComplete(
+                existingProfileIDs: existingProfileIDs,
+                sourceID: sourceID,
+                additional: additional,
+                capturedID: captured.id
+            ) else {
+                recoveryStatus = .blocked
+                errorMessage = "계정 등록 결과를 확인하지 못했습니다. 계정 작업을 중단했습니다."
+                return false
+            }
+            reportRegistrationSuccess(label: label, additional: additional)
             return true
         } catch {
             await refreshAfterMutationFailure()
@@ -404,14 +449,36 @@ public final class MenuBarViewModel: ObservableObject {
                 errorMessage = recoveryErrorMessage
                 return false
             }
-            let addedProfiles = profiles.filter { !existingProfileIDs.contains($0.id) }
-            if addedProfiles.count == 1,
-               addedProfiles[0].active,
-               profiles.lazy.filter(\.active).count == 1 {
-                errorMessage = "계정은 등록했지만 Codex 앱을 다시 열지 못했습니다."
+            if registrationIsComplete(
+                existingProfileIDs: existingProfileIDs,
+                sourceID: sourceID,
+                additional: additional,
+                capturedID: nil
+            ) {
+                if additional {
+                    guard captureReturned else {
+                        recoveryStatus = .blocked
+                        errorMessage = "계정 등록 완료 여부를 확인하지 못했습니다. 계정 작업을 중단했습니다."
+                        return false
+                    }
+                    reportRegistrationSuccess(label: label, additional: true)
+                } else {
+                    errorMessage = "계정은 등록했지만 Codex 앱을 다시 열지 못했습니다."
+                }
                 return true
             }
             switch error {
+            case let failure as CodexLoginFailure where failure.code == .cancelled:
+                errorMessage = nil
+                statusMessage = "로그인을 취소했습니다. 현재 계정과 저장된 인증은 바뀌지 않았습니다."
+            case let failure as CodexLoginFailure where failure.code == .timeout:
+                errorMessage = "로그인 시간이 만료되었습니다. 현재 계정은 유지됩니다. 다시 시도하세요."
+            case ProfileCaptureFailure.accountAlreadyRegistered:
+                errorMessage = "이미 등록된 계정입니다. 다른 계정으로 로그인하세요."
+            case ProfileCaptureFailure.identityMismatch:
+                errorMessage = "로그인 중 계정 정보가 변경되었습니다. 다시 시도하세요."
+            case LocalCLIDataProviderFailure.profileAlreadyExists:
+                errorMessage = "같은 이름이 있거나 계정을 3개까지 등록했습니다."
             case is CodexAppLocatorFailure,
                  LocalCLIDataProviderFailure.incompatibleApplication:
                 errorMessage = "설치된 Codex 앱의 무결성 또는 호환성을 확인하지 못했습니다. 공식 앱을 다시 설치하거나 업데이트하세요."
@@ -586,6 +653,35 @@ public final class MenuBarViewModel: ObservableObject {
             && profiles.lazy.filter(\.active).count == 1
             && profiles.contains { $0.id == sourceID && $0.active && !$0.needsRelogin }
             && profiles.contains { $0.id == targetID && !$0.active && !$0.needsRelogin }
+    }
+
+    private func registrationIsComplete(
+        existingProfileIDs: Set<ProfileID>,
+        sourceID: ProfileID?,
+        additional: Bool,
+        capturedID: ProfileID?
+    ) -> Bool {
+        guard recoveryStatus == .none else { return false }
+        let added = profiles.filter { !existingProfileIDs.contains($0.id) }
+        guard added.count == 1,
+              !added[0].needsRelogin,
+              capturedID == nil || added[0].id == capturedID else {
+            return false
+        }
+        if additional {
+            guard let sourceID else { return false }
+            return !added[0].active
+                && profiles.lazy.filter(\.active).count == 1
+                && profiles.contains { $0.id == sourceID && $0.active && !$0.needsRelogin }
+        }
+        return added[0].active && profiles.lazy.filter(\.active).count == 1
+    }
+
+    private func reportRegistrationSuccess(label: String, additional: Bool) {
+        errorMessage = nil
+        statusMessage = additional
+            ? "\(label) 계정을 등록했습니다. 현재 계정은 유지됩니다. 전환하려면 계정을 선택하세요."
+            : nil
     }
 
     private func reloginOutcomeMatches(

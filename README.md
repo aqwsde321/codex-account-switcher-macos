@@ -19,7 +19,7 @@
 - switch/rollback/recovery 상태 머신
 - 진단 CLI: `inspect`, `profiles list`, `recovery status`
 - 첫 활성 계정 A capture: TTY 확인, process gate, refresh 전 private backup, 이메일 검증, rollback
-- 추가 계정 B/C capture, 중복·네 번째 계정 차단, 실패 rollback, 등록 계정 활성 유지
+- 추가 계정 B/C 격리 로그인·비활성 저장, 중복·네 번째 계정 차단, 기존 활성 계정 보존
 - 수동 재로그인 뒤 현재 활성 인증을 같은 이메일의 저장 프로필에 동기화
 - 저장 프로필 `switch --target`, 정상 종료, 격리 검증·refresh, 원자 교체, 재실행·검증, 실패 rollback
 - debug build의 post-launch 검증 실패 주입과 source 자동 롤백 실검증
@@ -28,12 +28,12 @@
 - fake 3계정 카드와 확인 흐름을 가진 `MenuBarExtra` UI 프로토타입
 - CLI private file store와 제품 Keychain을 분리한 credential backend 경계, generic-password CRUD와 plaintext fallback 금지
 - `MenuBarExtra`의 실제 `LocalCLIDataProvider`·Keychain 주입과 Spike에서 분리된 제품 metadata store
-- 메뉴바의 종료 확인 뒤 현재 로그인 등록, 공식 앱 자동 정상 종료·재실행, 추가 등록 계정 active 유지, recovery 상태의 mutation 차단
+- 메뉴바의 종료 확인 뒤 첫 로그인 등록·재실행, 추가 계정 격리 로그인·비활성 저장, recovery 상태의 mutation 차단
 - 메뉴바의 명시적 현재 활성 인증 저장, 실행 전 수동 종료 확인, 성공·복구 차단 상태 표시
 - 메뉴바 recovery pending phase와 journal의 정확한 이전 프로필 표시, blocked 상태의 fail-closed 안내
 - 메뉴바 `rollbackFailed` transaction+이전 프로필에 묶인 수동 복구, 명시 확인, launch 미확인 재시도 금지, journal 불확실 STOP
 - 메뉴바 전환의 durable journal phase 기반 실시간 진행 문구와 완료·실패 후 상태 정리
-- 메뉴바 `needsRelogin` 비활성 카드의 exact-ID 확인, 검증된 저장본 갱신, 대상 즉시 활성화, 불확실 상태 재시도 차단
+- 메뉴바 `needsRelogin` 비활성 카드의 exact-ID 격리 재로그인, 기존 활성 계정 보존, 불확실 상태 재시도 차단
 - 메뉴바 상태 조회 전 미완료 journal 자동 복구, 불확실 상태 STOP, 복구 중 앱 자동 실행 금지
 - 비종결 recovery pending을 exact transaction에 묶어 공식 앱 정상 종료 뒤 다시 처리하는 메뉴바 복구 재시도
 - 메뉴바의 native 비동기 잔존 앱 프로세스 2차 확인, 취소 기본, 종료 전 exact snapshot 대상에만 `SIGTERM` 1회
@@ -46,7 +46,7 @@
 - 실계정 제품 flow의 Keychain 검증, ad-hoc 재빌드 ACL과 잠금·접근 거부 정책 검증
 - 5시간·주간 사용량 표시
 
-capture는 명시 확인 뒤 공식 앱에 정상 종료를 요청한다. 1초 뒤에도 종료 전 확인한 exact 앱 소유 프로세스가 남으면 별도 승인 뒤 `SIGTERM`을 한 번만 보내며, 독립 CLI·IDE와 새·분류 불명 프로세스는 종료하지 않고 차단한다. 첫 capture와 추가 capture 모두 현재 인증을 갱신·저장해 활성 프로필로 확정하고 그 계정으로 앱을 다시 연다. 추가 capture는 기존 프로필 저장본을 갱신하거나 복원하지 않는다.
+첫 capture는 명시 확인 뒤 공식 앱을 정상 종료하고 현재 인증을 갱신·저장해 활성 프로필로 확정한 뒤 앱을 다시 연다. 추가 capture는 별도 `CODEX_HOME`의 공식 브라우저 로그인을 사용해 새 프로필을 비활성으로 저장하며, 실행 중인 공식 앱·공용 `auth.json`·기존 활성 프로필은 바꾸지 않는다.
 
 ## 빌드와 테스트
 
@@ -98,12 +98,11 @@ cd codex-account-switcher-spike
 ./Scripts/dev.sh run profile capture --label A
 ```
 
-### 추가 계정 B/C 저장 후 등록 계정 유지
+### 추가 계정 B/C 격리 등록
 
-1. `profiles list`에서 기존 프로필이 저장돼 있고 `recovery status`가 `recovery=none`인지 확인한다.
-2. 공식 ChatGPT UI에서 아직 등록하지 않은 계정 B 또는 C로 로그인한다.
-3. 독립 Codex CLI·IDE 작업을 종료한다.
-4. 외부 Terminal에서 새 계정을 capture한다. `CAPTURE` 확인 후 실행 중인 공식 앱은 helper가 정상 종료한다.
+1. `profiles list`에서 활성 프로필이 하나이고 `recovery status`가 `recovery=none`인지 확인한다.
+2. 외부 Terminal에서 새 계정을 capture하고 `CAPTURE`를 입력한다.
+3. 열린 브라우저에서 아직 등록하지 않은 B 또는 C로 로그인한다. 공식 ChatGPT 앱에서 로그아웃하거나 계정을 바꾸지 않는다.
 
 ```sh
 ./Scripts/dev.sh run inspect
@@ -113,7 +112,7 @@ cd codex-account-switcher-spike
 ./Scripts/dev.sh run recovery status
 ```
 
-성공 결과는 등록 전 프로필 `active=false`, 새 프로필 `active=true`, `recovery=none`이다. ChatGPT 앱은 새로 등록한 계정으로 다시 열린다. 기존 계정으로 돌아가려면 메뉴바 카드나 `switch --target`을 사용한다.
+성공 결과는 기존 프로필 `active=true`, 새 프로필 `active=false`, `recovery=none`이다. 공식 ChatGPT 앱과 공용 인증은 기존 계정을 유지한다. 새 계정으로 바꾸려면 메뉴바 카드나 `switch --target`을 사용한다.
 
 프롬프트에 `CAPTURE`를 입력해야 진행한다. 앱 version/build 변경 자체는 hard gate가 아니다. 공식 bundle과 app·bundled CLI·현재 Crashpad의 정적 서명, 번들 내부 canonical 경로, 실행 중 Crashpad의 exact path·서명이 모두 맞아야 진행한다. `application=incompatible`, `process_blocked`면 중단한다. `account_already_registered`면 미등록 계정 로그인부터 다시 한다. `profile_already_exists`면 3개 상한에 도달한 상태다. `rollback_failed`, `recovery=pending`, `recovery=blocked`면 재실행하지 말고 상태를 보존한다.
 
@@ -129,7 +128,7 @@ cd codex-account-switcher-spike
 
 ### 메뉴바에서 비활성 계정 재로그인 반영
 
-`재로그인 필요`인 비활성 B를 공식 Codex 앱에서 다시 로그인한 뒤 앱과 독립 Codex CLI·IDE 프로세스를 모두 종료한다. 메뉴바의 B 카드를 눌러 확인하면 exact B identity와 갱신된 auth blob을 검증·저장하고 B를 즉시 활성 프로필로 커밋한다. 성공 뒤 앱은 자동 실행하지 않으므로 직접 연다.
+`재로그인 필요`인 비활성 B 카드를 누르고 확인한 뒤 열린 브라우저에서 exact B로 로그인한다. 메뉴바는 격리된 인증을 검증·저장하고 기존 활성 계정과 공식 앱을 그대로 둔다. 완료 문구 뒤 B 카드 선택을 다시 하면 일반 전환을 실행한다.
 
 확인 전이나 finalization이 불명확한 상태에서 자동 재시도하지 않는다. 메뉴바가 복구 필요 또는 상태 불명확을 표시하면 앱을 열거나 다른 계정 작업을 하지 않는다. Core가 A로 안전 롤백하고 recovery가 없을 때만 사용자가 B 로그인 상태를 고친 뒤 다시 시도할 수 있다.
 
@@ -141,7 +140,7 @@ cd codex-account-switcher-spike
 
 비활성 카드 오른쪽 휴지통을 누르면 독립 확인창이 열린다. `취소`가 기본 동작이며 `삭제`를 승인하면 이 앱의 profile과 해당 Keychain item만 제거한다. OpenAI 계정, 현재 `auth.json`, 현재 Codex 로그인은 바뀌지 않으므로 삭제를 위해 Codex를 종료하거나 로그아웃할 필요가 없다. 활성 카드에는 휴지통이 없고 Core도 활성 profile 삭제를 거부한다.
 
-삭제한 계정을 다시 등록하려면 공식 Codex 앱에서 그 계정으로 로그인한 뒤 메뉴바의 `계정 등록`을 사용한다. 같은 라벨·이메일을 다시 쓸 수 있지만 새 profile ID가 발급되며, 등록한 계정이 활성 상태로 유지된다.
+삭제한 계정을 다시 등록하려면 메뉴바의 `계정 등록`을 누르고 열린 브라우저에서 그 계정으로 로그인한다. 같은 라벨·이메일을 다시 쓸 수 있지만 새 profile ID가 발급되며, 기존 활성 계정은 유지된다.
 
 ### 저장된 계정으로 전환
 

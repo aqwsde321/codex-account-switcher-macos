@@ -57,7 +57,7 @@ ADR-027·ADR-029·ADR-030과 기존 안전 결정을 유지한 채 Step 9 메뉴
 - switch/rollback/recovery 상태 머신 구현
 - 읽기 전용 CLI 세 명령 구현
 - 첫 계정 A capture의 TTY 확인, process gate, refresh 전 backup, isolated identity 검증, rollback 구현
-- 추가 계정 capture, 중복 계정 차단, 동일 capture lock/journal의 실패 rollback·등록 계정 active 유지, 최대 3개 허용·네 번째 무변경 거부 구현
+- 추가 계정 격리 로그인·inactive 저장, 중복 계정 차단, 기존 active·공용 auth 보존, 최대 3개 허용·네 번째 무변경 거부 구현
 - 저장 프로필 일반 switch의 정상 종료·격리 검증·원자 교체·재실행·검증·rollback adapter 구현
 - `CodexAccountMenuBar` target, fake 3계정 카드와 active/inactive 선택 모델 구현
 - credential backend 경계, CLI private file store 명시 연결, Keychain generic-password CRUD와 plaintext fallback 금지 구현
@@ -74,7 +74,7 @@ ADR-027·ADR-029·ADR-030과 기존 안전 결정을 유지한 채 Step 9 메뉴
 - inactive-only 로컬 계정 삭제, exact snapshot 재검증, 내구 삭제 marker와 시작 자동 복구, native destructive 확인 UI 구현
 - Command Line Tools 기반 release `.app` build, strict ad-hoc 서명, 고정 bundle ID와 LaunchAgent install/update/uninstall 구현
 - 번들·설치 실행파일의 random synthetic Keychain create/read/update/read/delete/notFound와 cleanup 통과; 제품 service·실제 auth 접근 0회
-- fake credential만 사용하는 151개 debug 테스트와 전체 executable build 통과
+- fake credential만 사용하는 164개 debug 테스트와 release 앱 서명 검증 통과
 - 실제 read-only inspect에서 사용자 auth와 helper store 무변경 확인
 - `rollbackFailed` 수동 복구 CLI와 실환경 A 복구 2회 완료
 - debug 전용 B-011 실패 주입에서 source 자동 롤백과 최종 A 복귀 확인
@@ -141,7 +141,7 @@ preparing → quitRequested → quiescent → refreshingCurrent → currentSaved
 → verifyingTarget → targetVerified
 ```
 
-롤백 phase는 `rollbackStarted`, `rollbackFailed`만 사용한다. 재로그인만 exact B credential 저장과 A-active registry의 B marker 해제 뒤 private store API로 `validatingTarget→targetVerified` 단축 전이를 허용한다. public state machine은 완화하지 않는다.
+롤백 phase는 `rollbackStarted`, `rollbackFailed`만 사용한다. 이전 버전 재로그인 journal 복구만 private store API의 `validatingTarget→targetVerified` 단축 전이를 사용할 수 있으며, 새 격리 재로그인은 journal을 만들지 않는다. public state machine은 완화하지 않는다.
 
 이 항목을 구현 편의를 이유로 다시 열지 않는다. 실제 환경이 불가능함을 증명할 때만 사용자에게 재결정을 요청한다.
 
@@ -320,7 +320,7 @@ cd codex-account-switcher-spike
 
 - 계정 A capture: 외부 Terminal에서 완료
 - 공식 로그인으로 계정 B 전환: 완료
-- 기존 방식의 계정 B capture와 계정 A 자동 복귀: 외부 Terminal에서 완료. 현재 구현은 후속 ADR-032에 따라 B를 active로 유지한다.
+- 기존 공식 앱 B capture와 A 자동 복귀 실험: 완료. 현재 구현은 ADR-033에 따라 공식 앱을 건드리지 않고 B를 inactive로 저장한다.
 
 일반 전환 명령 `switch --target <profile-id-or-label>`은 구현·fake fixture·실계정 기능 왕복 검증을 마쳤다.
 
@@ -405,14 +405,14 @@ menu bar residual process confirmation slice의 완료 기준:
 registration slice의 완료 기준:
 
 - 사용자가 라벨을 입력하고 `현재 로그인 등록`을 눌렀을 때만 Core capture를 호출한다.
-- Core 호출 전에 공식 앱 정상 종료·등록·재실행 확인을 표시한다.
+- 첫 등록은 공식 앱 정상 종료·현재 인증 저장·재실행 확인을 표시한다.
+- 추가 등록은 별도 `CODEX_HOME` 브라우저 로그인 확인을 표시하고 공식 앱을 유지한다.
 - label은 UI에서 정규화하지 않으며 blank·64자 초과는 버튼에서, control 문자·중복·네 번째 등록은 Core에서 거부한다.
-- 첫 등록과 추가 등록 모두 새 프로필을 active로 확정한 상태로 목록을 다시 읽는다.
-- 등록은 capture artifact 생성 전에 공식 앱에 정상 종료를 요청하고 공용 잔존 프로세스 경계를 적용한다. 독립 CLI·IDE는 자동 종료하지 않고 차단한다.
-- 성공하면 등록한 새 active로 공식 앱을 다시 연다. 추가 등록 성공 경로는 기존 active 저장본을 갱신·복원하지 않는다.
+- 첫 프로필은 active, 추가 프로필은 inactive로 확정한 상태로 목록을 다시 읽는다.
+- 추가 등록은 기존 active profile ID·공용 auth identity·활성 저장본을 전후 비교하고 앱 종료·실행 adapter를 호출하지 않는다.
+- 새 credential 저장 전에 같은 UUID의 inactive·`needsRelogin` metadata를 내구 기록한다. 중단 상태는 재로그인·삭제 가능하다.
 - 시작 시와 mutation 실패 뒤 자동 복구→profile 조회→read-only recovery status 조회 순서를 지킨다. pending/blocked면 등록·전환을 중단하고 STOP 오류를 표시한다.
-- capture가 durable commit 뒤 실패해도 profile 목록을 다시 읽어 중복 재시도를 막는다.
-- 추가 등록 commit 뒤 앱 launch만 실패하고 recovery가 없으면 새 profile ID를 등록 완료로 판정하고 폼을 닫되 launch 실패를 알린다.
+- Core가 성공 결과를 반환한 뒤 profile reload만 실패한 경우에만 목록 재조회로 완료를 조정한다. Core 자체가 throw한 추가 등록은 durable 상태가 완성돼 보여도 성공으로 추정하지 않는다.
 - 테스트는 fake provider만 사용하며 실제 홈·Keychain·공식 앱을 건드리지 않는다.
 
 inactive profile removal slice의 완료 기준:
@@ -447,7 +447,7 @@ menu bar startup recovery slice의 완료 기준:
 - `MenuBarViewModel`은 각 상태 refresh에서 자동 복구를 profile·recovery 조회보다 먼저 한 번 호출한다.
 - production provider는 기존 `RecoveryCoordinator`를 transaction lock 아래 재사용하고 `relaunchPrevious=false`로 실행한다.
 - exact `targetVerified`만 target commit을 완료한다. typed `target-unverified`만 source rollback하고 process·registry race, verifier 종료 미확인, 내구성 불확실은 STOP한다.
-- `validatingTarget` 재로그인은 미저장 B와 검증 저장·marker 해제 B를 구분해 A로 복귀하되 올바른 B 저장 상태를 보존한다.
+- 이전 버전 `validatingTarget` 재로그인 journal은 미저장 B와 검증 저장·marker 해제 B를 구분해 A로 복귀하되 올바른 B 저장 상태를 보존한다.
 - `refreshingCurrent` 복구 실패는 `rollbackFailed` terminal로 남기고, `rollbackFailed` 자동 복구는 side effect 없이 중단한다.
 - recovery outcome/throw와 무관하게 다음 profile·status 조회가 최종 UI 상태를 정하며 자동 앱 launch는 0회다.
 
@@ -481,11 +481,10 @@ menu bar switch progress slice의 완료 기준:
 menu bar relogin slice의 완료 기준:
 
 - `needsRelogin`인 비활성 카드만 일반 switch와 분리된 확인을 표시하고, dialog dismiss 뒤에도 snapshot의 exact opaque ID를 Core에 한 번만 전달한다.
-- 사용자가 먼저 공식 앱에서 대상 계정으로 로그인하고 앱·독립 Codex 프로세스를 모두 종료해야 함을 표시한다.
-- Core는 첫 verifier 전에 `validatingTarget` journal을 기록하고, 공용 auth의 exact 대상 identity·refresh·동일 blob 검증 뒤에만 대상 credential을 교체한다.
-- A active를 유지한 registry에서 대상 marker를 먼저 해제한 뒤 `targetVerified`를 기록하고 active ID를 대상으로 커밋한다. 성공 뒤 앱은 자동 실행하지 않는다.
-- UI는 호출 직전과 outcome/throw 뒤 profile·recovery를 재조회한다. recovery none·대상 단일 active·marker 해제일 때만 성공이며 wrong-ID outcome과 상태 불일치는 blocked다.
-- Core가 A로 안전 rollback하고 recovery none으로 throw하면 수동 재시도를 허용한다. pending·blocked·finalization 불명확에서는 자동 재시도하지 않는다.
+- Core는 별도 `CODEX_HOME`의 브라우저 로그인과 false→true→false identity 검증 뒤에만 대상 credential을 교체한다.
+- A active·공용 auth·A credential을 유지한 registry에서 대상 marker만 해제하고 앱 종료·실행을 호출하지 않는다.
+- UI는 호출 직전과 outcome/throw 뒤 profile·recovery를 재조회한다. recovery none·기존 source 단일 active·대상 marker 해제일 때만 성공이며 wrong-ID outcome과 상태 불일치는 blocked다.
+- 취소·identity mismatch·저장 실패는 수동 재시도를 허용하지만 pending·blocked·상태 불명확에서는 자동 재시도하지 않는다.
 - fake provider와 임시 file/credential fixture만 사용하며 실제 Keychain·공식 앱 재로그인은 릴리스 검증에 남긴다.
 
 ## 8. 실제 switch를 이 task 안에서 실행하면 안 되는 이유
