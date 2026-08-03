@@ -57,7 +57,7 @@ ADR-027·ADR-029·ADR-030과 기존 안전 결정을 유지한 채 Step 9 메뉴
 - switch/rollback/recovery 상태 머신 구현
 - 읽기 전용 CLI 세 명령 구현
 - 첫 계정 A capture의 TTY 확인, process gate, refresh 전 backup, isolated identity 검증, rollback 구현
-- 추가 계정 capture, 중복 계정 차단, 동일 capture lock/journal의 실패 rollback·등록 전 active 복귀, 최대 3개 허용·네 번째 무변경 거부 구현
+- 추가 계정 capture, 중복 계정 차단, 동일 capture lock/journal의 실패 rollback·등록 계정 active 유지, 최대 3개 허용·네 번째 무변경 거부 구현
 - 저장 프로필 일반 switch의 정상 종료·격리 검증·원자 교체·재실행·검증·rollback adapter 구현
 - `CodexAccountMenuBar` target, fake 3계정 카드와 active/inactive 선택 모델 구현
 - credential backend 경계, CLI private file store 명시 연결, Keychain generic-password CRUD와 plaintext fallback 금지 구현
@@ -74,7 +74,7 @@ ADR-027·ADR-029·ADR-030과 기존 안전 결정을 유지한 채 Step 9 메뉴
 - inactive-only 로컬 계정 삭제, exact snapshot 재검증, 내구 삭제 marker와 시작 자동 복구, native destructive 확인 UI 구현
 - Command Line Tools 기반 release `.app` build, strict ad-hoc 서명, 고정 bundle ID와 LaunchAgent install/update/uninstall 구현
 - 번들·설치 실행파일의 random synthetic Keychain create/read/update/read/delete/notFound와 cleanup 통과; 제품 service·실제 auth 접근 0회
-- fake credential만 사용하는 148개 debug 테스트와 전체 executable build 통과
+- fake credential만 사용하는 151개 debug 테스트와 전체 executable build 통과
 - 실제 read-only inspect에서 사용자 auth와 helper store 무변경 확인
 - `rollbackFailed` 수동 복구 CLI와 실환경 A 복구 2회 완료
 - debug 전용 B-011 실패 주입에서 source 자동 롤백과 최종 A 복귀 확인
@@ -293,7 +293,7 @@ cd codex-account-switcher-spike
 - 취소·호환성/process pre-auth 차단에서 journal unlink와 parent `fsync` 순서 검증
 - `refreshingCurrent` crash 시 source-valid이면 refresh/save를 완료하고, missing/corrupt/mismatch이면 configured-store source를 복원한다. 어느 분기든 source 검증 후 전환 안전 취소
 - `validatingTarget` crash/실패 시 일반 switch는 source 확인, 재로그인은 설치 target 식별 뒤 source 복원→registry previous→안전 취소. 검증된 target 저장본·marker 상태 보존, forward switch 없음
-- crash recovery는 `targetVerified`에서만 target commit을 완료할 수 있고 `authReplaced` 이하에서는 forward launch를 재개하지 않음
+- 일반 switch crash recovery는 `targetVerified`에서만 target commit을 완료하고 `authReplaced` 이하에서는 forward launch를 재개하지 않음. 추가 등록은 registry target·exact target auth·capture marker가 함께 남은 `targetValidated` rename window만 `targetVerified`로 전진해 정리
 - registry 내구 commit 완료 후에만 journal unlink, 이후 parent `fsync` 검증
 - typed `target-unverified`만 source 복원. process·registry race, verifier 종료 미확인, 내구성 불확실은 STOP. startup recovery는 source 앱 미실행
 - rollback 실패 시 launch 호출 없음
@@ -320,7 +320,7 @@ cd codex-account-switcher-spike
 
 - 계정 A capture: 외부 Terminal에서 완료
 - 공식 로그인으로 계정 B 전환: 완료
-- 계정 B capture와 계정 A 자동 복귀: 외부 Terminal에서 완료
+- 기존 방식의 계정 B capture와 계정 A 자동 복귀: 외부 Terminal에서 완료. 현재 구현은 후속 ADR-032에 따라 B를 active로 유지한다.
 
 일반 전환 명령 `switch --target <profile-id-or-label>`은 구현·fake fixture·실계정 기능 왕복 검증을 마쳤다.
 
@@ -407,9 +407,9 @@ registration slice의 완료 기준:
 - 사용자가 라벨을 입력하고 `현재 로그인 등록`을 눌렀을 때만 Core capture를 호출한다.
 - Core 호출 전에 공식 앱 정상 종료·등록·재실행 확인을 표시한다.
 - label은 UI에서 정규화하지 않으며 blank·64자 초과는 버튼에서, control 문자·중복·네 번째 등록은 Core에서 거부한다.
-- 첫 등록은 새 프로필을 active로, 추가 등록은 등록 전 active를 유지한 상태로 목록을 다시 읽는다.
+- 첫 등록과 추가 등록 모두 새 프로필을 active로 확정한 상태로 목록을 다시 읽는다.
 - 등록은 capture artifact 생성 전에 공식 앱에 정상 종료를 요청하고 공용 잔존 프로세스 경계를 적용한다. 독립 CLI·IDE는 자동 종료하지 않고 차단한다.
-- 성공하면 첫 등록은 새 active, 추가 등록은 복원한 기존 active로 공식 앱을 다시 연다.
+- 성공하면 등록한 새 active로 공식 앱을 다시 연다. 추가 등록 성공 경로는 기존 active 저장본을 갱신·복원하지 않는다.
 - 시작 시와 mutation 실패 뒤 자동 복구→profile 조회→read-only recovery status 조회 순서를 지킨다. pending/blocked면 등록·전환을 중단하고 STOP 오류를 표시한다.
 - capture가 durable commit 뒤 실패해도 profile 목록을 다시 읽어 중복 재시도를 막는다.
 - 추가 등록 commit 뒤 앱 launch만 실패하고 recovery가 없으면 새 profile ID를 등록 완료로 판정하고 폼을 닫되 launch 실패를 알린다.

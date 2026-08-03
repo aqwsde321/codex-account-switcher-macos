@@ -333,7 +333,7 @@ private struct AccountMenuView: View {
         if model.profiles.isEmpty {
             return "등록하면 공식 Codex 앱을 정상 종료하고 현재 로그인을 저장한 뒤 다시 엽니다. 독립 Codex CLI와 IDE는 먼저 직접 종료하세요."
         }
-        return "등록하면 공식 Codex 앱을 정상 종료하고 현재 로그인을 저장한 뒤 기존 활성 계정으로 복귀해 다시 엽니다. 독립 Codex CLI와 IDE는 먼저 직접 종료하세요."
+        return "등록하면 공식 Codex 앱을 정상 종료하고 현재 로그인을 새 활성 계정으로 저장한 뒤 다시 엽니다. 기존 계정 저장본은 유지됩니다. 독립 Codex CLI와 IDE는 먼저 직접 종료하세요."
     }
 }
 

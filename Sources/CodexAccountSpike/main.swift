@@ -55,7 +55,7 @@ struct CodexAccountSpikeCLI {
         } else if arguments.count == 4,
                   arguments[0...2] == ["profile", "capture", "--label"],
                   isatty(STDIN_FILENO) == 1 {
-            let prompt = "ChatGPT 앱을 정상 종료한 뒤 현재 인증을 갱신해 Spike private store에 저장하고 앱을 다시 엽니다. 독립 Codex 프로세스는 자동 종료하지 않습니다. 추가 프로필이면 등록 전 활성 프로필로 복귀합니다. 최대 3개까지 등록할 수 있습니다. 계속하려면 CAPTURE 입력: "
+            let prompt = "ChatGPT 앱을 정상 종료한 뒤 현재 인증을 갱신해 Spike private store에 새 활성 프로필로 저장하고 앱을 다시 엽니다. 기존 프로필 저장본은 유지하며 독립 Codex 프로세스는 자동 종료하지 않습니다. 최대 3개까지 등록할 수 있습니다. 계속하려면 CAPTURE 입력: "
             if let data = prompt.data(using: .utf8) {
                 try? FileHandle.standardError.write(contentsOf: data)
             }

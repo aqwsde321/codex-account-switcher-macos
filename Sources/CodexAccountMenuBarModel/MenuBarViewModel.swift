@@ -387,7 +387,10 @@ public final class MenuBarViewModel: ObservableObject {
                 errorMessage = recoveryErrorMessage
                 return false
             }
-            if profiles.contains(where: { !existingProfileIDs.contains($0.id) }) {
+            let addedProfiles = profiles.filter { !existingProfileIDs.contains($0.id) }
+            if addedProfiles.count == 1,
+               addedProfiles[0].active,
+               profiles.lazy.filter(\.active).count == 1 {
                 errorMessage = "계정은 등록했지만 Codex 앱을 다시 열지 못했습니다."
                 return true
             }

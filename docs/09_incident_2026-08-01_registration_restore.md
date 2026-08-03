@@ -2,6 +2,8 @@
 
 ## 결론
 
+> 2026-08-03 후속 결정: ADR-032부터 정상 추가 등록은 이전 계정을 자동 복원하지 않고 새 등록 계정을 active로 유지한다. 아래 내용은 기존 자동 복원 계약에서 발생한 장애와 당시 수정 기록이다. 기존 `rollbackFailed` 복구 호환성은 유지한다.
+
 B 추가 등록 뒤 저장된 A 인증은 이메일 판독에는 성공했지만 온라인 token refresh에는 실패했다. 기존 복원 코드는 A를 `refreshToken: false`로만 확인하고 반환 credential도 사용하지 않은 채 저장된 원본을 공용 `auth.json`에 썼다. 공식 Codex 앱은 이 A 인증으로 세션을 갱신하지 못해 로그아웃 상태로 열렸다.
 
 수정 코드는 A를 격리 홈에서 `refreshToken: true`로 갱신하고, 성공한 동일 blob을 Keychain과 공용 `auth.json`에 순서대로 저장한다. 갱신 실패 시 공용 인증을 바꾸거나 Codex를 실행하지 않고 `rollbackFailed` 증거를 보존한다.

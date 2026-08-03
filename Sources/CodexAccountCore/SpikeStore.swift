@@ -162,16 +162,16 @@ public struct SpikeStore {
     }
 
     public func updateJournal(_ journal: SwitchJournalRecord) throws -> FileIdentity {
-        try updateJournal(journal, allowingVerifiedReloginShortcut: false)
+        try updateJournal(journal, allowingVerifiedTargetShortcut: false)
     }
 
-    func updateVerifiedReloginJournal(_ journal: SwitchJournalRecord) throws -> FileIdentity {
-        try updateJournal(journal, allowingVerifiedReloginShortcut: true)
+    func updateVerifiedTargetJournal(_ journal: SwitchJournalRecord) throws -> FileIdentity {
+        try updateJournal(journal, allowingVerifiedTargetShortcut: true)
     }
 
     private func updateJournal(
         _ journal: SwitchJournalRecord,
-        allowingVerifiedReloginShortcut: Bool
+        allowingVerifiedTargetShortcut: Bool
     ) throws -> FileIdentity {
         let data = try JournalCodec.encode(journal)
         let normalizedJournal = try JournalCodec.decode(data)
@@ -191,8 +191,8 @@ public struct SpikeStore {
               normalizedJournal.updatedAt >= existingJournal.updatedAt else {
             throw SpikeStoreError.invalidJournalUpdate
         }
-        if allowingVerifiedReloginShortcut {
-            guard existingJournal.phase == .validatingTarget,
+        if allowingVerifiedTargetShortcut {
+            guard existingJournal.phase == .validatingTarget || existingJournal.phase == .targetValidated,
                   normalizedJournal.phase == .targetVerified else {
                 throw SpikeStoreError.invalidJournalUpdate
             }

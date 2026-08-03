@@ -583,7 +583,7 @@ func cliApplicationTests() -> [TestCase] {
                 try expect(processes.terminatedPIDs.isEmpty, "normal app quit sent SIGTERM")
             }
         },
-        TestCase("CLI capture stores a second profile and restores the first") {
+        TestCase("CLI capture stores a second profile and keeps it active") {
             try await withCaptureTemporaryDirectory { directory in
                 let codexHome = directory.appendingPathComponent(".codex", isDirectory: true)
                 try FileManager.default.createDirectory(at: codexHome, withIntermediateDirectories: false)
@@ -654,6 +654,12 @@ func cliApplicationTests() -> [TestCase] {
                     executablePath: appChild.executablePath,
                     nameHint: appChild.nameHint
                 )
+                let launchedApp = ProcessRecord(
+                    identity: ProcessIdentity(pid: 42, startSeconds: 101, startMicroseconds: 1),
+                    parentPID: 1,
+                    executablePath: descriptor.mainExecutableURL.path,
+                    nameHint: "ChatGPT"
+                )
                 lingeringProcesses.install([appRoot, appChild])
                 let provider = LocalCLIDataProvider(
                     storeURL: storeURL,
@@ -664,11 +670,20 @@ func cliApplicationTests() -> [TestCase] {
                         if lingeringProcesses.contains(pid: appRootIdentity.pid) {
                             return [appRootIdentity.pid]
                         }
-                        return launches.count >= 2 ? [42] : []
+                        return lingeringProcesses.contains(pid: launchedApp.identity.pid)
+                            ? [launchedApp.identity.pid]
+                            : []
                     },
                     requestApplicationTermination: { _ in
-                        lingeringProcesses.install(orphanedAppChild)
-                        return [appRootIdentity.pid]
+                        if lingeringProcesses.contains(pid: appRootIdentity.pid) {
+                            lingeringProcesses.install(orphanedAppChild)
+                            return [appRootIdentity.pid]
+                        }
+                        if lingeringProcesses.contains(pid: launchedApp.identity.pid) {
+                            lingeringProcesses.install([])
+                            return [launchedApp.identity.pid]
+                        }
+                        return []
                     },
                     confirmAppOwnedTermination: lingeringConfirmations.confirm,
                     requestProcessTermination: { lingeringProcesses.terminate($0) },
@@ -676,7 +691,8 @@ func cliApplicationTests() -> [TestCase] {
                     quiescenceSleep: { _ in },
                     launchApplication: { _ in
                         launches.record()
-                        return 42
+                        lingeringProcesses.install(launchedApp)
+                        return launchedApp.identity.pid
                     }
                 )
                 let application = CLIApplication(provider: provider)
@@ -693,21 +709,8 @@ func cliApplicationTests() -> [TestCase] {
                 guard let profileB = registry.profiles.first(where: { $0.label == "B" }) else {
                     throw TestFailure(description: "second profile B missing")
                 }
+                let storedB = try store.loadCredential(for: profileB.id)
                 let launchCount = await MainActor.run { launches.count }
-
-                lingeringProcesses.install([appRoot, appChild])
-                let switchArguments = ["switch", "--target", "B"]
-                let deniedSwitch = await application.run(arguments: switchArguments)
-                let switched = await application.run(
-                    arguments: switchArguments,
-                    mutationConfirmed: true
-                )
-                let switchedRegistry = try store.loadRegistry()
-                let switchedActive = try CredentialBlob(validating: Data(contentsOf: authURL))
-                let switchedStoredB = try store.loadCredential(for: profileB.id)
-                let switchedList = await application.run(arguments: ["profiles", "list"])
-                let switchedRecovery = await application.run(arguments: ["recovery", "status"])
-                let switchedLaunchCount = await MainActor.run { launches.count }
 
 #if SPIKE_FAULT_INJECTION
                 let faultProcesses = TerminableProcessSnapshotProvider()
@@ -801,7 +804,10 @@ func cliApplicationTests() -> [TestCase] {
                 let faultRecovery = await faultApplication.run(arguments: ["recovery", "status"])
                 let faultLaunchCount = await MainActor.run { faultLaunches.count }
 
-                try expect(faultResult.exitCode == 0, "B-011 rollback test failed: \(faultResult.standardError)")
+                try expect(
+                    faultResult.exitCode == 0,
+                    "B-011 rollback test failed: \(faultResult.standardError) recovery=\(faultRecovery.standardOutput) launches=\(faultLaunchCount)"
+                )
                 try expect(faultResult.standardOutput.contains("rollback_test=passed"), "B-011 PASS missing")
                 try expect(faultResult.standardOutput.contains("active=true label=B"), "B was not restored")
                 try expect(faultAuthAfter == faultAuthBefore, "B-011 did not restore active auth")
@@ -816,6 +822,28 @@ func cliApplicationTests() -> [TestCase] {
                 try expect(!faultProcesses.contains(pid: faultTargetRoot.identity.pid), "target app remained running")
                 try expect(faultProcesses.contains(pid: faultSourceRoot.identity.pid), "source app was not relaunched")
 #endif
+
+                lingeringProcesses.install([appRoot, appChild])
+                let switchedToA = await application.run(
+                    arguments: ["switch", "--target", "A"],
+                    mutationConfirmed: true
+                )
+                let registryAfterSwitchToA = try store.loadRegistry()
+                let activeAfterSwitchToA = try CredentialBlob(validating: Data(contentsOf: authURL))
+                let storedAAfterSwitchToA = try store.loadCredential(for: profileA.id)
+
+                let switchArguments = ["switch", "--target", "B"]
+                let deniedSwitch = await application.run(arguments: switchArguments)
+                let switched = await application.run(
+                    arguments: switchArguments,
+                    mutationConfirmed: true
+                )
+                let switchedRegistry = try store.loadRegistry()
+                let switchedActive = try CredentialBlob(validating: Data(contentsOf: authURL))
+                let switchedStoredB = try store.loadCredential(for: profileB.id)
+                let switchedList = await application.run(arguments: ["profiles", "list"])
+                let switchedRecovery = await application.run(arguments: ["recovery", "status"])
+                let switchedLaunchCount = await MainActor.run { launches.count }
 
                 let independentProcesses = TerminableProcessSnapshotProvider()
                 let independentConfirmations = TerminationConfirmationRecorder()
@@ -1016,17 +1044,20 @@ func cliApplicationTests() -> [TestCase] {
                     captured.exitCode == 0,
                     "second capture failed: \(captured.standardError) profiles=\(registry.profiles.count) activeA=\(registry.activeProfileID == profileA.id) recovery=\(recovery.standardOutput) launches=\(launchCount)"
                 )
-                try expect(captured.standardOutput.contains("active=false"), "second profile remained active")
+                try expect(captured.standardOutput.contains("active=true"), "second profile is not active")
                 try expect(registry.profiles.count == 2, "second profile was not registered")
-                try expect(registry.activeProfileID == profileA.id, "first profile was not restored")
+                try expect(registry.activeProfileID == profileB.id, "second profile did not remain active")
                 try expect(profileB.email == "b@example.invalid", "second identity changed")
-                try expect(restoredActive == storedA, "active auth does not match restored first profile")
-                try expect(storedA != credentialA, "restored first profile was not refreshed")
-                try expect(listed.standardOutput.contains("active=true label=A"), "first profile is not active")
-                try expect(listed.standardOutput.contains("active=false label=B"), "second profile is not inactive")
+                try expect(restoredActive == storedB, "active auth does not match the second profile")
+                try expect(storedA == credentialA, "capture changed the stored first profile")
+                try expect(listed.standardOutput.contains("active=false label=A"), "first profile remained active")
+                try expect(listed.standardOutput.contains("active=true label=B"), "second profile is not active")
                 try expect(recovery.standardOutput == "recovery=none\n", "second capture left recovery state")
-                try expect(launchCount == 1, "restored first account was not launched once")
+                try expect(launchCount == 1, "registered second account was not launched once")
                 try expect(lingeringConfirmations.counts.first == 1, "capture survivor was not confirmed")
+                try expect(switchedToA.exitCode == 0, "B to A switch failed: \(switchedToA.standardError)")
+                try expect(registryAfterSwitchToA.activeProfileID == profileA.id, "switch did not activate A")
+                try expect(activeAfterSwitchToA == storedAAfterSwitchToA, "active auth does not match A")
                 try expect(deniedSwitch.standardError == "error=confirmation_required\n", "switch ran without confirmation")
                 try expect(switched.exitCode == 0, "A to B switch failed: \(switched.standardError)")
                 try expect(switched.standardOutput.contains("active=true label=B"), "switch output did not activate B")
@@ -1035,12 +1066,15 @@ func cliApplicationTests() -> [TestCase] {
                 try expect(switchedList.standardOutput.contains("active=false label=A"), "A remained active")
                 try expect(switchedList.standardOutput.contains("active=true label=B"), "B is not active")
                 try expect(switchedRecovery.standardOutput == "recovery=none\n", "switch left recovery state")
-                try expect(switchedLaunchCount == 2, "target app was not launched once")
+                try expect(switchedLaunchCount == 3, "round-trip did not launch each target once")
                 try expect(
                     lingeringProcesses.terminatedPIDs == [lingeringIdentity.pid, lingeringIdentity.pid],
-                    "capture and switch did not SIGTERM only the captured app-owned survivor"
+                    "capture and round-trip did not SIGTERM only the captured app-owned survivor"
                 )
-                try expect(lingeringConfirmations.counts == [1, 1], "capture and switch confirmation counts changed")
+                try expect(
+                    lingeringConfirmations.counts == [1, 1],
+                    "capture and round-trip confirmation counts changed"
+                )
                 try expect(blockedSwitch.standardError == "error=process_blocked\n", "independent Codex was not blocked")
                 try expect(independentConfirmations.counts.isEmpty, "independent Codex requested SIGTERM approval")
                 try expect(independentProcesses.terminatedPIDs.isEmpty, "independent Codex received SIGTERM")
@@ -1281,7 +1315,7 @@ func cliApplicationTests() -> [TestCase] {
                 try expect(staleEvidencePreserved, "manual recovery changed verifier evidence")
             }
         },
-        TestCase("CLI additional capture recovers after a fresh previous login") {
+        TestCase("CLI additional capture succeeds when the previous credential cannot be probed") {
             try await withCaptureTemporaryDirectory { directory in
                 let codexHome = directory.appendingPathComponent(".codex", isDirectory: true)
                 try FileManager.default.createDirectory(at: codexHome, withIntermediateDirectories: false)
@@ -1320,7 +1354,7 @@ func cliApplicationTests() -> [TestCase] {
                 let executable = try makeCaptureAppServer(
                     in: directory,
                     rotateToOtherAccount: false,
-                    failRefreshHomeURL: verificationHome,
+                    failProbeHomeURL: verificationHome,
                     probeCountURL: probeCountURL,
                     requiredJournalURL: storeURL.appendingPathComponent("switch-journal.json")
                 )
@@ -1361,70 +1395,243 @@ func cliApplicationTests() -> [TestCase] {
                 let activeCredential = try CredentialBlob(validating: Data(contentsOf: authURL))
                 let storedA = try store.loadCredential(for: profileA.id)
                 guard let profileB = registry.profiles.first(where: { $0.label == "B" }) else {
-                    throw TestFailure(description: "failed capture did not preserve B")
+                    throw TestFailure(description: "capture did not preserve B")
                 }
                 let storedB = try store.loadCredential(for: profileB.id)
                 let launchCount = await MainActor.run { launches.count }
                 let captureProbeCount = try String(contentsOf: probeCountURL, encoding: .utf8)
                     .trimmingCharacters(in: .whitespacesAndNewlines)
 
-                try expect(captured.standardError == "error=rollback_failed\n", "invalid A restore was accepted")
-                try expect(captureProbeCount == "5", "failed rollback was retried during capture abort")
-                try expect(registry.profiles.count == 2, "failed restore lost a registered profile")
-                try expect(registry.activeProfileID == profileB.id, "failed restore changed the active registry")
-                try expect(journal?.phase == .rollbackFailed, "failed restore lost recovery evidence")
-                try expect(captureProfileID == profileB.id, "failed restore removed the capture marker")
-                try expect(activeCredential == storedB, "failed restore changed active B auth")
-                try expect(storedA == credentialA, "failed restore changed stored A")
-                try expect(launchCount == 0, "failed restore launched Codex")
+                try expect(captured.exitCode == 0, "B registration failed: \(captured.standardError)")
+                try expect(captured.standardOutput.contains("active=true label=B"), "B was not reported active")
+                try expect(captureProbeCount == "3", "capture probed the previous credential")
+                try expect(registry.profiles.count == 2, "capture lost a registered profile")
+                try expect(registry.activeProfileID == profileB.id, "B did not remain active")
+                try expect(journal == nil, "successful capture left recovery evidence")
+                try expect(captureProfileID == nil, "successful capture left the capture marker")
+                try expect(activeCredential == storedB, "successful capture changed active B auth")
+                try expect(storedA == credentialA, "successful capture changed stored A")
+                try expect(launchCount == 1, "successful capture did not launch B")
                 try expect(
                     !FileManager.default.fileExists(atPath: verificationHome.path),
-                    "failed verifier workspace was not cleaned"
+                    "successful capture left the verifier workspace"
                 )
+            }
+        },
+        TestCase("Local provider finishes committed capture crash windows forward") {
+            try await withCaptureTemporaryDirectory { directory in
+                for phase in [SwitchPhase.targetValidated, .targetVerified] {
+                    let phaseDirectory = directory.appendingPathComponent(phase.rawValue, isDirectory: true)
+                    try FileManager.default.createDirectory(
+                        at: phaseDirectory,
+                        withIntermediateDirectories: false
+                    )
+                    try FileManager.default.setAttributes(
+                        [.posixPermissions: 0o700],
+                        ofItemAtPath: phaseDirectory.path
+                    )
+                    let fixture = try makeCommittedCaptureRecoveryFixture(
+                        in: phaseDirectory,
+                        phase: phase
+                    )
+                    let store = try SpikeStore.openExisting(at: fixture.storeURL)
+                    let sourceBefore = try store.loadCredential(for: fixture.previous.id)
+                    let targetBefore = try store.loadCredential(for: fixture.target.id)
+                    let launches = await MainActor.run { AppLaunchRecorder() }
+                    let provider = LocalCLIDataProvider(
+                        storeURL: fixture.storeURL,
+                        activeAuthURL: fixture.authURL,
+                        processProvider: EmptyProcessSnapshotProvider(),
+                        locateApp: { fixture.descriptor },
+                        runningApplicationPIDs: { _ in [] },
+                        launchApplication: { _ in
+                            launches.record()
+                            return 42
+                        }
+                    )
 
-                let freshAData = Data(
-                    #"{"auth_mode":"chatgpt","test_account":"a","tokens":{"id_token":"fresh-a-id","access_token":"fresh-a-access","refresh_token":"fresh-a-refresh"}}"#.utf8
+                    let outcome = try await provider.recoverPendingTransaction()
+                    let registry = try store.loadRegistry()
+                    let active = try CredentialBlob(validating: Data(contentsOf: fixture.authURL))
+                    let sourceAfter = try store.loadCredential(for: fixture.previous.id)
+                    let targetAfter = try store.loadCredential(for: fixture.target.id)
+                    let marker = try store.loadCaptureProfileIDIfPresent()
+                    let journal = try store.loadJournalIfPresent()
+                    let evidence = try store.loadJournalFinalizationEvidenceIfPresent()
+                    let launchCount = await MainActor.run { launches.count }
+
+                    try expect(
+                        outcome == .completed(.commitVerifiedTarget),
+                        "\(phase.rawValue) capture did not recover forward"
+                    )
+                    try expect(registry.activeProfileID == fixture.target.id, "capture lost active B")
+                    try expect(active == targetBefore && targetAfter == targetBefore, "capture changed B")
+                    try expect(sourceAfter == sourceBefore, "capture changed stored A")
+                    try expect(marker == nil && journal == nil && evidence == nil, "capture left recovery state")
+                    try expect(launchCount == 0, "capture recovery launched the app")
+                }
+
+                let raceDirectory = directory.appendingPathComponent("targetValidated-race", isDirectory: true)
+                try FileManager.default.createDirectory(at: raceDirectory, withIntermediateDirectories: false)
+                try FileManager.default.setAttributes(
+                    [.posixPermissions: 0o700],
+                    ofItemAtPath: raceDirectory.path
                 )
-                let refreshedA = try CredentialBlob(validating: Data(
-                    #"{"auth_mode":"chatgpt","test_account":"a","tokens":{"id_token":"fixture-id-rotated","access_token":"fixture-access-rotated","refresh_token":"fixture-refresh-rotated"}}"#.utf8
+                let raceFixture = try makeCommittedCaptureRecoveryFixture(
+                    in: raceDirectory,
+                    phase: .targetValidated
+                )
+                let raceStore = try SpikeStore.openExisting(at: raceFixture.storeURL)
+                let changedBData = Data(
+                    #"{"auth_mode":"chatgpt","test_account":"b","tokens":{"id_token":"changed-b-id","access_token":"changed-b-access","refresh_token":"changed-b-refresh"}}"#.utf8
+                )
+                let changedB = try CredentialBlob(validating: changedBData)
+                let storedTargetBefore = try raceStore.loadCredential(for: raceFixture.target.id)
+                let racedProvider = LocalCLIDataProvider(
+                    storeURL: raceFixture.storeURL,
+                    activeAuthURL: raceFixture.authURL,
+                    processProvider: MutatingProcessSnapshotProvider(
+                        mutationCall: 3,
+                        url: raceFixture.authURL,
+                        contents: changedBData
+                    ),
+                    locateApp: { raceFixture.descriptor },
+                    runningApplicationPIDs: { _ in [] }
+                )
+                do {
+                    _ = try await racedProvider.recoverPendingTransaction()
+                    throw TestFailure(description: "capture auth race was committed")
+                } catch let failure as RecoveryCoordinatorFailure {
+                    try expect(failure == .executionFailed, "capture auth race returned the wrong STOP")
+                }
+                let racedRegistry = try raceStore.loadRegistry()
+                let racedActive = try CredentialBlob(validating: Data(contentsOf: raceFixture.authURL))
+                let racedStoredTarget = try raceStore.loadCredential(for: raceFixture.target.id)
+                let racedMarker = try raceStore.loadCaptureProfileIDIfPresent()
+                let racedJournal = try raceStore.loadJournalIfPresent()
+                let racedEvidence = try raceStore.loadJournalFinalizationEvidenceIfPresent()
+
+                try expect(racedRegistry.activeProfileID == raceFixture.target.id, "race changed registry")
+                try expect(racedActive == changedB, "race fixture did not replace active auth")
+                try expect(racedStoredTarget == storedTargetBefore, "race changed stored target")
+                try expect(racedMarker == raceFixture.target.id, "race removed capture provenance")
+                try expect(racedJournal?.phase == .targetValidated, "race advanced the commit point")
+                try expect(racedEvidence == nil, "race created finalization evidence")
+            }
+        },
+        TestCase("Local provider never rolls back a targetVerified capture") {
+            try await withCaptureTemporaryDirectory { directory in
+                let codexHome = directory.appendingPathComponent(".codex", isDirectory: true)
+                try FileManager.default.createDirectory(at: codexHome, withIntermediateDirectories: false)
+                try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: codexHome.path)
+                let authURL = codexHome.appendingPathComponent("auth.json", isDirectory: false)
+                let activeBData = Data(
+                    #"{"auth_mode":"chatgpt","test_account":"b","tokens":{"id_token":"b-id","access_token":"b-access","refresh_token":"b-refresh"}}"#.utf8
+                )
+                let activeB = try CredentialBlob(validating: activeBData)
+                try activeBData.write(to: authURL, options: .withoutOverwriting)
+                try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: authURL.path)
+
+                let storeURL = directory.appendingPathComponent("store", isDirectory: true)
+                let store = try SpikeStore.create(at: storeURL)
+                let profileA = ProfileMetadata(
+                    id: ProfileID(UUID()),
+                    label: "A",
+                    email: "person@example.invalid",
+                    planType: "plus",
+                    needsRelogin: false,
+                    createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+                    updatedAt: Date(timeIntervalSince1970: 1_700_000_000)
+                )
+                let storedA = try CredentialBlob(validating: Data(
+                    #"{"auth_mode":"chatgpt","test_account":"a","tokens":{"id_token":"a-id","access_token":"a-access","refresh_token":"a-refresh"}}"#.utf8
                 ))
-                try freshAData.write(to: authURL)
-                let recoveryProvider = LocalCLIDataProvider(
+                _ = try store.saveCredential(storedA, for: profileA.id)
+                _ = try store.saveRegistry(ProfileRegistry(activeProfileID: profileA.id, profiles: [profileA]))
+
+                let executable = try makeCaptureAppServer(in: directory, rotateToOtherAccount: false)
+                let bundleURL = directory.appendingPathComponent("ChatGPT.app", isDirectory: true)
+                let descriptor = CodexAppDescriptor(
+                    bundleURL: bundleURL,
+                    mainExecutableURL: bundleURL.appendingPathComponent("Contents/MacOS/ChatGPT"),
+                    bundledCodexURL: executable,
+                    bundleIdentifier: "com.openai.codex",
+                    version: "26.721.41059",
+                    build: "5848",
+                    appSigningIdentifier: "com.openai.codex",
+                    bundledCodexSigningIdentifier: "codex",
+                    teamIdentifier: "2DC432GLL2"
+                )
+                let unlinkFailure = DurableFileFailure(
+                    mutation: .remove,
+                    stage: .unlink,
+                    errno: EIO,
+                    certainty: .destinationUnchanged
+                )
+                let provider = LocalCLIDataProvider(
                     storeURL: storeURL,
                     activeAuthURL: authURL,
                     processProvider: EmptyProcessSnapshotProvider(),
                     locateApp: { descriptor },
                     runningApplicationPIDs: { _ in [] },
-                    launchApplication: { _ in
-                        launches.record()
-                        return 42
-                    }
+                    removeJournalFile: { throw unlinkFailure }
                 )
+                let profileBID = try await provider.prepareCapture()
+                let capturedB = try await provider.readActiveCredential()
+                let profileB = ProfileMetadata(
+                    id: profileBID,
+                    label: "B",
+                    email: "b@example.invalid",
+                    planType: "plus",
+                    needsRelogin: false,
+                    createdAt: Date(timeIntervalSince1970: 1_700_000_100),
+                    updatedAt: Date(timeIntervalSince1970: 1_700_000_100)
+                )
+                var commitFailed = false
+                do {
+                    try await provider.commit(profile: profileB, credential: capturedB)
+                } catch {
+                    commitFailed = true
+                }
+                var abortFailed = false
+                do {
+                    try await provider.abortCapture()
+                } catch {
+                    abortFailed = true
+                }
 
-                let recovered = try await recoveryProvider.recoverPendingTransaction()
-                let recoveredRegistry = try store.loadRegistry()
-                let recoveredActive = try CredentialBlob(validating: Data(contentsOf: authURL))
-                let recoveredA = try store.loadCredential(for: profileA.id)
-                let recoveredB = try store.loadCredential(for: profileB.id)
-                let recoveredJournal = try store.loadJournalIfPresent()
-                let recoveredCaptureProfileID = try store.loadCaptureProfileIDIfPresent()
-                let recoveredLaunchCount = await MainActor.run { launches.count }
+                let registry = try store.loadRegistry()
+                let activeAfter = try CredentialBlob(validating: Data(contentsOf: authURL))
+                let storedAAfter = try store.loadCredential(for: profileA.id)
+                let storedBAfter = try store.loadCredential(for: profileB.id)
+                let journalBeforeRestart = try store.loadJournalIfPresent()
+                let evidenceBeforeRestart = try store.loadJournalFinalizationEvidenceIfPresent()
+                let restarted = LocalCLIDataProvider(
+                    storeURL: storeURL,
+                    activeAuthURL: authURL,
+                    processProvider: EmptyProcessSnapshotProvider(),
+                    locateApp: { descriptor },
+                    runningApplicationPIDs: { _ in [] }
+                )
+                let status = try await restarted.recoveryStatus()
+                let journalAfterRestart = try store.loadJournalIfPresent()
+                let evidenceAfterRestart = try store.loadJournalFinalizationEvidenceIfPresent()
 
+                try expect(commitFailed, "injected journal failure did not interrupt capture")
+                try expect(!abortFailed, "targetVerified capture attempted rollback")
+                try expect(registry.activeProfileID == profileB.id, "finalization failure rolled registry back")
+                try expect(activeAfter == activeB && storedBAfter == activeB, "finalization failure changed B")
+                try expect(storedAAfter == storedA, "finalization failure changed stored A")
+                try expect(journalBeforeRestart?.phase == .targetVerified, "commit point was downgraded")
+                try expect(evidenceBeforeRestart?.journalPhase == .targetVerified, "commit evidence changed")
+                try expect(status == .none, "restart did not finish targetVerified finalization")
                 try expect(
-                    recovered == .completed(.repairCurrentThenCancel),
-                    "fresh A login did not complete capture recovery"
+                    journalAfterRestart == nil && evidenceAfterRestart == nil,
+                    "restart left finalization evidence"
                 )
-                try expect(recoveredRegistry.activeProfileID == profileA.id, "fresh A did not become active")
-                try expect(recoveredRegistry.profiles.count == 2, "fresh A recovery lost B")
-                try expect(recoveredActive == refreshedA, "fresh A login was replaced during recovery")
-                try expect(recoveredA == refreshedA, "fresh A login was not saved")
-                try expect(recoveredB == storedB, "fresh A recovery changed B")
-                try expect(recoveredJournal == nil, "fresh A recovery left the journal")
-                try expect(recoveredCaptureProfileID == nil, "fresh A recovery left the capture marker")
-                try expect(recoveredLaunchCount == 0, "automatic recovery launched Codex")
             }
         },
-        TestCase("CLI capture stores a third profile, restores the active profile, and rejects a fourth") {
+        TestCase("CLI capture stores a third profile, keeps it active, and rejects a fourth") {
             try await withCaptureTemporaryDirectory { directory in
                 let codexHome = directory.appendingPathComponent(".codex", isDirectory: true)
                 try FileManager.default.createDirectory(at: codexHome, withIntermediateDirectories: false)
@@ -1517,34 +1724,6 @@ func cliApplicationTests() -> [TestCase] {
                 let recoveryAfterCapture = await application.run(arguments: ["recovery", "status"])
                 let launchCountAfterCapture = await MainActor.run { launches.count }
 
-                let switchLaunches = await MainActor.run { AppLaunchRecorder() }
-                let switchApplication = CLIApplication(
-                    provider: LocalCLIDataProvider(
-                        storeURL: storeURL,
-                        activeAuthURL: authURL,
-                        processProvider: EmptyProcessSnapshotProvider(),
-                        locateApp: { descriptor },
-                        runningApplicationPIDs: { _ in switchLaunches.count > 0 ? [42] : [] },
-                        requestApplicationTermination: { _ in [] },
-                        normalTerminationGracePolls: 0,
-                        quiescenceSleep: { _ in },
-                        launchApplication: { _ in
-                            switchLaunches.record()
-                            return 42
-                        }
-                    )
-                )
-                let switched = await switchApplication.run(
-                    arguments: ["switch", "--target", "C"],
-                    mutationConfirmed: true
-                )
-                let switchedRegistry = try store.loadRegistry()
-                let activeAfterSwitch = try CredentialBlob(validating: Data(contentsOf: authURL))
-                let storedAAfterSwitch = try store.loadCredential(for: profileA.id)
-                let storedBAfterSwitch = try store.loadCredential(for: profileB.id)
-                let storedCAfterSwitch = try store.loadCredential(for: profileC.id)
-                let switchLaunchCount = await MainActor.run { switchLaunches.count }
-
                 let externalD = Data(
                     #"{"auth_mode":"chatgpt","test_account":"d","tokens":{"id_token":"d-id","access_token":"d-access","refresh_token":"d-refresh"}}"#.utf8
                 )
@@ -1564,26 +1743,21 @@ func cliApplicationTests() -> [TestCase] {
                 let launchCountAfterRejection = await MainActor.run { launches.count }
 
                 try expect(captured.exitCode == 0, "third capture failed: \(captured.standardError)")
-                try expect(captured.standardOutput.contains("active=false label=C"), "third profile remained active")
+                try expect(captured.standardOutput.contains("active=true label=C"), "third profile is not active")
                 try expect(registry.profiles.map(\.label) == ["A", "B", "C"], "third profile order changed")
-                try expect(registry.activeProfileID == profileB.id, "previously active profile B was not restored")
-                try expect(activeAfterCapture == storedB, "active auth does not match restored profile B")
+                try expect(registry.activeProfileID == profileC.id, "third profile did not remain active")
+                try expect(activeAfterCapture == storedC, "active auth does not match profile C")
                 try expect(storedA == credentialA, "third capture changed profile A")
-                try expect(storedB != credentialB, "third capture did not refresh profile B")
+                try expect(storedB == credentialB, "third capture changed profile B")
                 try expect(storedC != credentialCBeforeCapture, "third credential was not refreshed")
                 try expect(recoveryAfterCapture.standardOutput == "recovery=none\n", "third capture left recovery state")
-                try expect(launchCountAfterCapture == 1, "restored profile B was not launched once")
-                try expect(switched.exitCode == 0, "switch to third profile failed: \(switched.standardError)")
-                try expect(switchedRegistry.activeProfileID == profileC.id, "switch did not activate profile C")
-                try expect(switchedRegistry.profiles == registry.profiles, "switch changed the three profiles")
-                try expect(activeAfterSwitch == storedCAfterSwitch, "active auth does not match switched profile C")
-                try expect(switchLaunchCount == 1, "switch did not launch profile C once")
+                try expect(launchCountAfterCapture == 1, "profile C was not launched once")
                 try expect(rejected.standardError == "error=profile_already_exists\n", "fourth profile was accepted")
-                try expect(registryAfterRejection == switchedRegistry, "fourth capture changed the registry")
+                try expect(registryAfterRejection == registry, "fourth capture changed the registry")
                 try expect(authAfterRejection == authBeforeRejection, "fourth capture changed active auth")
-                try expect(storedAAfterRejection == storedAAfterSwitch, "fourth capture changed profile A")
-                try expect(storedBAfterRejection == storedBAfterSwitch, "fourth capture changed profile B")
-                try expect(storedCAfterRejection == storedCAfterSwitch, "fourth capture changed profile C")
+                try expect(storedAAfterRejection == storedA, "fourth capture changed profile A")
+                try expect(storedBAfterRejection == storedB, "fourth capture changed profile B")
+                try expect(storedCAfterRejection == storedC, "fourth capture changed profile C")
                 try expect(recoveryAfterRejection.standardOutput == "recovery=none\n", "fourth capture left recovery state")
                 try expect(launchCountAfterRejection == launchCountAfterCapture, "fourth capture launched the app")
             }
@@ -3041,7 +3215,7 @@ func cliApplicationTests() -> [TestCase] {
                 try expect(recovery.standardOutput == "recovery=none\n", "completed rollback left recovery")
             }
         },
-        TestCase("CLI second capture preserves recovery when a process appears during final A verification") {
+        TestCase("CLI manually restores a failed capture rollback") {
             try await withCaptureTemporaryDirectory { directory in
                 let codexHome = directory.appendingPathComponent(".codex", isDirectory: true)
                 try FileManager.default.createDirectory(at: codexHome, withIntermediateDirectories: false)
@@ -3067,17 +3241,34 @@ func cliApplicationTests() -> [TestCase] {
                 let credentialA = try CredentialBlob(validating: Data(
                     #"{"auth_mode":"chatgpt","test_account":"a","tokens":{"id_token":"a-id","access_token":"a-access","refresh_token":"a-refresh"}}"#.utf8
                 ))
+                let profileB = ProfileMetadata(
+                    id: try store.createCaptureProfileID(),
+                    label: "B",
+                    email: "b@example.invalid",
+                    planType: "plus",
+                    needsRelogin: false,
+                    createdAt: Date(timeIntervalSince1970: 1_700_000_001),
+                    updatedAt: Date(timeIntervalSince1970: 1_700_000_001)
+                )
+                let storedB = try CredentialBlob(validating: activeB)
                 _ = try store.saveCredential(credentialA, for: profileA.id)
+                _ = try store.saveCredential(storedB, for: profileB.id)
                 _ = try store.saveRegistry(
-                    ProfileRegistry(activeProfileID: profileA.id, profiles: [profileA])
+                    ProfileRegistry(activeProfileID: profileB.id, profiles: [profileA, profileB])
+                )
+                let rollbackStartedAt = Date(timeIntervalSince1970: 1_700_000_010)
+                _ = try store.createJournalIfAbsent(
+                    SwitchJournalRecord(
+                        transactionID: UUID(),
+                        phase: .rollbackFailed,
+                        previousProfileID: profileA.id,
+                        targetProfileID: profileB.id,
+                        startedAt: rollbackStartedAt,
+                        updatedAt: rollbackStartedAt
+                    )
                 )
 
-                let probeCountURL = directory.appendingPathComponent("probe-count")
-                let executable = try makeCaptureAppServer(
-                    in: directory,
-                    rotateToOtherAccount: false,
-                    probeCountURL: probeCountURL
-                )
+                let executable = try makeCaptureAppServer(in: directory, rotateToOtherAccount: false)
                 let bundleURL = directory.appendingPathComponent("ChatGPT.app", isDirectory: true)
                 let descriptor = CodexAppDescriptor(
                     bundleURL: bundleURL,
@@ -3090,42 +3281,6 @@ func cliApplicationTests() -> [TestCase] {
                     bundledCodexSigningIdentifier: "codex",
                     teamIdentifier: "2DC432GLL2"
                 )
-                let runningPIDs = await MainActor.run {
-                    ProbeCountRunningPIDs(countURL: probeCountURL, blockAt: 6)
-                }
-                let provider = LocalCLIDataProvider(
-                    storeURL: storeURL,
-                    activeAuthURL: authURL,
-                    processProvider: EmptyProcessSnapshotProvider(),
-                    locateApp: { descriptor },
-                    runningApplicationPIDs: { _ in runningPIDs.current() }
-                )
-                let application = CLIApplication(provider: provider)
-
-                let captured = await application.run(
-                    arguments: ["profile", "capture", "--label", "B"],
-                    mutationConfirmed: true
-                )
-                let activeAfter = try CredentialBlob(validating: Data(contentsOf: authURL))
-                let storedA = try store.loadCredential(for: profileA.id)
-                let registry = try store.loadRegistry()
-                let journal = try store.loadJournalIfPresent()
-                let pendingCaptureID = try store.loadCaptureProfileIDIfPresent()
-                let recovery = await application.run(arguments: ["recovery", "status"])
-
-                try expect(captured.standardError == "error=rollback_failed\n", "unsafe rollback was reported safe")
-                try expect(activeAfter == storedA, "verified A bytes were not retained")
-                try expect(registry.profiles.count == 2, "validated second profile was not preserved")
-                try expect(registry.activeProfileID != profileA.id, "registry committed A after process race")
-                try expect(journal?.phase == .rollbackFailed, "rollback failure journal was not preserved")
-                try expect(pendingCaptureID != nil, "capture evidence was removed")
-                try expect(recovery.standardOutput.contains("phase=rollbackFailed"), "recovery status hid failure")
-
-                guard let pendingCaptureID,
-                      let profileB = registry.profiles.first(where: { $0.id == pendingCaptureID }) else {
-                    throw TestFailure(description: "capture recovery fixture lost target B")
-                }
-                let storedB = try store.loadCredential(for: profileB.id)
                 let recoveryLaunches = await MainActor.run { AppLaunchRecorder() }
                 let recoveryApplication = CLIApplication(
                     provider: LocalCLIDataProvider(
@@ -3280,7 +3435,7 @@ func cliApplicationTests() -> [TestCase] {
                 try expect(precommitRegistry.activeProfileID == profileB.id, "pre-commit recovery did not activate B")
                 try expect(precommitAuth == precommitStoredB, "pre-commit recovery did not restore B auth")
                 try expect(precommitStoredA == restoredStoredA, "pre-commit recovery changed A")
-                try expect(precommitStoredB == storedB, "pre-commit recovery changed B")
+                try expect(precommitStoredB != storedB, "pre-commit recovery did not refresh B")
                 try expect(
                     !FileManager.default.fileExists(atPath: precommitCredentialURL.path),
                     "pre-commit recovery left temporary target credential"
@@ -3412,19 +3567,15 @@ func cliApplicationTests() -> [TestCase] {
         },
         TestCase("CLI capture rechecks processes before creating artifacts") {
             try await withCaptureTemporaryDirectory { directory in
-                let probeCountURL = directory.appendingPathComponent("probe-count")
-                let fixture = try makeReloginFixture(
-                    in: directory,
-                    probeCountURL: probeCountURL
-                )
+                let fixture = try makeReloginFixture(in: directory)
                 let independentCodex = ProcessRecord(
                     identity: ProcessIdentity(pid: 301, startSeconds: 401, startMicroseconds: 1),
                     parentPID: 1,
                     executablePath: "/opt/homebrew/bin/codex",
                     nameHint: "codex"
                 )
-                let processes = ProbeTriggeredProcessSnapshotProvider(
-                    triggerURL: probeCountURL,
+                let processes = CallTriggeredProcessSnapshotProvider(
+                    triggerCall: 3,
                     record: independentCodex
                 )
                 let confirmations = TerminationConfirmationRecorder()
@@ -3665,14 +3816,15 @@ private final class TerminableProcessSnapshotProvider: ProcessSnapshotProviding,
     }
 }
 
-private final class ProbeTriggeredProcessSnapshotProvider: ProcessSnapshotProviding, @unchecked Sendable {
-    private let triggerURL: URL
+private final class CallTriggeredProcessSnapshotProvider: ProcessSnapshotProviding, @unchecked Sendable {
+    private let triggerCall: Int
     private let record: ProcessRecord
     private let lock = NSLock()
+    private var callCount = 0
     private var terminated = [Int32]()
 
-    init(triggerURL: URL, record: ProcessRecord) {
-        self.triggerURL = triggerURL
+    init(triggerCall: Int, record: ProcessRecord) {
+        self.triggerCall = triggerCall
         self.record = record
     }
 
@@ -3681,7 +3833,10 @@ private final class ProbeTriggeredProcessSnapshotProvider: ProcessSnapshotProvid
     }
 
     func snapshot() throws -> [ProcessRecord] {
-        FileManager.default.fileExists(atPath: triggerURL.path) ? [record] : []
+        lock.withLock {
+            callCount += 1
+            return callCount >= triggerCall ? [record] : []
+        }
     }
 
     func terminate(_ process: ProcessRecord) {
@@ -3839,26 +3994,6 @@ private final class DelayedLaunchPIDVisibility {
         let visiblePIDs = observations.count < 2 ? [] : [pid]
         observations.append(visiblePIDs)
         return visiblePIDs
-    }
-}
-
-@MainActor
-private final class ProbeCountRunningPIDs {
-    private let countURL: URL
-    private let blockAt: Int
-
-    init(countURL: URL, blockAt: Int) {
-        self.countURL = countURL
-        self.blockAt = blockAt
-    }
-
-    func current() -> [Int32] {
-        guard let data = try? Data(contentsOf: countURL),
-              let count = Int(String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)),
-              count >= blockAt else {
-            return []
-        }
-        return [42]
     }
 }
 
@@ -4084,6 +4219,33 @@ private func makeManualRecoveryFixture(in directory: URL) throws -> ManualRecove
     )
 }
 
+private func makeCommittedCaptureRecoveryFixture(
+    in directory: URL,
+    phase: SwitchPhase
+) throws -> ManualRecoveryFixture {
+    let fixture = try makeManualRecoveryFixture(in: directory)
+    let store = try SpikeStore.openExisting(at: fixture.storeURL)
+    _ = try store.removeJournal()
+    let markerURL = fixture.storeURL.appendingPathComponent("capture-profile-id", isDirectory: false)
+    _ = try DarwinDurableFileOperations().replace(
+        contents: SensitiveBytes(Data("\(fixture.target.id)\n".utf8)),
+        at: markerURL,
+        expecting: .absent
+    )
+    let now = Date(timeIntervalSince1970: 1_700_000_200)
+    _ = try store.createJournalIfAbsent(
+        SwitchJournalRecord(
+            transactionID: UUID(),
+            phase: phase,
+            previousProfileID: fixture.previous.id,
+            targetProfileID: fixture.target.id,
+            startedAt: now,
+            updatedAt: now
+        )
+    )
+    return fixture
+}
+
 private func withCaptureTemporaryDirectory(
     _ body: (URL) async throws -> Void
 ) async throws {
@@ -4100,6 +4262,7 @@ private func makeCaptureAppServer(
     rotateToOtherAccount: Bool,
     rotateToOtherAccountHomeURL: URL? = nil,
     failRefreshHomeURL: URL? = nil,
+    failProbeHomeURL: URL? = nil,
     probeCountURL: URL? = nil,
     requiredJournalURL: URL? = nil,
     holdPipesOpen: Bool = false
@@ -4123,6 +4286,9 @@ private func makeCaptureAppServer(
     print -r -- '{"id":1,"result":{}}'
     IFS= read -r initialized
     IFS= read -r account_read
+    if [[ -n "\#(failProbeHomeURL?.path ?? "")" && "$CODEX_HOME" == "\#(failProbeHomeURL?.path ?? "")" ]]; then
+      exit 8
+    fi
     if [[ "$account_read" == *'"refreshToken":true'* ]]; then
       if [[ -n "\#(requiredJournalURL?.path ?? "")" && ! -f "\#(requiredJournalURL?.path ?? "")" ]]; then
         exit 10

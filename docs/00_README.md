@@ -95,7 +95,7 @@
 - 대상 실패 시 이전 계정 자동 롤백
 - 롤백 검증 실패 시 공식 앱을 실행하지 않음
 - MVP 등록은 최대 3개, 내부 모델은 배열
-- 추가 프로필 등록 후 등록 전 활성 계정 자동 복귀
+- 추가 프로필 등록 후 등록 계정 활성 유지
 - 이미 활성인 카드 클릭은 무변경 + 창 활성화
 - 앱이 닫혀 있으면 전환 후 실행
 - 외부 미등록 로그인은 자동 덮어쓰기 금지
@@ -170,9 +170,9 @@ Swift CLI Core의 비파괴 기반 구현은 저장소 루트에 있다. 빌드�
 
 1. 완료: SwiftPM Core/CLI/test harness
 2. 완료: credential/file/journal/lock, App Server, bundle/process, 상태 머신
-3. 완료: custom async harness의 fake fixture 129개 테스트와 `inspect`/`profiles list`/`profile capture`/`profile sync-active`/`switch`/`recovery status`/`recovery restore`
+3. 완료: custom async harness의 fake fixture 151개 테스트와 `inspect`/`profiles list`/`profile capture`/`profile sync-active`/`switch`/`recovery status`/`recovery restore`
 4. 완료: 공식 ChatGPT 앱의 OS signature와 고정 build 검증
-5. 완료: 최대 3개 registration coordinator, 추가 등록 후 기존 활성 프로필 자동 복귀, 외부 Terminal confirmation gate
+5. 완료: 최대 3개 registration coordinator, 추가 등록 계정 활성 유지, 외부 Terminal confirmation gate
 6. 개발 승인: 사용자 확인상 동일 task 기능 왕복 완료, `07_test_acceptance.md` §16 형식 증거는 릴리스 게이트로 유지
 7. 완료: `CodexAccountMenuBar` target, fake 3계정 카드, active 선택·inactive 확인 모델
 8. 완료: credential backend 경계, CLI private file store 명시 연결, Keychain generic-password CRUD와 plaintext fallback 금지

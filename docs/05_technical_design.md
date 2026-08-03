@@ -467,13 +467,14 @@ Spike에서 다음을 확인했다.
 
 ### 추가 프로필
 
-- 등록 시작 전 활성 프로필 최신본 존재 확인
+- 등록 시작 전 활성 프로필 저장본 존재 확인
 - 사용자의 공식 로그인 후 미등록 이메일 감지
 - 명시 확인 뒤 capture marker·credential·journal 생성 전에 공용 정상 종료·quiescence 경계 적용
 - 자동 overwrite 금지
 - 명시적 등록 동작에서만 새 프로필 저장
-- 새 프로필을 잠시 active로 기록하되 capture의 동일 lock/journal을 유지한 채 `rollbackStarted`로 등록 전 활성 프로필을 복구·검증
-- 등록 전 프로필의 active registry와 journal 정리까지 끝난 뒤에만 lock 해제·앱 실행
+- 새 프로필을 active로 기록하고 동일 lock/journal에서 `targetVerified`로 확정
+- active auth와 새 저장본 일치, capture marker와 journal 정리까지 끝난 뒤에만 lock 해제·새 계정 앱 실행
+- 정상 성공 경로에서는 등록 전 프로필을 갱신·복원하지 않으며, 커밋 전 실패와 기존 중단 상태에만 rollback 경로 사용
 
 등록 한도 초과는 `ProfileRegistry`와 capture gate에서 모두 거부한다.
 
@@ -500,7 +501,7 @@ registry alone 또는 journal alone으로 commit을 추론하지 않는다. phas
 | `refreshingCurrent` | source-valid이면 기본 홈 Helper-owned App Server의 `true` refresh와 current credential-store save를 idempotent하게 완료한다. source-valid가 아니면 stored previous를 복구한다. 어느 분기든 previous 이메일과 registry previous를 확인하고 journal을 durable delete해 전환을 안전 취소한다. |
 | `currentSaved` | active가 exact previous면 current credential store도 previous인지 확인하고 안전 취소한다. exact target이면 previous rollback을 시작하며 다른 신원·판독 불가는 STOP한다. |
 | `validatingTarget` | 남은 isolated home/probe를 Helper-owned 여부로 정리한다. exact previous인 일반 switch는 안전 취소하고, exact target인 재로그인은 configured source를 복원·검증한다. 다른 신원·판독 불가는 STOP한다. registry previous를 유지하며 검증 저장된 target blob·해제된 marker는 보존할 수 있지만 forward switch는 재개하지 않는다. |
-| `targetValidated` | rename crash window를 고려해 active를 판독한다. previous면 journal을 durable delete해 안전 취소하고, target이면 `rollbackStarted`를 기록해 previous rollback한다. 다른 신원·판독 불가는 STOP한다. |
+| `targetValidated` | rename crash window를 고려해 active를 판독한다. 일반 switch는 previous면 journal을 durable delete해 안전 취소하고 target이면 `rollbackStarted`를 기록해 previous rollback한다. 추가 등록은 registry target·exact target auth·target capture marker가 함께 일치할 때만 `targetVerified`로 전진해 정리한다. 다른 신원·판독 불가는 STOP한다. |
 | `authReplaced` | target launch를 재개하지 않는다. 관련 process가 실행 중이면 종료하지 않고 STOP하며, process gate가 깨끗할 때만 previous rollback한다. |
 | `targetLaunched` | 관련 process가 실행 중이면 종료하지 않고 STOP한다. 사용자가 모두 종료한 뒤 다음 자동 복구에서 previous rollback한다. |
 | `verifyingTarget` | 관련 process가 실행 중이면 종료하지 않고 STOP한다. gate가 깨끗하면 previous rollback하며 network 실패는 target revocation이나 `needsRelogin` 근거로 사용하지 않는다. |
@@ -512,7 +513,7 @@ previous rollback 중 어떤 단계든 실패하면 `rollbackFailed`를 durable�
 
 ## 11. CLI 인터페이스
 
-`inspect`, `profiles list`, 최대 3개의 `profile capture`, 추가 등록 후 등록 전 활성 프로필 자동 복귀, `profile sync-active`, 일반 `switch`, `recovery status`, `recovery restore`는 구현됐다. `verify`, `cleanup`은 예정 인터페이스다.
+`inspect`, `profiles list`, 최대 3개의 `profile capture`, 추가 등록 계정 활성 유지, `profile sync-active`, 일반 `switch`, `recovery status`, `recovery restore`는 구현됐다. `verify`, `cleanup`은 예정 인터페이스다.
 
 ```text
 codex-account-spike inspect

@@ -297,7 +297,7 @@ preparing
 | `refreshingCurrent` | process gate 후 active가 source로 유효하면 `refreshToken: true`와 configured-store 저장을 멱등 완료하고, active가 missing/corrupt/mismatch면 configured-store source를 복원한다. 어느 분기든 source 이메일·registry previous를 확인하고 journal을 내구 삭제해 안전 취소 |
 | `currentSaved` | exact source면 configured store의 최신 source를 확인하고 안전 취소, exact target이면 이전본 롤백, 다른 신원·판독 불가는 `STOP` |
 | `validatingTarget` | 남은 verifier·임시 홈을 정리한다. exact source인 일반 switch는 안전 취소하고, exact target인 재로그인은 configured source credential을 복원·검증한다. 다른 신원·판독 불가는 `STOP`한다. registry previous를 유지하며 검증 저장된 target blob·해제된 marker는 보존 가능 |
-| `targetValidated` | rename crash window를 고려해 active를 판독한다. source면 journal을 내구 삭제해 안전 취소, target이면 `rollbackStarted`로 전환해 source 롤백, 둘 다 아니면 `STOP` |
+| `targetValidated` | 일반 switch는 source면 journal을 내구 삭제해 안전 취소하고 target이면 `rollbackStarted`로 전환해 source 롤백한다. 추가 등록은 registry target·exact target auth·target capture marker가 함께 일치할 때만 `targetVerified`로 전진해 정리하며, 그 외는 `STOP` |
 | `authReplaced` | 관련 process가 실행 중이면 종료하지 않고 `STOP`; gate가 깨끗할 때만 이전본 롤백 |
 | `targetLaunched`~`verifyingTarget` | 관련 process가 실행 중이면 종료하지 않고 `STOP`; 사용자가 모두 종료한 뒤 다음 자동 복구에서 이전본 롤백 |
 | `targetVerified` | active auth 복사본·configured target·marker 재검증 후 registry 내구 commit→journal unlink→parent `fsync`; typed `target-unverified`만 이전본 롤백, process·registry race·verifier 종료 미확인·내구성 불확실은 `STOP` |

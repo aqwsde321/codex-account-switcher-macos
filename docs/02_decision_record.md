@@ -303,15 +303,15 @@
 - 상태: 승인
 - 결정:
   - Spike와 MVP 초기 버전은 사용자가 공식 `codex login`으로 정상 로그인한 인증을 helper가 캡처한다.
-  - 추가 프로필 등록이 끝나면 helper가 등록 시작 전 활성 프로필을 자동 복원한다.
+  - 추가 프로필 등록 성공 후 active 정책은 ADR-032가 이 결정을 대체한다.
   - 전환 가설이 입증된 뒤 격리된 임시 `CODEX_HOME`의 app-server 로그인 흐름을 추가할 수 있다.
 - 이유:
   - 공식 로그인 경로를 그대로 사용해 OAuth 세부 구현을 피한다.
   - 로그인 UI보다 계정 전환 안전성 검증이 먼저다.
-  - 추가 등록 후 자동 복귀가 사용자의 원래 작업 상태를 보존한다.
+  - 당시에는 추가 등록 후 자동 복귀가 사용자의 원래 작업 상태를 보존한다고 판단했다. ADR-032에서 실제 token 폐기 위험을 근거로 변경했다.
 - 기각 대안:
   - 처음부터 직접 OAuth/device-code 구현: client ID, scope, refresh 계약 유지보수 위험이 있다.
-  - 계정 추가 후 새 계정을 활성 상태로 둠: 사용자가 원래 계정으로 돌아가는 추가 절차가 필요하다.
+  - 계정 추가 후 새 계정을 활성 상태로 둠: 당시에는 사용자가 원래 계정으로 돌아가는 추가 절차를 단점으로 봤다. ADR-032가 재평가했다.
 - 재검토 트리거:
   - Spike 통과와 메뉴바 전환 안정화
   - 공식 app-server 로그인 API의 지속 가능성 확인
@@ -481,7 +481,7 @@
 - 결정:
   - 메뉴바 UI, registry, 등록 정책은 서로 다른 이메일의 프로필을 최대 3개 허용한다.
   - 네 번째 등록은 기존 auth, credential store, registry를 바꾸지 않고 거부한다.
-  - 추가 등록 후에는 등록 시작 전 활성 프로필을 검증 복원한다.
+  - 추가 등록 성공 후 active 정책은 ADR-032가 대체한다.
   - 기존 배열·profile UUID·registry schema를 유지하므로 migration은 없다.
 - 이유:
   - 메뉴바 UI 구현 전 실제 3계정 요구가 확인됐다.
@@ -547,7 +547,7 @@
   - 삭제 범위는 메뉴바 registry의 해당 프로필과 profile UUID로 저장한 Keychain item이다. OpenAI 계정, 현재 `~/.codex/auth.json`, 현재 Codex 로그인은 변경하지 않는다.
   - `profile-removal.json`을 먼저 내구 기록한 뒤 Keychain item→registry profile→삭제 marker 순서로 제거한다. 중단되면 시작 자동 복구가 같은 순서를 멱등 재개한다.
   - 삭제 marker와 전환 journal이 함께 존재하는 모순 상태는 둘 다 보존하고 `STOP`한다.
-  - 삭제 뒤 같은 계정으로 공식 앱에 로그인해 같은 라벨·이메일로 다시 등록할 수 있다. 재등록은 새 profile UUID를 사용하며 기존 활성 프로필로 복귀한다.
+  - 삭제 뒤 같은 계정으로 공식 앱에 로그인해 같은 라벨·이메일로 다시 등록할 수 있다. 재등록은 새 profile UUID를 사용하며 ADR-032에 따라 재등록 계정을 active로 유지한다.
 - 이유:
   - 활성 프로필 삭제는 현재 로그인과 registry의 기준점을 불명확하게 만든다.
   - Keychain과 registry는 원자 transaction을 공유하지 않으므로 삭제 의도를 먼저 남겨야 crash 뒤 고아 credential 또는 깨진 profile을 정리할 수 있다.
@@ -559,6 +559,27 @@
 - 재검토 트리거:
   - 공식 앱이 안정적인 다중 계정 제거 API를 제공함
   - OpenAI 계정 로그아웃·폐기까지 포함한 별도 명시 기능 요구가 확정됨
+
+## ADR-032: 추가 등록 성공 후 새 계정을 활성 상태로 유지한다
+
+- 상태: 승인 (2026-08-03)
+- 결정:
+  - 추가 등록은 새 credential과 registry를 저장한 뒤 journal을 `targetVerified`로 확정하고 새 프로필을 active로 유지한다.
+  - active auth와 새 저장본 일치를 확인한 뒤 capture marker와 journal을 내구 삭제하고 새 계정으로 공식 앱을 다시 연다.
+  - 성공 경로에서는 등록 전 프로필을 온라인 갱신하거나 공용 인증으로 복원하지 않는다.
+  - 커밋 전 실패와 기존 `rollbackFailed` 중단 상태의 이전 계정 복구는 유지한다.
+- 이유:
+  - 공식 앱에서 A를 로그아웃하고 B로 로그인하면 저장된 A refresh token이 더는 갱신되지 않을 수 있다. B 저장 성공을 A 복구 성공에 종속하면 새 등록마다 `rollbackFailed`가 반복된다.
+  - 사용자는 이미 B로 로그인했으므로 B를 유지하면 즉시 A→B 재전환하는 중복 작업도 사라진다.
+  - B credential, registry active, `targetVerified`, auth identity를 함께 검증하면 기존 journal finalization과 recovery gate를 재사용할 수 있다.
+  - registry B 저장 직후 중단된 `targetValidated`는 exact B auth와 B capture marker가 모두 일치할 때만 `targetVerified`로 전진 복구한다.
+- 기각 대안:
+  - 등록 뒤 A 자동 복원: A token 폐기 시 정상 B 등록까지 실패 처리한다.
+  - A 복원 실패를 무시하고 journal만 삭제: active auth·registry·복구 증거 불일치를 숨긴다.
+- 대체 범위: ADR-016·ADR-028의 추가 등록 성공 후 active 정책과 ADR-031의 재등록 후 active 정책을 대체한다. 일반 전환 실패 rollback과 수동 복구 계약은 바꾸지 않는다.
+- 재검토 트리거:
+  - 공식 앱이 다른 계정 session을 폐기하지 않는 격리 계정 추가 API를 제공함
+  - 등록 완료 뒤 특정 계정을 선택하는 명시 UI 요구가 확정됨
 
 ## 2. 결정 간 핵심 제약
 

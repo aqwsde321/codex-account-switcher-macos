@@ -79,6 +79,15 @@ func recoveryPlannerTests() -> [TestCase] {
                 previous: previous,
                 target: target
             )
+            let capturedTargetAlreadyInstalled = RecoverySnapshot(
+                journal: recoveryJournal(phase: .targetValidated, previous: previous, target: target),
+                knownProfileIDs: [previous, target],
+                registryActiveProfileID: target,
+                helperChildAlive: false,
+                durabilityUnknown: false,
+                activeCredential: .target,
+                captureRecoveryPending: true
+            )
             let unreadable = recoverySnapshot(
                 phase: .targetValidated,
                 activeCredential: .unreadable,
@@ -93,6 +102,10 @@ func recoveryPlannerTests() -> [TestCase] {
             try expect(
                 RecoveryPlanner.plan(targetAlreadyInstalled) == .restorePrevious,
                 "target-active rename window did not roll back"
+            )
+            try expect(
+                RecoveryPlanner.plan(capturedTargetAlreadyInstalled) == .commitVerifiedTarget,
+                "committed capture targetValidated window did not recover forward"
             )
             try expect(
                 RecoveryPlanner.plan(unreadable) == .stop(.activeCredentialUnverified),

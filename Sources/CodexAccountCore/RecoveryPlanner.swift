@@ -113,6 +113,11 @@ public enum RecoveryPlanner {
                 return .stop(.activeCredentialUnverified)
             }
         case .targetValidated:
+            if snapshot.captureRecoveryPending,
+               snapshot.registryActiveProfileID == target,
+               snapshot.activeCredential == .target {
+                return .commitVerifiedTarget
+            }
             return actionForPreviousOrRollback(snapshot.activeCredential, previousAction: .cancelValidatedSource)
         case .authReplaced, .targetLaunched, .verifyingTarget:
             return actionForKnownCredential(snapshot.activeCredential, action: .restorePrevious)

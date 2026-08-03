@@ -209,9 +209,9 @@ func menuBarViewModelTests() -> [TestCase] {
             try expect(labelsAfterAdditional == ["개인", "회사"], "additional registration label changed")
             try expect(
                 profilesAfterAdditional.count == 2
-                    && profilesAfterAdditional[0].active
-                    && !profilesAfterAdditional[1].active,
-                "additional registration changed the existing active profile"
+                    && !profilesAfterAdditional[0].active
+                    && profilesAfterAdditional[1].active,
+                "additional registration did not activate the new profile"
             )
 
             let launchFailureProvider = MenuBarProviderSpy(
@@ -244,6 +244,30 @@ func menuBarViewModelTests() -> [TestCase] {
             try expect(
                 launchFailureMessage == "계정은 등록했지만 Codex 앱을 다시 열지 못했습니다.",
                 "post-commit launch failure was not distinguished from registration failure"
+            )
+
+            let precommitFailureProvider = MenuBarProviderSpy(
+                profiles: [menuBarProfiles()[0]],
+                captureFailureAfterMutation: true,
+                captureRecoveryStatusAfterFailure: .none,
+                captureActivatesProfile: false
+            )
+            let precommitFailureModel = await makeMenuBarModel(provider: precommitFailureProvider)
+            await precommitFailureModel.load()
+            let precommitSucceeded = await precommitFailureModel.register(label: "회사")
+            let precommitProfiles = await MainActor.run { precommitFailureModel.profiles }
+            let precommitMessage = await MainActor.run { precommitFailureModel.errorMessage }
+
+            try expect(!precommitSucceeded, "inactive preserved profile was reported as committed")
+            try expect(
+                precommitProfiles.count == 2
+                    && precommitProfiles[0].active
+                    && !precommitProfiles[1].active,
+                "pre-commit rollback state was not reloaded"
+            )
+            try expect(
+                precommitMessage == "계정 등록을 완료하지 못했습니다.",
+                "pre-commit failure was reported as a launch failure"
             )
 
             let partialFailureProvider = MenuBarProviderSpy(
@@ -1098,6 +1122,7 @@ private actor MenuBarProviderSpy {
     private var storedProfiles: [ProfileListItem]
     private let applicationIsRunning: Bool
     private let captureFailureAfterMutation: Bool
+    private let captureActivatesProfile: Bool
     private let captureRecoveryStatusAfterFailure: RecoveryCLIStatus
     private let syncFailureAfterMutation: Bool
     private let switchFailureAfterProgress: Bool
@@ -1133,6 +1158,7 @@ private actor MenuBarProviderSpy {
                 UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
             )
         ),
+        captureActivatesProfile: Bool = true,
         syncFailureAfterMutation: Bool = false,
         switchFailureAfterProgress: Bool = false,
         recoveryStatus: RecoveryCLIStatus = .none,
@@ -1146,6 +1172,7 @@ private actor MenuBarProviderSpy {
         storedProfiles = profiles
         self.applicationIsRunning = applicationIsRunning
         self.captureFailureAfterMutation = captureFailureAfterMutation
+        self.captureActivatesProfile = captureActivatesProfile
         self.captureRecoveryStatusAfterFailure = captureRecoveryStatusAfterFailure
         self.syncFailureAfterMutation = syncFailureAfterMutation
         self.switchFailureAfterProgress = switchFailureAfterProgress
@@ -1194,11 +1221,22 @@ private actor MenuBarProviderSpy {
             throw MenuBarProviderSpyFailure.captureFailed
         }
         capturedLabels.append(label)
+        if captureActivatesProfile {
+            storedProfiles = storedProfiles.map {
+                ProfileListItem(
+                    id: $0.id,
+                    label: $0.label,
+                    email: $0.email,
+                    active: false,
+                    needsRelogin: $0.needsRelogin
+                )
+            }
+        }
         let profile = ProfileListItem(
             id: ProfileID(UUID()),
             label: label,
             email: "captured@example.invalid",
-            active: storedProfiles.isEmpty,
+            active: captureActivatesProfile,
             needsRelogin: false
         )
         storedProfiles.append(profile)

@@ -405,7 +405,7 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
                 journal: journal,
                 in: store
             )
-            journal = try markReloginTargetVerified(journal, in: store)
+            journal = try markTargetVerified(journal, in: store)
 
             let activated = try commitReloginProfile(
                 preparedTarget,
@@ -916,11 +916,7 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
                     throw LocalCLIDataProviderFailure.invalidCaptureState
                 }
                 previous = activeProfile
-                _ = try await validatedCredential(
-                    credentialStore.loadCredential(for: activeProfile.id),
-                    expectedEmail: activeProfile.email,
-                    descriptor: descriptor
-                )
+                _ = try credentialStore.loadCredential(for: activeProfile.id)
             } else {
                 previous = nil
             }
@@ -1104,10 +1100,18 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
             guard try store.loadRegistry() == registry else {
                 throw LocalCLIDataProviderFailure.registryRoundTripFailed
             }
-            try await restoreOriginalAfterCapture(
-                store: store,
-                captureProfileID: profile.id,
-                originalRegistry: original
+            try requireCapturedAuthUnchanged()
+            _ = try markTargetVerified(targetValidated, in: store)
+            try requireCapturedAuthUnchanged()
+            _ = try store.removeCaptureProfileID()
+            guard try store.loadCaptureProfileIDIfPresent() == nil,
+                  let capturedAuthIdentity else {
+                throw LocalCLIDataProviderFailure.invalidCaptureState
+            }
+            try finalizeJournal(
+                in: store,
+                expectedActiveProfileID: profile.id,
+                expectedActiveAuthIdentity: capturedAuthIdentity
             )
             return
         } else {
@@ -1139,6 +1143,9 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
             throw LocalCLIDataProviderFailure.rollbackUnavailable
         }
         if let originalRegistry = captureOriginalRegistry {
+            if try store.loadJournalIfPresent()?.phase == .targetVerified {
+                return
+            }
             try await restoreOriginalAfterCapture(
                 store: store,
                 captureProfileID: captureProfileID,
@@ -1520,6 +1527,15 @@ extension LocalCLIDataProvider: SwitchTransactionDriving {
               try files.snapshot(at: activeAuthURL) == expectedDestination else {
             throw LocalCLIDataProviderFailure.registryRoundTripFailed
         }
+        if let journal = try context.store.loadJournalIfPresent(),
+           journal.phase == .targetValidated {
+            guard current.activeProfileID == profileID,
+                  journal.targetProfileID == profileID,
+                  try context.store.loadCaptureProfileIDIfPresent() == profileID else {
+                throw LocalCLIDataProviderFailure.registryRoundTripFailed
+            }
+            _ = try markTargetVerified(journal, in: context.store)
+        }
         let updated = try ProfileRegistry(activeProfileID: profileID, profiles: current.profiles)
         if current != updated {
             _ = try context.store.saveRegistry(updated)
@@ -1678,7 +1694,12 @@ extension LocalCLIDataProvider: RecoveryExecuting {
         if let captureProfileID {
             captureMarkerIsRecoverable = captureProfileID == journal.targetProfileID
                 && registry.profiles.last?.id == captureProfileID
-                && (journal.phase == .rollbackStarted || journal.phase == .rollbackFailed)
+                && (
+                    journal.phase == .targetValidated
+                        || journal.phase == .targetVerified
+                        || journal.phase == .rollbackStarted
+                        || journal.phase == .rollbackFailed
+                )
         } else {
             captureMarkerIsRecoverable = true
         }
@@ -1716,6 +1737,9 @@ extension LocalCLIDataProvider: RecoveryExecuting {
             )
         }
         let registryMatchesPhase = switch journal.phase {
+        case .targetValidated:
+            activeProfileID == previous.id
+                || (captureProfileID != nil && activeProfileID == target.id)
         case .targetVerified, .rollbackStarted, .rollbackFailed:
             activeProfileID == previous.id || activeProfileID == target.id
         default:
@@ -2256,7 +2280,7 @@ private extension LocalCLIDataProvider {
         return (store, descriptor, registry)
     }
 
-    func markReloginTargetVerified(
+    func markTargetVerified(
         _ journal: SwitchJournalRecord,
         in store: SpikeStore
     ) throws -> SwitchJournalRecord {
@@ -2268,7 +2292,7 @@ private extension LocalCLIDataProvider {
             startedAt: journal.startedAt,
             updatedAt: Date(timeIntervalSince1970: Date().timeIntervalSince1970.rounded(.down))
         )
-        _ = try store.updateVerifiedReloginJournal(updated)
+        _ = try store.updateVerifiedTargetJournal(updated)
         return updated
     }
 

@@ -129,10 +129,10 @@ flowchart TD
 
 ### 3.2 추가 계정 등록
 
-1. 등록 시작 전 활성 프로필의 최신 인증이 안전하게 저장돼 있는지 확인한다.
+1. 등록 시작 전 활성 프로필의 저장 인증이 존재하는지 확인한다.
 2. 사용자가 명시적으로 추가 계정 등록을 시작한다.
 3. 공식 `codex login` 또는 공식 로그인 UI로 다른 ChatGPT 계정에 로그인한다.
-4. 사용자가 공식 앱 정상 종료·등록·기존 활성 계정 복귀를 승인한다.
+4. 사용자가 공식 앱 정상 종료·등록·새 계정 활성 유지를 승인한다.
 5. Helper가 recovery 부재·3계정 상한·앱 호환성을 먼저 확인한다.
 6. Helper가 정상 종료와 ADR-009의 잔존 프로세스 경계를 적용한다. 독립 Codex CLI·IDE가 있으면 자동 종료하지 않고 중단한다.
 7. Helper가 활성 이메일이 기존 프로필과 다르고 아직 등록되지 않았음을 감지한다.
@@ -140,7 +140,7 @@ flowchart TD
    - 새 프로필로 등록
    - 현재 외부 로그인 변경을 폐기하고 기존 프로필 복구
 9. 등록을 선택하면 새 프로필 인증을 검증·저장한다.
-10. 등록 완료 후 등록 시작 전 활성 계정으로 돌아가 앱을 다시 연다.
+10. 새 프로필을 active로 확정하고 capture marker와 journal을 내구 삭제한 뒤 새 계정으로 앱을 다시 연다. 성공 경로에서는 이전 프로필을 온라인 갱신하거나 복원하지 않는다.
 
 후속 버전에서는 격리된 임시 `CODEX_HOME`의 App Server 로그인 흐름으로 프로필을 추가할 수 있다. 이 기능은 기본 전환 Spike가 통과한 뒤에만 추가한다.
 
@@ -189,7 +189,7 @@ flowchart TD
 5. `profile-removal.json`에 `schemaVersion, transactionId, profileId, expectedActiveProfileId`만 내구 기록한다.
 6. Keychain item 멱등 삭제→registry profile 내구 삭제→삭제 marker 내구 삭제 순서로 완료한다. `auth.json`과 활성 프로필은 쓰지 않는다.
 7. 중단되면 시작 자동 복구가 같은 순서를 재개한다. 삭제 marker와 전환 journal이 함께 있거나 예상 active ID가 바뀌었으면 자동 추정 없이 둘 다 보존하고 STOP한다.
-8. 완료 뒤 프로필 슬롯과 라벨·이메일 중복 제약이 해제된다. 사용자는 같은 계정으로 공식 앱에 로그인해 같은 라벨·이메일로 다시 등록할 수 있으며 새 profile ID가 발급되고 등록 시작 전 활성 계정으로 복귀한다.
+8. 완료 뒤 프로필 슬롯과 라벨·이메일 중복 제약이 해제된다. 사용자는 같은 계정으로 공식 앱에 로그인해 같은 라벨·이메일로 다시 등록할 수 있으며 새 profile ID가 발급되고 재등록 계정이 active로 유지된다.
 
 ### 3.5 전환 실패와 자동 롤백
 
@@ -212,7 +212,7 @@ flowchart TD
 2. transaction lock을 먼저 획득하고 secret-free journal 전체를 읽어 schema, phase, UUID, 시각, registry·marker 정합성을 검증한다. 잘리거나 모순된 상태면 쓰지 않고 STOP한다.
 3. `refreshingCurrent`에서 중단됐다면 process gate 후 active source refresh/save를 멱등 완료하거나 저장된 source를 복원·검증한다. 실패하면 `rollbackFailed`를 내구 기록해 다음 자동 시도를 막는다.
 4. `quiescent`·`currentSaved`는 exact source면 안전 취소하고 exact target이면 source rollback한다. 제3 신원·판독 불가는 STOP한다. `validatingTarget`의 일반 switch는 source를 확인하고, 재로그인은 설치된 target을 식별한 뒤 source를 복원한다. 검증 저장된 target credential과 해제된 marker는 보존할 수 있다.
-5. `targetValidated`부터 `verifyingTarget`까지는 관련 process가 없을 때만 source rollback으로 수렴한다. 실행 중 process가 있으면 종료하지 않고 STOP하며 target launch를 재개하지 않는다.
+5. 일반 switch의 `targetValidated`부터 `verifyingTarget`까지는 관련 process가 없을 때만 source rollback으로 수렴한다. 추가 등록의 registry target·exact target auth·capture marker가 모두 일치하는 `targetValidated`만 `targetVerified`로 전진 복구한다. 실행 중 process가 있으면 종료하지 않고 STOP하며 target launch를 재개하지 않는다.
 6. `targetVerified`에서 exact target auth·configured credential·marker·registry가 일치할 때만 target commit을 완료한다. registry가 이미 target이면 중복 write 없이 journal 정리만 완료한다.
 7. target verifier의 typed `target-unverified`는 source rollback한다. process·registry race, verifier 종료 미확인, 내구성 불확실은 auth/registry를 쓰지 않고 STOP한다.
 8. `rollbackFailed`는 terminal이다. 자동 auth write, workspace 정리, 앱 실행 없이 수동 복구만 허용한다.

@@ -158,23 +158,23 @@ JWT를 디코딩하거나 token field를 로그에 출력해 신원을 추정하
 
 초기 Spike에서는 별도 `CODEX_HOME` 기반 자동 로그인을 구현하지 않는다. A를 먼저 안전하게 보존한 후 공식 Codex 로그인 흐름으로 B를 로그인하고 캡처한다.
 
-1. `profile-a`가 완전하고 복구 가능함을 먼저 확인한다.
+1. `profile-a` 저장본과 `recovery=none`을 먼저 확인한다.
 2. 독립 Codex CLI·IDE 작업을 종료한다.
 3. 사용자가 공식 앱의 interactive login 흐름으로 B에 로그인한다.
-4. 사용자가 `CAPTURE`로 등록과 공식 앱 정상 종료·A 복귀를 승인한다. helper는 A 등록과 같은 잔존 프로세스 경계를 적용한다.
+4. 사용자가 `CAPTURE`로 등록과 공식 앱 정상 종료·B 활성 유지를 승인한다. helper는 A 등록과 같은 잔존 프로세스 경계를 적용한다.
 5. 기본 `~/.codex`를 사용하는 Helper 소유 verifier의 `account/read(refreshToken: true)`로 B 이메일을 확인한다.
 6. B 이메일이 A와 같으면 등록을 거부한다.
 7. active auth를 Spike private store의 `profile-b` 파일에 durable하게 저장하고 JSON 가독성·round-trip 동일성을 확인한다.
-8. 즉시 A 인증을 원자적으로 복구한다.
-9. 복구된 active auth를 격리 임시 홈에 복사하고 Helper 소유 verifier의 `account/read(refreshToken: false)`로 A 이메일인지 확인한다.
-10. registry의 active profile A를 durable하게 확인·기록하고 등록 journal을 durable delete한다.
-11. 위 정리가 끝난 후에만 공식 앱을 A로 재실행한다.
-12. A 복구까지 성공해야 B 등록을 완료로 기록한다.
+8. registry의 active profile을 B로 durable하게 기록하고 journal을 `targetVerified`로 확정한다.
+9. active B 인증과 저장 B가 동일한지 재확인한 뒤 capture marker와 journal을 durable delete한다.
+10. 위 정리가 끝난 후에만 공식 앱을 B로 재실행한다.
+11. 성공 경로에서는 A 저장본을 갱신하거나 공용 인증으로 복원하지 않는다.
+12. A가 필요하면 등록 완료 뒤 일반 전환을 별도로 실행한다.
 
 예정 인터페이스 예시:
 
 ```text
-[예정 인터페이스] switcher register-second --profile profile-b --restore profile-a
+[예정 인터페이스] switcher register-second --profile profile-b
 ```
 
 등록 중 사용한 공식 로그인 프로세스는 controlled exception이다. 캡처나 교체 전에는 반드시 종료되어야 하며, 이후 잔존하면 프로세스 게이트가 차단한다.
@@ -492,7 +492,7 @@ journal은 §9의 고정 7필드만 가진다: `schemaVersion`, `transactionId`,
 - `refreshingCurrent`: refresh가 실행됐는지 추측하지 않는다. process gate 후 안전하면 기본 홈 Helper App Server의 `refreshToken: true`와 source private-store save를 idempotent하게 완료하고, 그렇지 않으면 마지막 durable source private-store blob을 active에 복원한다. source 이메일·registry previous를 확인한 뒤 전환을 안전 취소한다. 둘 다 실패하면 `rollbackFailed` 후 STOP한다.
 - `currentSaved`: exact source면 durable source private-store blob을 확인하고 안전 취소한다. exact target이면 source rollback하며 다른 신원·판독 불가는 STOP한다.
 - `validatingTarget`: 남은 verifier와 임시 홈을 정리한다. exact source인 일반 switch는 안전 취소하고, exact target인 재로그인은 configured source를 복원한다. 다른 신원·판독 불가는 STOP한다. registry previous를 유지하며 검증된 target 저장본·해제된 marker는 보존할 수 있고 forward switch는 재개하지 않는다.
-- `targetValidated`: active가 source인지 target인지 격리 verifier로 확인한다. source면 안전 취소하고, target이면 source rollback한다. 어느 쪽도 아니면 STOP한다.
+- `targetValidated`: 일반 switch는 active가 source면 안전 취소하고 target이면 source rollback한다. 추가 등록은 registry target·exact target auth·capture marker가 모두 일치할 때만 `targetVerified`로 전진해 marker와 journal을 정리한다. 어느 쪽도 아니면 STOP한다.
 - `authReplaced`: target launch를 재개하지 않는다. 관련 process가 실행 중이면 종료하지 않고 STOP하며, process gate가 깨끗할 때만 source rollback한다.
 - `targetLaunched`~`verifyingTarget`: 관련 process가 실행 중이면 종료하지 않고 STOP하며, 사용자가 모두 종료한 뒤 다음 자동 복구에서 source rollback한다.
 - `targetVerified`: active target 이메일·configured target·marker를 격리 verifier와 저장소로 다시 확인한다. registry가 previous면 target으로 durable commit하고, 이미 target이면 중복 write 없이 확인한다. 그 뒤 journal을 unlink하고 parent directory를 fsync한다. typed `target-unverified`만 source rollback하며 process·registry race, verifier 종료 미확인, 내구성 불확실은 STOP한다.
@@ -585,7 +585,7 @@ journal은 §9의 고정 7필드만 가진다: `schemaVersion`, `transactionId`,
 - [ ] 공식 로그인 흐름으로 B 등록
 - [ ] B 이메일이 A와 다름
 - [ ] profile-b 저장
-- [ ] A 자동 복원·이메일 검증 후 재실행
+- [ ] B active·재실행, A 저장본 무변경, recovery none 확인
 
 ### 매 전환
 
