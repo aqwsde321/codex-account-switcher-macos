@@ -790,13 +790,60 @@ func menuBarViewModelTests() -> [TestCase] {
             try expect(switchTargets.isEmpty, "relogin called the normal switch path")
             try expect(profiles.filter(\.active).count == 1, "relogin produced multiple active profiles")
             try expect(
-                profiles.contains { $0.id == target.id && $0.active && !$0.needsRelogin },
-                "relogin did not activate the verified target"
+                profiles.contains { $0.id == target.id && !$0.active && !$0.needsRelogin },
+                "relogin did not refresh the inactive target"
             )
             try expect(
-                statusMessage == "회사 계정 재로그인을 반영했습니다. Codex 앱을 직접 여세요.",
-                "relogin success did not require manual app launch"
+                profiles.contains { $0.id != target.id && $0.active },
+                "relogin changed the active source"
             )
+            try expect(
+                statusMessage == "회사 계정 인증을 갱신했습니다. 현재 계정은 유지됩니다. 전환하려면 계정을 다시 선택하세요.",
+                "relogin success did not explain the preserved active account"
+            )
+        },
+        TestCase("MenuBarViewModel cancels an isolated profile login without mutation") {
+            let initialProfiles = menuBarReloginProfiles()
+            let provider = MenuBarProviderSpy(profiles: initialProfiles)
+            let cancellation = ProfileLoginCancellationProbe()
+            let model = await makeMenuBarModel(
+                provider: provider,
+                reloginProfile: { try await cancellation.relogin(target: $0) },
+                cancelProfileLogin: { await cancellation.cancel() }
+            )
+            await model.load()
+            guard let target = await MainActor.run(body: {
+                model.profiles.first(where: { !$0.active && $0.needsRelogin })
+            }) else {
+                throw TestFailure(description: "cancel fixture has no relogin target")
+            }
+
+            await model.select(target)
+            let reloginTask = Task { await model.confirmRelogin(target) }
+            await cancellation.waitUntilStarted()
+            let inProgress = await MainActor.run { model.isProfileLoginInProgress }
+            try expect(inProgress, "profile login did not expose cancellable progress")
+
+            await model.cancelProfileLogin()
+            await reloginTask.value
+
+            let cancelCount = await cancellation.cancelCount
+            let targets = await cancellation.targets
+            let profiles = await MainActor.run { model.profiles }
+            let statusMessage = await MainActor.run { model.statusMessage }
+            let errorMessage = await MainActor.run { model.errorMessage }
+            let isWorking = await MainActor.run { model.isWorking }
+            let isLoginInProgress = await MainActor.run { model.isProfileLoginInProgress }
+            try expect(cancelCount == 1, "profile login cancellation did not reach Core exactly once")
+            try expect(targets == [target.id.description], "cancelled login changed the exact target")
+            try expect(profiles == initialProfiles, "cancelled login mutated source or target state")
+            try expect(
+                statusMessage == "로그인을 취소했습니다. 현재 계정과 저장된 인증은 바뀌지 않았습니다.",
+                "cancelled login did not report preserved account state"
+            )
+            try expect(errorMessage == nil, "cancelled login was reported as an error")
+            try expect(!isWorking, "cancelled login left the menu busy")
+            try expect(!isLoginInProgress, "cancelled login left cancellation controls visible")
         },
         TestCase("MenuBarViewModel rejects a stale relogin confirmation") {
             let profiles = menuBarReloginProfiles()
@@ -827,51 +874,6 @@ func menuBarViewModelTests() -> [TestCase] {
             try expect(reloginTargets.isEmpty, "stale relogin confirmation reached Core")
             try expect(recoveryRequired, "stale relogin confirmation ignored recovery state")
         },
-        TestCase("MenuBarViewModel reconciles uncertain relogin once") {
-            let blockedProvider = MenuBarProviderSpy(
-                profiles: menuBarReloginProfiles(),
-                reloginOutcome: .journalFinalizationUncertain,
-                recoveryStatusAfterRelogin: .blocked
-            )
-            let blockedModel = await makeMenuBarModel(provider: blockedProvider)
-            await blockedModel.load()
-            guard let blockedTarget = await MainActor.run(body: {
-                blockedModel.profiles.first(where: { !$0.active && $0.needsRelogin })
-            }) else {
-                throw TestFailure(description: "blocked relogin fixture has no target")
-            }
-            await blockedModel.select(blockedTarget)
-            await blockedModel.confirmRelogin()
-            await blockedModel.confirmRelogin(blockedTarget)
-            let blockedTargets = await blockedProvider.reloginTargets
-            let blockedError = await MainActor.run { blockedModel.errorMessage }
-            try expect(blockedTargets == [blockedTarget.id.description], "uncertain relogin retried Core")
-            try expect(
-                blockedError == "복구 상태가 불명확합니다. 계정 작업을 중단했습니다.",
-                "uncertain relogin did not remain stopped"
-            )
-
-            let reconciledProvider = MenuBarProviderSpy(
-                profiles: menuBarReloginProfiles(),
-                reloginOutcome: .journalFinalizationUncertain
-            )
-            let reconciledModel = await makeMenuBarModel(provider: reconciledProvider)
-            await reconciledModel.load()
-            guard let reconciledTarget = await MainActor.run(body: {
-                reconciledModel.profiles.first(where: { !$0.active && $0.needsRelogin })
-            }) else {
-                throw TestFailure(description: "reconciled relogin fixture has no target")
-            }
-            await reconciledModel.select(reconciledTarget)
-            await reconciledModel.confirmRelogin()
-            let reconciledMessage = await MainActor.run { reconciledModel.statusMessage }
-            let reconciledError = await MainActor.run { reconciledModel.errorMessage }
-            try expect(
-                reconciledMessage == "회사 계정 재로그인을 재확인했습니다. Codex 앱을 직접 여세요.",
-                "reconciled relogin did not report manual app launch"
-            )
-            try expect(reconciledError == nil, "reconciled relogin remained blocked")
-        },
         TestCase("MenuBarViewModel reconciles relogin throws from durable state") {
             let committedProvider = MenuBarProviderSpy(
                 profiles: menuBarReloginProfiles(),
@@ -891,7 +893,7 @@ func menuBarViewModelTests() -> [TestCase] {
             let committedError = await MainActor.run { committedModel.errorMessage }
             try expect(committedTargets == [committedTarget.id.description], "committed throw retried relogin")
             try expect(
-                committedStatus == "회사 계정 재로그인을 반영했습니다. Codex 앱을 직접 여세요.",
+                committedStatus == "회사 계정 인증을 갱신했습니다. 현재 계정은 유지됩니다. 전환하려면 계정을 다시 선택하세요.",
                 "committed throw was not reconciled from durable state"
             )
             try expect(committedError == nil, "committed throw remained an error")
@@ -946,7 +948,15 @@ func menuBarViewModelTests() -> [TestCase] {
             let wrongProfile = menuBarProfiles()[2]
             let provider = MenuBarProviderSpy(
                 profiles: menuBarReloginProfiles(),
-                reloginOutcome: .activated(restoredProfile(wrongProfile)),
+                reloginOutcome: .refreshed(
+                    ProfileListItem(
+                        id: wrongProfile.id,
+                        label: wrongProfile.label,
+                        email: wrongProfile.email,
+                        active: false,
+                        needsRelogin: false
+                    )
+                ),
                 failFirstProfileLoadAfterRelogin: true
             )
             let model = await makeMenuBarModel(provider: provider, useInjectedProfileLoad: true)
@@ -1079,12 +1089,52 @@ private actor RefreshOrderRecorder {
     }
 }
 
+private actor ProfileLoginCancellationProbe {
+    private var loginContinuation: CheckedContinuation<Void, Never>?
+    private var startedContinuation: CheckedContinuation<Void, Never>?
+    private var started = false
+    private var cancellationRequested = false
+    private(set) var cancelCount = 0
+    private(set) var targets = [String]()
+
+    func relogin(target: String) async throws -> ProfileReloginOutcome {
+        targets.append(target)
+        started = true
+        startedContinuation?.resume()
+        startedContinuation = nil
+        await withCheckedContinuation { continuation in
+            if cancellationRequested {
+                continuation.resume()
+            } else {
+                loginContinuation = continuation
+            }
+        }
+        throw CodexLoginFailure(code: .cancelled, childDisposition: .confirmedExited)
+    }
+
+    func waitUntilStarted() async {
+        guard !started else { return }
+        await withCheckedContinuation { continuation in
+            startedContinuation = continuation
+        }
+    }
+
+    func cancel() {
+        cancelCount += 1
+        cancellationRequested = true
+        loginContinuation?.resume()
+        loginContinuation = nil
+    }
+}
+
 private func makeMenuBarModel(
     provider: MenuBarProviderSpy,
     useInjectedProfileLoad: Bool = false,
     captureProfile: MenuBarViewModel.CaptureProfile? = nil,
     removeProfile: MenuBarViewModel.RemoveProfile? = nil,
-    retryPendingRecovery: MenuBarViewModel.RetryPendingRecovery? = nil
+    retryPendingRecovery: MenuBarViewModel.RetryPendingRecovery? = nil,
+    reloginProfile: MenuBarViewModel.ReloginProfile? = nil,
+    cancelProfileLogin: @escaping MenuBarViewModel.CancelProfileLogin = {}
 ) async -> MenuBarViewModel {
     await MainActor.run {
         MenuBarViewModel(
@@ -1099,7 +1149,8 @@ private func makeMenuBarModel(
             removeProfile: removeProfile ?? { try await provider.removeProfile($0) },
             syncActiveProfile: { try await provider.syncActiveProfile() },
             switchProfile: { try await provider.switchProfile(target: $0, onPhaseChange: $1) },
-            reloginProfile: { try await provider.reloginProfile(target: $0) },
+            reloginProfile: reloginProfile ?? { try await provider.reloginProfile(target: $0) },
+            cancelProfileLogin: cancelProfileLogin,
             restoreRecoveryProfile: {
                 try await provider.restoreRecoveryProfile(target: $0, expectedTransactionID: $1)
             },
@@ -1324,7 +1375,7 @@ private actor MenuBarProviderSpy {
                 id: profile.id,
                 label: profile.label,
                 email: profile.email,
-                active: profile.id == selected.id,
+                active: profile.active,
                 needsRelogin: profile.id == selected.id ? false : profile.needsRelogin
             )
         }
@@ -1336,7 +1387,7 @@ private actor MenuBarProviderSpy {
         guard let updated = storedProfiles.first(where: { $0.id == selected.id }) else {
             throw MenuBarProviderSpyFailure.missingProfile
         }
-        return reloginOutcome ?? .activated(updated)
+        return reloginOutcome ?? .refreshed(updated)
     }
 
     func restoreRecoveryProfile(

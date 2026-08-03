@@ -104,6 +104,7 @@ public struct AppServerProbeFailure: Error, Sendable, Equatable {
 
 public actor AppServerProbeSession {
     private let configuration: AppServerProbeConfiguration
+    private let didLaunch: @Sendable (Int32) throws -> Void
 
     private var used = false
     private var finished = false
@@ -122,8 +123,12 @@ public actor AppServerProbeSession {
     private var continuation: CheckedContinuation<AppServerAccountRead, Error>?
     private var timeoutTask: Task<Void, Never>?
 
-    public init(configuration: AppServerProbeConfiguration) {
+    public init(
+        configuration: AppServerProbeConfiguration,
+        didLaunch: @escaping @Sendable (Int32) throws -> Void = { _ in }
+    ) {
         self.configuration = configuration
+        self.didLaunch = didLaunch
     }
 
     public func run() async throws -> AppServerAccountRead {
@@ -174,12 +179,7 @@ private extension AppServerProbeSession {
             "app-server",
             "--stdio",
         ]
-        var environment = ProcessInfo.processInfo.environment
-        environment.removeValue(forKey: "CODEX_API_KEY")
-        environment.removeValue(forKey: "OPENAI_API_KEY")
-        environment["CODEX_HOME"] = configuration.codexHomeURL.path
-        environment["CODEX_SQLITE_HOME"] = configuration.codexHomeURL.path
-        process.environment = environment
+        process.environment = sanitizedCodexEnvironment(homeURL: configuration.codexHomeURL)
         process.standardInput = inputPipe
         process.standardOutput = outputPipe
         process.standardError = errorPipe
@@ -204,6 +204,31 @@ private extension AppServerProbeSession {
 
         do {
             try process.run()
+        } catch {
+            if process.isRunning {
+                beginFailure(
+                    AppServerProbeFailure(
+                        code: .launchFailed,
+                        stage: .launching,
+                        childDisposition: .unconfirmed,
+                        childPID: process.processIdentifier
+                    )
+                )
+            } else {
+                finish(
+                    .failure(
+                        AppServerProbeFailure(
+                            code: .launchFailed,
+                            stage: .launching,
+                            childDisposition: .notStarted
+                        )
+                    )
+                )
+            }
+            return
+        }
+        do {
+            try didLaunch(process.processIdentifier)
             stage = .initializing
             scheduleTimeout(configuration.timeouts.initializeResponse, expectedStage: .initializing)
             let initial = try machine.start(refreshToken: configuration.refreshToken)
@@ -211,14 +236,12 @@ private extension AppServerProbeSession {
         } catch let failure as AppServerProbeFailure {
             beginFailure(failure)
         } catch {
-            finish(
-                .failure(
-                    AppServerProbeFailure(
-                        code: .launchFailed,
-                        stage: .launching,
-                        childDisposition: process.isRunning ? .unconfirmed : .notStarted,
-                        childPID: process.isRunning ? process.processIdentifier : nil
-                    )
+            beginFailure(
+                AppServerProbeFailure(
+                    code: .launchFailed,
+                    stage: stage,
+                    childDisposition: process.isRunning ? .unconfirmed : .confirmedExited,
+                    childPID: process.processIdentifier
                 )
             )
         }

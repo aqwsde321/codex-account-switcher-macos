@@ -19,6 +19,7 @@ public final class MenuBarViewModel: ObservableObject {
         @escaping SwitchProgress
     ) async throws -> ProfileListItem
     public typealias ReloginProfile = @Sendable (String) async throws -> ProfileReloginOutcome
+    public typealias CancelProfileLogin = @Sendable () async -> Void
     public typealias RestoreRecoveryProfile = @Sendable (String, String) async throws -> RecoveryRestoreOutcome
     public typealias RetryPendingRecovery = @Sendable (String) async throws -> RecoveryOutcome
     public typealias AttemptAutomaticRecovery = @Sendable () async -> Void
@@ -31,6 +32,7 @@ public final class MenuBarViewModel: ObservableObject {
     @Published public private(set) var recoveryStatus = RecoveryCLIStatus.blocked
     @Published public private(set) var switchPhase: SwitchPhase?
     @Published public private(set) var isWorking = false
+    @Published public private(set) var isProfileLoginInProgress = false
     @Published public private(set) var errorMessage: String?
     @Published public private(set) var statusMessage: String?
 
@@ -41,6 +43,7 @@ public final class MenuBarViewModel: ObservableObject {
     private let syncActiveProfile: SyncActiveProfile
     private let switchProfile: SwitchProfile
     private let reloginProfile: ReloginProfile
+    private let cancelProfileLoginOperation: CancelProfileLogin
     private let restoreRecoveryProfile: RestoreRecoveryProfile
     private let retryPendingRecovery: RetryPendingRecovery?
     private let attemptAutomaticRecovery: AttemptAutomaticRecovery
@@ -53,6 +56,7 @@ public final class MenuBarViewModel: ObservableObject {
         syncActiveProfile: @escaping SyncActiveProfile,
         switchProfile: @escaping SwitchProfile,
         reloginProfile: @escaping ReloginProfile,
+        cancelProfileLogin: @escaping CancelProfileLogin = {},
         restoreRecoveryProfile: @escaping RestoreRecoveryProfile,
         retryPendingRecovery: RetryPendingRecovery? = nil,
         attemptAutomaticRecovery: @escaping AttemptAutomaticRecovery = {}
@@ -64,6 +68,7 @@ public final class MenuBarViewModel: ObservableObject {
         self.syncActiveProfile = syncActiveProfile
         self.switchProfile = switchProfile
         self.reloginProfile = reloginProfile
+        cancelProfileLoginOperation = cancelProfileLogin
         self.restoreRecoveryProfile = restoreRecoveryProfile
         self.retryPendingRecovery = retryPendingRecovery
         self.attemptAutomaticRecovery = attemptAutomaticRecovery
@@ -184,9 +189,12 @@ public final class MenuBarViewModel: ObservableObject {
         defer { isWorking = false }
         var reloginStarted = false
         var reloginOutcome: ProfileReloginOutcome?
+        var sourceID: ProfileID?
         do {
             try await refreshState()
             guard !recoveryRequired,
+                  let currentSource = profiles.first(where: \.active),
+                  profiles.lazy.filter(\.active).count == 1,
                   let current = profiles.first(where: { $0.id == profile.id }),
                   !current.active,
                   current.needsRelogin else {
@@ -195,14 +203,19 @@ public final class MenuBarViewModel: ObservableObject {
                     : "재로그인 상태가 변경되었습니다. 계정 정보를 다시 확인하세요."
                 return
             }
+            sourceID = currentSource.id
             reloginStarted = true
+            isProfileLoginInProgress = true
+            defer { isProfileLoginInProgress = false }
             let outcome = try await reloginProfile(current.id.description)
             reloginOutcome = outcome
             try await refreshState()
-            if case let .activated(activated) = outcome, activated.id != current.id {
+            guard reloginOutcomeMatches(outcome, targetID: current.id) else {
                 recoveryStatus = .blocked
+                errorMessage = "재로그인 결과를 확인하지 못했습니다. 계정 작업을 중단했습니다."
+                return
             }
-            guard profileIsSoleActive(current.id) else {
+            guard profileReloginIsComplete(targetID: current.id, sourceID: currentSource.id) else {
                 if recoveryRequired {
                     errorMessage = recoveryErrorMessage
                 } else {
@@ -212,40 +225,44 @@ public final class MenuBarViewModel: ObservableObject {
                 return
             }
             errorMessage = nil
-            statusMessage = if outcome == .journalFinalizationUncertain {
-                "\(current.label) 계정 재로그인을 재확인했습니다. Codex 앱을 직접 여세요."
-            } else {
-                "\(current.label) 계정 재로그인을 반영했습니다. Codex 앱을 직접 여세요."
-            }
+            statusMessage = "\(current.label) 계정 인증을 갱신했습니다. 현재 계정은 유지됩니다. 전환하려면 계정을 다시 선택하세요."
         } catch {
             await refreshAfterMutationFailure()
-            guard reloginStarted else {
+            guard reloginStarted, let sourceID else {
                 errorMessage = recoveryRequired ? recoveryErrorMessage : "계정 재로그인을 완료하지 못했습니다."
                 return
             }
-            if case let .activated(activated) = reloginOutcome, activated.id != profile.id {
+            if let reloginOutcome, !reloginOutcomeMatches(reloginOutcome, targetID: profile.id) {
                 recoveryStatus = .blocked
                 errorMessage = "재로그인 결과를 확인하지 못했습니다. 계정 작업을 중단했습니다."
                 return
             }
-            guard profileIsSoleActive(profile.id) else {
+            guard profileReloginIsComplete(targetID: profile.id, sourceID: sourceID) else {
                 if recoveryRequired {
                     errorMessage = recoveryErrorMessage
                 } else if reloginOutcome != nil {
                     recoveryStatus = .blocked
                     errorMessage = "재로그인 결과를 확인하지 못했습니다. 계정 작업을 중단했습니다."
+                } else if let failure = error as? CodexLoginFailure, failure.code == .cancelled {
+                    errorMessage = nil
+                    statusMessage = "로그인을 취소했습니다. 현재 계정과 저장된 인증은 바뀌지 않았습니다."
+                } else if let failure = error as? CodexLoginFailure, failure.code == .timeout {
+                    errorMessage = "로그인 시간이 만료되었습니다. 현재 계정은 유지됩니다. 다시 시도하세요."
+                } else if error is ProfileCaptureFailure {
+                    errorMessage = "다른 계정으로 로그인했습니다. \(profile.email) 계정으로 다시 시도하세요."
                 } else {
-                    errorMessage = "계정 재로그인을 완료하지 못했습니다."
+                    errorMessage = "브라우저 로그인을 완료하지 못했습니다. 현재 계정은 유지됩니다."
                 }
                 return
             }
             errorMessage = nil
-            statusMessage = if reloginOutcome == .journalFinalizationUncertain {
-                "\(profile.label) 계정 재로그인을 재확인했습니다. Codex 앱을 직접 여세요."
-            } else {
-                "\(profile.label) 계정 재로그인을 반영했습니다. Codex 앱을 직접 여세요."
-            }
+            statusMessage = "\(profile.label) 계정 인증을 갱신했습니다. 현재 계정은 유지됩니다. 전환하려면 계정을 다시 선택하세요."
         }
+    }
+
+    public func cancelProfileLogin() async {
+        guard isProfileLoginInProgress else { return }
+        await cancelProfileLoginOperation()
     }
 
     public func cancelRelogin() {
@@ -562,6 +579,21 @@ public final class MenuBarViewModel: ObservableObject {
         recoveryStatus == .none
             && profiles.filter(\.active).count == 1
             && profiles.contains { $0.id == profileID && $0.active && !$0.needsRelogin }
+    }
+
+    private func profileReloginIsComplete(targetID: ProfileID, sourceID: ProfileID) -> Bool {
+        recoveryStatus == .none
+            && profiles.lazy.filter(\.active).count == 1
+            && profiles.contains { $0.id == sourceID && $0.active && !$0.needsRelogin }
+            && profiles.contains { $0.id == targetID && !$0.active && !$0.needsRelogin }
+    }
+
+    private func reloginOutcomeMatches(
+        _ outcome: ProfileReloginOutcome,
+        targetID: ProfileID
+    ) -> Bool {
+        guard case let .refreshed(profile) = outcome else { return false }
+        return profile.id == targetID && !profile.active && !profile.needsRelogin
     }
 
     private func profileRemovalIsComplete(_ profileID: ProfileID) -> Bool {

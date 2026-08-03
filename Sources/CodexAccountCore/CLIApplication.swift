@@ -75,8 +75,7 @@ public enum RecoveryRestoreOutcome: Equatable, Sendable {
 }
 
 public enum ProfileReloginOutcome: Equatable, Sendable {
-    case activated(ProfileListItem)
-    case journalFinalizationUncertain
+    case refreshed(ProfileListItem)
 }
 
 #if SPIKE_FAULT_INJECTION

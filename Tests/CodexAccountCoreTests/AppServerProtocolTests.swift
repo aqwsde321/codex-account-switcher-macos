@@ -108,7 +108,11 @@ func appServerProtocolTests() -> [TestCase] {
                         terminateExit: .seconds(1)
                     )
                 )
-                let session = AppServerProbeSession(configuration: configuration)
+                let launch = ProbeLaunchRecorder()
+                let session = AppServerProbeSession(
+                    configuration: configuration,
+                    didLaunch: { launch.record($0) }
+                )
 
                 let account = try await session.run()
 
@@ -120,6 +124,7 @@ func appServerProtocolTests() -> [TestCase] {
                     ),
                     "probe account result differs"
                 )
+                try expect(launch.pid != nil, "probe launch PID was not recorded")
 
                 do {
                     _ = try await session.run()
@@ -192,6 +197,17 @@ func appServerProtocolTests() -> [TestCase] {
             }
         },
     ]
+}
+
+private final class ProbeLaunchRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recordedPID: Int32?
+
+    var pid: Int32? { lock.withLock { recordedPID } }
+
+    func record(_ pid: Int32) {
+        lock.withLock { recordedPID = pid }
+    }
 }
 
 private func withProbeTemporaryDirectory(

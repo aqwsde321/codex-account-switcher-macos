@@ -83,6 +83,10 @@ struct CodexAccountMenuBarApp: App {
                     }
                     return try await provider.reloginProfile(target: target)
                 },
+                cancelProfileLogin: {
+                    guard let provider else { return }
+                    await provider.cancelProfileLogin()
+                },
                 restoreRecoveryProfile: { target, transactionID in
                     guard let provider else {
                         throw MenuBarStartupFailure.credentialStoreConfiguration
@@ -149,6 +153,14 @@ private struct AccountMenuView: View {
                         Button {
                             Task {
                                 await model.select(profile)
+                                if let relogin = model.pendingReloginProfile {
+                                    guard confirmProfileRelogin(relogin) else {
+                                        model.cancelRelogin()
+                                        return
+                                    }
+                                    await model.confirmRelogin(relogin)
+                                    return
+                                }
                                 guard let confirmation = model.pendingProfile else { return }
                                 guard confirmAccountSwitch(confirmation) else {
                                     model.cancelSwitch()
@@ -190,6 +202,15 @@ private struct AccountMenuView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .accessibilityLabel("전환 상태: \(progressMessage)")
+            }
+
+            if model.isProfileLoginInProgress {
+                Text("브라우저 로그인을 기다리는 중… 현재 활성 계정은 유지됩니다.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Button("브라우저 로그인 취소") {
+                    Task { await model.cancelProfileLogin() }
+                }
             }
 
             if !isRegistering,
@@ -292,36 +313,11 @@ private struct AccountMenuView: View {
             Button("종료") {
                 NSApplication.shared.terminate(nil)
             }
+            .disabled(model.isProfileLoginInProgress)
         }
         .padding(14)
         .frame(width: 320)
         .task { await model.load() }
-        .confirmationDialog(
-            "\(model.pendingReloginProfile?.label ?? "선택한") 계정의 재로그인을 반영할까요?",
-            isPresented: reloginConfirmationPresented,
-            titleVisibility: .visible,
-            presenting: model.pendingReloginProfile
-        ) { profile in
-            Button("재로그인 반영") {
-                Task { await model.confirmRelogin(profile) }
-            }
-            Button("취소", role: .cancel) {
-                model.cancelRelogin()
-            }
-        } message: { profile in
-            Text("먼저 공식 Codex 앱에서 \(profile.label) 계정으로 로그인하세요. 앱과 독립 Codex 프로세스를 모두 종료한 뒤 진행하세요. 완료 후 앱은 직접 열어야 합니다.")
-        }
-    }
-
-    private var reloginConfirmationPresented: Binding<Bool> {
-        Binding(
-            get: { model.pendingReloginProfile != nil },
-            set: { presented in
-                if !presented {
-                    model.cancelRelogin()
-                }
-            }
-        )
     }
 
     private var registrationLabelIsValid: Bool {
@@ -490,6 +486,19 @@ private func confirmAccountSwitch(_ profile: ProfileListItem) -> Bool {
     let cancel = alert.addButton(withTitle: "취소")
     cancel.keyEquivalent = "\u{1b}"
     alert.addButton(withTitle: "전환")
+    NSApp.activate(ignoringOtherApps: true)
+    return alert.runModal() == .alertSecondButtonReturn
+}
+
+@MainActor
+private func confirmProfileRelogin(_ profile: ProfileListItem) -> Bool {
+    let alert = NSAlert()
+    alert.alertStyle = .warning
+    alert.messageText = "\(profile.label) 계정 인증을 갱신할까요?"
+    alert.informativeText = "현재 활성 계정은 유지됩니다. 브라우저에서 \(profile.email) 계정으로 로그인하세요. 인증만 갱신하며 자동 전환하지 않습니다."
+    let cancel = alert.addButton(withTitle: "취소")
+    cancel.keyEquivalent = "\u{1b}"
+    alert.addButton(withTitle: "브라우저 로그인 시작")
     NSApp.activate(ignoringOtherApps: true)
     return alert.runModal() == .alertSecondButtonReturn
 }

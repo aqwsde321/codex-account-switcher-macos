@@ -1905,46 +1905,104 @@ func cliApplicationTests() -> [TestCase] {
                 )
             }
         },
-        TestCase("Local provider activates an exactly verified relogin target") {
+        TestCase("Local provider refreshes relogin target without changing active source") {
             try await withCaptureTemporaryDirectory { directory in
-                let fixture = try makeReloginFixture(in: directory)
+                let fixture = try makeReloginFixture(
+                    in: directory,
+                    activeAuthIsSource: true
+                )
                 let store = try SpikeStore.openExisting(at: fixture.storeURL)
+                let authBefore = try DarwinDurableFileOperations().snapshot(at: fixture.authURL)
+                let quitRequests = await MainActor.run { AppLaunchRecorder() }
+                let launches = await MainActor.run { AppLaunchRecorder() }
                 let provider = LocalCLIDataProvider(
                     storeURL: fixture.storeURL,
                     activeAuthURL: fixture.authURL,
                     processProvider: EmptyProcessSnapshotProvider(),
                     locateApp: { fixture.descriptor },
-                    runningApplicationPIDs: { _ in [] }
+                    runningApplicationPIDs: { _ in [42] },
+                    requestApplicationTermination: { _ in
+                        quitRequests.record()
+                        return [42]
+                    },
+                    launchApplication: { _ in
+                        launches.record()
+                        return 42
+                    }
                 )
 
-                let outcome = try await provider.reloginProfile(target: fixture.target.id.description)
-                guard case let .activated(activated) = outcome else {
-                    throw TestFailure(description: "durable relogin reported uncertain finalization")
-                }
+                _ = try await provider.reloginProfile(target: fixture.target.id.description)
+
                 let registry = try store.loadRegistry()
                 let active = try CredentialBlob(validating: Data(contentsOf: fixture.authURL))
                 let storedSource = try store.loadCredential(for: fixture.source.id)
                 let storedTarget = try store.loadCredential(for: fixture.target.id)
                 let journal = try store.loadJournalIfPresent()
-                let evidence = try store.loadJournalFinalizationEvidenceIfPresent()
-                let marker = try store.loadCaptureProfileIDIfPresent()
+                let authAfter = try DarwinDurableFileOperations().snapshot(at: fixture.authURL)
+                let quitCount = await MainActor.run { quitRequests.count }
+                let launchCount = await MainActor.run { launches.count }
 
-                try expect(activated.id == fixture.target.id && activated.active, "B was not returned active")
-                try expect(!activated.needsRelogin, "B kept its relogin marker")
-                try expect(registry.activeProfileID == fixture.target.id, "registry did not activate B")
+                try expect(registry.activeProfileID == fixture.source.id, "relogin changed the active profile")
                 try expect(
                     registry.profiles.first(where: { $0.id == fixture.target.id })?.needsRelogin == false,
-                    "registry did not clear B relogin state"
+                    "relogin target kept its marker"
                 )
-                try expect(active == storedTarget, "active B and configured B differ")
-                try expect(storedTarget != fixture.staleTargetCredential, "stale B credential was preserved")
-                try expect(storedSource == fixture.sourceCredential, "relogin changed A credential")
-                try expect(journal == nil && evidence == nil && marker == nil, "relogin left recovery artifacts")
+                try expect(active == fixture.sourceCredential, "relogin changed the public active auth data")
+                try expect(authAfter == authBefore, "relogin rewrote the public active auth file")
+                try expect(storedSource == fixture.sourceCredential, "relogin changed the source credential")
+                try expect(storedTarget == fixture.refreshedTargetCredential, "relogin stored unexpected target bytes")
+                try expect(journal == nil, "relogin left recovery pending")
+                try expect(quitCount == 0, "relogin terminated the running official app")
+                try expect(launchCount == 0, "relogin relaunched the running official app")
+            }
+        },
+        TestCase("Local provider preserves all account state when isolated login exits unsuccessfully") {
+            try await withCaptureTemporaryDirectory { directory in
+                let fixture = try makeReloginFixture(
+                    in: directory,
+                    activeAuthIsSource: true,
+                    isolatedLoginExitCode: 23
+                )
+                let store = try SpikeStore.openExisting(at: fixture.storeURL)
+                let registryBefore = try store.loadRegistry()
+                let sourceBefore = try store.loadCredential(for: fixture.source.id)
+                let targetBefore = try store.loadCredential(for: fixture.target.id)
+                let authBefore = try DarwinDurableFileOperations().snapshot(at: fixture.authURL)
+                let provider = LocalCLIDataProvider(
+                    storeURL: fixture.storeURL,
+                    activeAuthURL: fixture.authURL,
+                    processProvider: EmptyProcessSnapshotProvider(),
+                    locateApp: { fixture.descriptor },
+                    runningApplicationPIDs: { _ in [42] }
+                )
+
+                do {
+                    _ = try await provider.reloginProfile(target: fixture.target.id.description)
+                    throw TestFailure(description: "failed isolated login was accepted")
+                } catch let failure as CodexLoginFailure {
+                    try expect(failure.code == .abnormalExit, "failed login returned the wrong code")
+                    try expect(failure.exitCode == 23, "failed login lost its exit code")
+                    try expect(
+                        failure.childDisposition == .confirmedExited,
+                        "failed login child exit was not confirmed"
+                    )
+                }
+
+                let registryAfter = try store.loadRegistry()
+                let sourceAfter = try store.loadCredential(for: fixture.source.id)
+                let targetAfter = try store.loadCredential(for: fixture.target.id)
+                let authAfter = try DarwinDurableFileOperations().snapshot(at: fixture.authURL)
+                let journalAfter = try store.loadJournalIfPresent()
+                try expect(registryAfter == registryBefore, "failed login changed registry")
+                try expect(sourceAfter == sourceBefore, "failed login changed A")
+                try expect(targetAfter == targetBefore, "failed login changed B")
+                try expect(authAfter == authBefore, "failed login changed public auth")
+                try expect(journalAfter == nil, "failed login created a journal")
                 try expect(
                     !FileManager.default.fileExists(
-                        atPath: fixture.storeURL.appendingPathComponent("credential-verification-workspace").path
+                        atPath: fixture.storeURL.appendingPathComponent("isolated-login-workspace").path
                     ),
-                    "relogin left a verification workspace"
+                    "failed login left its private workspace"
                 )
             }
         },
@@ -2596,16 +2654,18 @@ func cliApplicationTests() -> [TestCase] {
                 try expect(launchCount == 0, "restart launched the app")
             }
         },
-        TestCase("Local provider restores A and preserves B after relogin identity mismatch") {
+        TestCase("Local provider rejects a wrong isolated relogin identity without mutation") {
             try await withCaptureTemporaryDirectory { directory in
-                let fixture = try makeReloginFixture(in: directory)
-                let store = try SpikeStore.openExisting(at: fixture.storeURL)
-                let wrongActive = Data(
-                    #"{"auth_mode":"chatgpt","test_account":"a","tokens":{"id_token":"wrong-id","access_token":"wrong-access","refresh_token":"wrong-refresh"}}"#.utf8
+                let fixture = try makeReloginFixture(
+                    in: directory,
+                    activeAuthIsSource: true,
+                    isolatedLoginAccount: "c"
                 )
-                try wrongActive.write(to: fixture.authURL)
+                let store = try SpikeStore.openExisting(at: fixture.storeURL)
                 let registryBefore = try store.loadRegistry()
+                let sourceBefore = try store.loadCredential(for: fixture.source.id)
                 let targetBefore = try store.loadCredential(for: fixture.target.id)
+                let authBefore = try DarwinDurableFileOperations().snapshot(at: fixture.authURL)
                 let provider = LocalCLIDataProvider(
                     storeURL: fixture.storeURL,
                     activeAuthURL: fixture.authURL,
@@ -2623,38 +2683,27 @@ func cliApplicationTests() -> [TestCase] {
                 let registryAfter = try store.loadRegistry()
                 let sourceAfter = try store.loadCredential(for: fixture.source.id)
                 let targetAfter = try store.loadCredential(for: fixture.target.id)
-                let authAfter = try CredentialBlob(validating: Data(contentsOf: fixture.authURL))
+                let authAfter = try DarwinDurableFileOperations().snapshot(at: fixture.authURL)
                 let journalAfter = try store.loadJournalIfPresent()
                 try expect(registryAfter == registryBefore, "identity mismatch changed registry")
+                try expect(sourceAfter == sourceBefore, "identity mismatch changed A")
                 try expect(targetAfter == targetBefore, "identity mismatch changed B")
-                try expect(authAfter == sourceAfter, "identity mismatch did not restore A")
+                try expect(authAfter == authBefore, "identity mismatch changed public auth")
                 try expect(journalAfter == nil, "identity mismatch created a journal")
+                try expect(
+                    !FileManager.default.fileExists(
+                        atPath: fixture.storeURL.appendingPathComponent("isolated-login-workspace").path
+                    ),
+                    "identity mismatch left an isolated login workspace"
+                )
             }
         },
-        TestCase("Local provider gates relogin on processes and recovery") {
+        TestCase("Local provider blocks isolated relogin on pending recovery") {
             try await withCaptureTemporaryDirectory { directory in
-                let fixture = try makeReloginFixture(in: directory)
+                let fixture = try makeReloginFixture(in: directory, activeAuthIsSource: true)
                 let store = try SpikeStore.openExisting(at: fixture.storeURL)
                 let registryBefore = try store.loadRegistry()
                 let targetBefore = try store.loadCredential(for: fixture.target.id)
-                let runningPIDs = await MainActor.run { RunningPIDSequence([[], [42]]) }
-                let processBlockedProvider = LocalCLIDataProvider(
-                    storeURL: fixture.storeURL,
-                    activeAuthURL: fixture.authURL,
-                    processProvider: EmptyProcessSnapshotProvider(),
-                    locateApp: { fixture.descriptor },
-                    runningApplicationPIDs: { _ in runningPIDs.next() }
-                )
-
-                do {
-                    _ = try await processBlockedProvider.reloginProfile(target: fixture.target.id.description)
-                    throw TestFailure(description: "process race did not block relogin")
-                } catch let failure as SwitchCoordinatorFailure {
-                    try expect(failure == .processBlocked, "process race returned the wrong failure")
-                }
-                let journalAfterProcessGate = try store.loadJournalIfPresent()
-                try expect(journalAfterProcessGate == nil, "process gate created a journal")
-
                 let now = Date(timeIntervalSince1970: 1_700_000_010)
                 let pending = SwitchJournalRecord(
                     transactionID: UUID(),
@@ -2687,10 +2736,18 @@ func cliApplicationTests() -> [TestCase] {
                 try expect(journalAfter == pending, "relogin gate changed pending recovery")
             }
         },
-        TestCase("Local provider journals relogin before an unconfirmed verifier") {
+        TestCase("Local provider preserves isolated relogin workspace after an unconfirmed verifier") {
             try await withCaptureTemporaryDirectory { directory in
-                let fixture = try makeReloginFixture(in: directory, holdVerifierPipesOpen: true)
+                let fixture = try makeReloginFixture(
+                    in: directory,
+                    activeAuthIsSource: true,
+                    holdVerifierPipesOpen: true
+                )
                 let store = try SpikeStore.openExisting(at: fixture.storeURL)
+                let registryBefore = try store.loadRegistry()
+                let sourceBefore = try store.loadCredential(for: fixture.source.id)
+                let targetBefore = try store.loadCredential(for: fixture.target.id)
+                let authBefore = try DarwinDurableFileOperations().snapshot(at: fixture.authURL)
                 let provider = LocalCLIDataProvider(
                     storeURL: fixture.storeURL,
                     activeAuthURL: fixture.authURL,
@@ -2702,27 +2759,156 @@ func cliApplicationTests() -> [TestCase] {
                 do {
                     _ = try await provider.reloginProfile(target: fixture.target.id.description)
                     throw TestFailure(description: "unconfirmed verifier completed relogin")
-                } catch let failure as LocalCLIDataProviderFailure {
-                    try expect(failure == .pendingRecovery, "unconfirmed verifier returned the wrong failure")
+                } catch let failure as AppServerProbeFailure {
+                    try expect(
+                        failure.childDisposition == .unconfirmed,
+                        "unconfirmed verifier returned the wrong failure"
+                    )
                 }
                 let journal = try store.loadJournalIfPresent()
                 let recovery = try await provider.recoveryStatus()
+                let registryAfter = try store.loadRegistry()
+                let sourceAfter = try store.loadCredential(for: fixture.source.id)
+                let targetAfter = try store.loadCredential(for: fixture.target.id)
+                let authAfter = try DarwinDurableFileOperations().snapshot(at: fixture.authURL)
 
-                try expect(journal?.phase == .validatingTarget, "unconfirmed verifier lost relogin intent")
+                try expect(journal == nil, "isolated relogin created a switch journal")
+                try expect(registryAfter == registryBefore, "unconfirmed verifier changed registry")
+                try expect(sourceAfter == sourceBefore, "unconfirmed verifier changed A")
+                try expect(targetAfter == targetBefore, "unconfirmed verifier changed B")
+                try expect(authAfter == authBefore, "unconfirmed verifier changed public auth")
                 try expect(
-                    recovery == .pending(
-                        transactionID: journal?.transactionID.uuidString ?? "",
-                        phase: .validatingTarget,
-                        previousProfileID: fixture.source.id
+                    FileManager.default.fileExists(
+                        atPath: fixture.storeURL.appendingPathComponent("isolated-login-workspace").path
                     ),
-                    "unconfirmed verifier did not preserve recoverable state"
+                    "unconfirmed verifier removed live login evidence"
                 )
+                try expect(recovery == .blocked, "unconfirmed verifier did not block account mutations")
             }
         },
-        TestCase("Local provider rolls relogin back to A before target verification") {
+        TestCase("Local provider removes an abandoned login workspace only after its child exits") {
             try await withCaptureTemporaryDirectory { directory in
-                let fixture = try makeReloginFixture(in: directory, rotateActiveToOtherAccount: true)
+                let fixture = try makeReloginFixture(in: directory, activeAuthIsSource: true)
+                let loginHome = fixture.storeURL.appendingPathComponent(
+                    "isolated-login-workspace",
+                    isDirectory: true
+                )
+                try FileManager.default.createDirectory(at: loginHome, withIntermediateDirectories: false)
+                try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: loginHome.path)
+                let loginAuth = loginHome.appendingPathComponent("auth.json", isDirectory: false)
+                try fixture.sourceAuthData.write(to: loginAuth, options: .withoutOverwriting)
+                try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: loginAuth.path)
+                _ = try DarwinDurableFileOperations().replace(
+                    contents: SensitiveBytes(Data("pid=801\n".utf8)),
+                    at: loginHome.appendingPathComponent("helper-child", isDirectory: false),
+                    expecting: .absent
+                )
+                let child = ProcessRecord(
+                    identity: ProcessIdentity(pid: 801, startSeconds: 901, startMicroseconds: 1),
+                    parentPID: 1,
+                    executablePath: fixture.descriptor.bundledCodexURL.path,
+                    nameHint: "codex"
+                )
+                let processes = TerminableProcessSnapshotProvider()
+                processes.install(child)
+                let provider = LocalCLIDataProvider(
+                    storeURL: fixture.storeURL,
+                    activeAuthURL: fixture.authURL,
+                    processProvider: processes,
+                    locateApp: { fixture.descriptor },
+                    runningApplicationPIDs: { _ in [] },
+                    verificationChildIsAlive: { processes.contains(pid: $0) }
+                )
+
+                do {
+                    _ = try await provider.recoverPendingTransaction()
+                    throw TestFailure(description: "live login child workspace was removed")
+                } catch let failure as LocalCLIDataProviderFailure {
+                    try expect(failure == .pendingRecovery, "live login child returned the wrong failure")
+                }
+                try expect(FileManager.default.fileExists(atPath: loginHome.path), "live workspace disappeared")
+
+                processes.terminate(child)
+                let outcome = try await provider.recoverPendingTransaction()
+                let recovery = try await provider.recoveryStatus()
+                try expect(outcome == .none, "abandoned workspace cleanup reported recovery work")
+                try expect(!FileManager.default.fileExists(atPath: loginHome.path), "abandoned workspace remained")
+                try expect(recovery == .none, "cleanup left recovery blocked")
+            }
+        },
+        TestCase("Local provider removes a login workspace abandoned before child launch") {
+            try await withCaptureTemporaryDirectory { directory in
+                let fixture = try makeReloginFixture(in: directory, activeAuthIsSource: true)
+                let loginHome = fixture.storeURL.appendingPathComponent(
+                    "isolated-login-workspace",
+                    isDirectory: true
+                )
+                try FileManager.default.createDirectory(at: loginHome, withIntermediateDirectories: false)
+                try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: loginHome.path)
+                let provider = LocalCLIDataProvider(
+                    storeURL: fixture.storeURL,
+                    activeAuthURL: fixture.authURL,
+                    processProvider: EmptyProcessSnapshotProvider(),
+                    locateApp: { fixture.descriptor },
+                    runningApplicationPIDs: { _ in [] },
+                    verificationChildIsAlive: { _ in
+                        throw TestFailure(description: "markerless workspace queried child liveness")
+                    }
+                )
+
+                let outcome = try await provider.recoverPendingTransaction()
+                let recovery = try await provider.recoveryStatus()
+                try expect(outcome == .none, "pre-launch workspace cleanup reported recovery work")
+                try expect(!FileManager.default.fileExists(atPath: loginHome.path), "pre-launch workspace remained")
+                try expect(recovery == .none, "pre-launch cleanup left recovery blocked")
+            }
+        },
+        TestCase("Local provider preserves a login workspace without a durable child PID") {
+            try await withCaptureTemporaryDirectory { directory in
+                let fixture = try makeReloginFixture(in: directory, activeAuthIsSource: true)
+                let loginHome = fixture.storeURL.appendingPathComponent(
+                    "isolated-login-workspace",
+                    isDirectory: true
+                )
+                try FileManager.default.createDirectory(at: loginHome, withIntermediateDirectories: false)
+                try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: loginHome.path)
+                _ = try DarwinDurableFileOperations().replace(
+                    contents: SensitiveBytes(Data("launching\n".utf8)),
+                    at: loginHome.appendingPathComponent("helper-child", isDirectory: false),
+                    expecting: .absent
+                )
+                let provider = LocalCLIDataProvider(
+                    storeURL: fixture.storeURL,
+                    activeAuthURL: fixture.authURL,
+                    processProvider: EmptyProcessSnapshotProvider(),
+                    locateApp: { fixture.descriptor },
+                    runningApplicationPIDs: { _ in [] },
+                    verificationChildIsAlive: { _ in false }
+                )
+
+                do {
+                    _ = try await provider.recoverPendingTransaction()
+                    throw TestFailure(description: "workspace without a child PID was removed")
+                } catch let failure as LocalCLIDataProviderFailure {
+                    try expect(failure == .pendingRecovery, "missing child PID returned the wrong failure")
+                }
+                let recovery = try await provider.recoveryStatus()
+                try expect(FileManager.default.fileExists(atPath: loginHome.path), "unsafe workspace disappeared")
+                try expect(recovery == .blocked, "unsafe workspace did not STOP")
+            }
+        },
+        TestCase("Local provider rejects an isolated refresh identity change without public rollback") {
+            try await withCaptureTemporaryDirectory { directory in
+                let fixture = try makeReloginFixture(
+                    in: directory,
+                    activeAuthIsSource: true,
+                    rotateActiveToOtherAccount: true
+                )
                 let store = try SpikeStore.openExisting(at: fixture.storeURL)
+                let registryBefore = try store.loadRegistry()
+                let sourceBefore = try store.loadCredential(for: fixture.source.id)
+                let targetBefore = try store.loadCredential(for: fixture.target.id)
+                let authBefore = try DarwinDurableFileOperations().snapshot(at: fixture.authURL)
                 let provider = LocalCLIDataProvider(
                     storeURL: fixture.storeURL,
                     activeAuthURL: fixture.authURL,
@@ -2737,71 +2923,16 @@ func cliApplicationTests() -> [TestCase] {
                 } catch is ProfileCaptureFailure {
                 }
                 let registry = try store.loadRegistry()
-                let active = try CredentialBlob(validating: Data(contentsOf: fixture.authURL))
+                let authAfter = try DarwinDurableFileOperations().snapshot(at: fixture.authURL)
                 let storedSource = try store.loadCredential(for: fixture.source.id)
                 let storedTarget = try store.loadCredential(for: fixture.target.id)
                 let journal = try store.loadJournalIfPresent()
 
-                try expect(registry.activeProfileID == fixture.source.id, "failed relogin did not keep A active")
-                try expect(
-                    registry.profiles.first(where: { $0.id == fixture.target.id })?.needsRelogin == true,
-                    "failed relogin cleared B marker"
-                )
-                try expect(active == storedSource, "failed relogin did not restore A auth")
-                try expect(
-                    storedTarget == fixture.staleTargetCredential,
-                    "failed refreshed identity overwrote B before exact verification"
-                )
-                try expect(journal == nil, "successful rollback left a journal")
-            }
-        },
-        TestCase("Local provider exposes uncertain relogin finalization without retry") {
-            try await withCaptureTemporaryDirectory { directory in
-                let fixture = try makeReloginFixture(in: directory)
-                let store = try SpikeStore.openExisting(at: fixture.storeURL)
-                let syncFailure = DurableFileFailure(
-                    mutation: .remove,
-                    stage: .syncParent,
-                    errno: EIO,
-                    certainty: .durabilityUnknown
-                )
-                let finalizationGate = FinalizationSyncFailureGate(
-                    storeURL: fixture.storeURL,
-                    failure: syncFailure
-                )
-                let provider = LocalCLIDataProvider(
-                    storeURL: fixture.storeURL,
-                    activeAuthURL: fixture.authURL,
-                    processProvider: EmptyProcessSnapshotProvider(),
-                    locateApp: { fixture.descriptor },
-                    runningApplicationPIDs: { _ in [] },
-                    removeJournalFile: finalizationGate.removeJournal,
-                    syncStoreDirectory: finalizationGate.sync
-                )
-
-                let outcome = try await provider.reloginProfile(target: fixture.target.id.description)
-                let blocked = try await provider.recoveryStatus()
-                let registry = try store.loadRegistry()
-                let active = try CredentialBlob(validating: Data(contentsOf: fixture.authURL))
-                let storedTarget = try store.loadCredential(for: fixture.target.id)
-                let evidence = try store.loadJournalFinalizationEvidenceIfPresent()
-                let restarted = LocalCLIDataProvider(
-                    storeURL: fixture.storeURL,
-                    activeAuthURL: fixture.authURL,
-                    processProvider: EmptyProcessSnapshotProvider(),
-                    locateApp: { fixture.descriptor },
-                    runningApplicationPIDs: { _ in [] }
-                )
-                let reconciled = try await restarted.recoveryStatus()
-                let evidenceAfterReconciliation = try store.loadJournalFinalizationEvidenceIfPresent()
-
-                try expect(outcome == .journalFinalizationUncertain, "uncertain unlink reported success")
-                try expect(blocked == .blocked, "uncertain finalization did not stop mutations")
-                try expect(registry.activeProfileID == fixture.target.id, "uncertain finalization lost B commit")
-                try expect(active == storedTarget, "uncertain finalization lost verified B")
-                try expect(evidence != nil, "uncertain finalization left no durable evidence")
-                try expect(reconciled == .none, "restart did not reconcile exact B finalization")
-                try expect(evidenceAfterReconciliation == nil, "reconciled finalization evidence remained")
+                try expect(registry == registryBefore, "failed refresh changed registry")
+                try expect(storedSource == sourceBefore, "failed refresh changed A")
+                try expect(storedTarget == targetBefore, "failed refresh changed B")
+                try expect(authAfter == authBefore, "failed refresh changed public auth")
+                try expect(journal == nil, "failed isolated refresh created a journal")
             }
         },
         TestCase("CLI sync-active validates and stores only the registered active profile") {
@@ -4005,11 +4136,15 @@ private struct ReloginFixture: Sendable {
     let sourceAuthData: Data
     let sourceCredential: CredentialBlob
     let staleTargetCredential: CredentialBlob
+    let refreshedTargetCredential: CredentialBlob
     let descriptor: CodexAppDescriptor
 }
 
 private func makeReloginFixture(
     in directory: URL,
+    activeAuthIsSource: Bool = false,
+    isolatedLoginAccount: String = "b",
+    isolatedLoginExitCode: Int32 = 0,
     rotateActiveToOtherAccount: Bool = false,
     holdVerifierPipesOpen: Bool = false,
     probeCountURL: URL? = nil,
@@ -4020,10 +4155,16 @@ private func makeReloginFixture(
     try FileManager.default.createDirectory(at: codexHome, withIntermediateDirectories: false)
     try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: codexHome.path)
     let authURL = codexHome.appendingPathComponent("auth.json", isDirectory: false)
+    let sourceAuthData = Data(
+        #"{"auth_mode":"chatgpt","test_account":"a","tokens":{"id_token":"a-id","access_token":"a-access","refresh_token":"a-refresh"}}"#.utf8
+    )
     let activeB = Data(
         #"{"auth_mode":"chatgpt","test_account":"b","tokens":{"id_token":"current-b-id","access_token":"current-b-access","refresh_token":"current-b-refresh"}}"#.utf8
     )
-    try activeB.write(to: authURL, options: .withoutOverwriting)
+    try (activeAuthIsSource ? sourceAuthData : activeB).write(
+        to: authURL,
+        options: .withoutOverwriting
+    )
     try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: authURL.path)
 
     let storeURL = directory.appendingPathComponent("store", isDirectory: true)
@@ -4046,12 +4187,12 @@ private func makeReloginFixture(
         createdAt: Date(timeIntervalSince1970: 1_700_000_001),
         updatedAt: Date(timeIntervalSince1970: 1_700_000_001)
     )
-    let sourceAuthData = Data(
-        #"{"auth_mode":"chatgpt","test_account":"a","tokens":{"id_token":"a-id","access_token":"a-access","refresh_token":"a-refresh"}}"#.utf8
-    )
     let sourceCredential = try CredentialBlob(validating: sourceAuthData)
     let staleTargetCredential = try CredentialBlob(validating: Data(
         #"{"auth_mode":"chatgpt","test_account":"b","tokens":{"id_token":"stale-b-id","access_token":"stale-b-access","refresh_token":"stale-b-refresh"}}"#.utf8
+    ))
+    let refreshedTargetCredential = try CredentialBlob(validating: Data(
+        #"{"auth_mode":"chatgpt","test_account":"b","tokens":{"id_token":"b-id-rotated","access_token":"b-access-rotated","refresh_token":"b-refresh-rotated"}}"#.utf8
     ))
     _ = try store.saveCredential(sourceCredential, for: source.id)
     _ = try store.saveCredential(staleTargetCredential, for: target.id)
@@ -4067,11 +4208,22 @@ private func makeReloginFixture(
     let executable = try makeCaptureAppServer(
         in: directory,
         rotateToOtherAccount: rotateActiveToOtherAccount,
-        rotateToOtherAccountHomeURL: rotateActiveToOtherAccount ? codexHome : nil,
+        rotateToOtherAccountHomeURL: rotateActiveToOtherAccount
+            ? (activeAuthIsSource
+                ? storeURL.appendingPathComponent("isolated-login-workspace", isDirectory: true)
+                : codexHome)
+            : nil,
         failRefreshHomeURL: failRefreshHomeURL,
         probeCountURL: probeCountURL,
-        requiredJournalURL: storeURL.appendingPathComponent("switch-journal.json"),
-        holdPipesOpen: holdVerifierPipesOpen
+        requiredJournalURL: activeAuthIsSource
+            ? nil
+            : storeURL.appendingPathComponent("switch-journal.json"),
+        loginAccount: isolatedLoginAccount,
+        loginExitCode: isolatedLoginExitCode,
+        holdPipesOpen: holdVerifierPipesOpen,
+        holdPipesOpenHomeURL: activeAuthIsSource
+            ? storeURL.appendingPathComponent("isolated-login-workspace", isDirectory: true)
+            : nil
     )
     let bundleURL = directory.appendingPathComponent("ChatGPT.app", isDirectory: true)
     let descriptor = CodexAppDescriptor(
@@ -4093,6 +4245,7 @@ private func makeReloginFixture(
         sourceAuthData: sourceAuthData,
         sourceCredential: sourceCredential,
         staleTargetCredential: staleTargetCredential,
+        refreshedTargetCredential: refreshedTargetCredential,
         descriptor: descriptor
     )
 }
@@ -4265,11 +4418,20 @@ private func makeCaptureAppServer(
     failProbeHomeURL: URL? = nil,
     probeCountURL: URL? = nil,
     requiredJournalURL: URL? = nil,
-    holdPipesOpen: Bool = false
+    loginAccount: String? = nil,
+    loginExitCode: Int32 = 0,
+    holdPipesOpen: Bool = false,
+    holdPipesOpenHomeURL: URL? = nil
 ) throws -> URL {
     let executable = directory.appendingPathComponent("fake-capture-app-server")
     let script = #"""
     #!/bin/zsh
+    if [[ " $* " == *" login " && -n "\#(loginAccount ?? "")" ]]; then
+      [[ "\#(loginExitCode)" == "0" ]] || exit "\#(loginExitCode)"
+      print -rn -- '{"auth_mode":"chatgpt","test_account":"\#(loginAccount ?? "")","tokens":{"id_token":"isolated-id","access_token":"isolated-access","refresh_token":"isolated-refresh"}}' > "$CODEX_HOME/auth.json"
+      chmod 600 "$CODEX_HOME/auth.json"
+      exit 0
+    fi
     if [[ -n "\#(probeCountURL?.path ?? "")" ]]; then
       probe_count=0
       [[ -f "\#(probeCountURL?.path ?? "")" ]] && IFS= read -r probe_count < "\#(probeCountURL?.path ?? "")"
@@ -4311,7 +4473,7 @@ private func makeCaptureAppServer(
       fi
     fi
     print -r -- '{"id":2,"result":{"account":{"type":"chatgpt","email":"'"$account_email"'","planType":"plus"},"requiresOpenaiAuth":true}}'
-    if [[ "\#(holdPipesOpen)" == "true" ]]; then
+    if [[ "\#(holdPipesOpen)" == "true" && ( -z "\#(holdPipesOpenHomeURL?.path ?? "")" || "$CODEX_HOME" == "\#(holdPipesOpenHomeURL?.path ?? "")" ) ]]; then
       (sleep 3) &!
       exit 0
     fi
