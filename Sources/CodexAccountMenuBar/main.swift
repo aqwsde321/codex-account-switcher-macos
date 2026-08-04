@@ -31,8 +31,8 @@ struct CodexAccountMenuBarApp: App {
                 loadProfiles: {
                     try await provider.profiles()
                 },
-                loadProfileUsage: {
-                    try await provider.profileUsage()
+                loadProfileUsage: { profileIDs in
+                    try await provider.profileUsage(profileIDs: profileIDs)
                 },
                 loadRecoveryStatus: {
                     try await provider.recoveryStatus()
@@ -87,7 +87,17 @@ struct CodexAccountMenuBarApp: App {
                         .monospacedDigit()
                 }
             }
-            .task { await model.load() }
+            .task {
+                await model.load()
+                while !Task.isCancelled {
+                    do {
+                        try await Task.sleep(for: MenuBarViewModel.activeUsageRefreshInterval)
+                    } catch {
+                        return
+                    }
+                    await model.refreshUsageAutomatically()
+                }
+            }
         }
         .menuBarExtraStyle(.window)
     }
@@ -102,7 +112,6 @@ private final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
 private struct AccountMenuView: View {
     @ObservedObject var model: MenuBarViewModel
     @State private var isRegistering = false
-    @State private var isSyncConfirmationPresented = false
     @State private var registrationLabel = ""
 
     var body: some View {
@@ -199,27 +208,6 @@ private struct AccountMenuView: View {
                 }
             }
 
-            if !isRegistering,
-               !model.recoveryRequired,
-               model.profiles.contains(where: \.active) {
-                Button("현재 인증 동기화…") {
-                    isSyncConfirmationPresented = true
-                }
-                .disabled(model.isWorking)
-                .confirmationDialog(
-                    "현재 인증을 저장할까요?",
-                    isPresented: $isSyncConfirmationPresented,
-                    titleVisibility: .visible
-                ) {
-                    Button("동기화") {
-                        Task { await model.syncActive() }
-                    }
-                    Button("취소", role: .cancel) {}
-                } message: {
-                    Text("공식 앱과 독립 Codex 프로세스를 먼저 종료하세요. 현재 로그인 이메일이 활성 프로필과 같을 때만 저장합니다.")
-                }
-            }
-
             if let recoveryProfile = model.recoveryProfile {
                 Button("\(recoveryProfile.label) 계정 복구…") {
                     model.requestRecovery()
@@ -274,8 +262,7 @@ private struct AccountMenuView: View {
                         )
                     }
                 }
-            } else if !isSyncConfirmationPresented,
-                      !model.recoveryRequired,
+            } else if !model.recoveryRequired,
                       model.profiles.count < ProfileRegistry.maximumProfileCount {
                 Button("계정 등록") {
                     isRegistering = true

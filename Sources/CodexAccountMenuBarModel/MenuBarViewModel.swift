@@ -1,5 +1,6 @@
 import Combine
 import CodexAccountCore
+import Foundation
 
 @MainActor
 public final class MenuBarViewModel: ObservableObject {
@@ -9,7 +10,7 @@ public final class MenuBarViewModel: ObservableObject {
     }
 
     public typealias LoadProfiles = @Sendable () async throws -> [ProfileListItem]
-    public typealias LoadProfileUsage = @Sendable () async throws -> ProfileUsageReport
+    public typealias LoadProfileUsage = @Sendable (Set<ProfileID>?) async throws -> ProfileUsageReport
     public typealias LoadRecoveryStatus = @Sendable () async throws -> RecoveryCLIStatus
     public typealias CaptureProfile = @Sendable (String) async throws -> ProfileListItem
     public typealias RemoveProfile = @Sendable (ProfileID) async throws -> ProfileListItem
@@ -24,6 +25,9 @@ public final class MenuBarViewModel: ObservableObject {
     public typealias RestoreRecoveryProfile = @Sendable (String, String) async throws -> RecoveryRestoreOutcome
     public typealias RetryPendingRecovery = @Sendable (String) async throws -> RecoveryOutcome
     public typealias AttemptAutomaticRecovery = @Sendable () async -> Void
+
+    public nonisolated static let activeUsageRefreshInterval: Duration = .seconds(120)
+    public nonisolated static let inactiveUsageRefreshInterval: TimeInterval = 30 * 60
 
     @Published public private(set) var profiles = [ProfileListItem]()
     @Published public private(set) var usageByProfileID = [ProfileID: AppServerRateLimitsRead]()
@@ -52,6 +56,9 @@ public final class MenuBarViewModel: ObservableObject {
     private let retryPendingRecovery: RetryPendingRecovery?
     private let attemptAutomaticRecovery: AttemptAutomaticRecovery
     private var cancelCurrentProfileLoginTask: (() -> Void)?
+    private var lastFullUsageRefreshAt: Date?
+    private var automaticUsageRefreshTask: Task<ProfileUsageReport, Error>?
+    private var isCancellingAutomaticUsageRefresh = false
 
     public init(
         loadProfiles: @escaping LoadProfiles,
@@ -82,6 +89,7 @@ public final class MenuBarViewModel: ObservableObject {
     }
 
     public func load() async {
+        await cancelAutomaticUsageRefresh()
         guard !isWorking else { return }
         isWorking = true
         defer { isWorking = false }
@@ -97,13 +105,51 @@ public final class MenuBarViewModel: ObservableObject {
     }
 
     public func refreshUsage() async {
+        await cancelAutomaticUsageRefresh()
+        await performUsageRefresh(profileIDs: nil, at: .now)
+    }
+
+    public func refreshUsageAutomatically(now: Date = .now) async {
+        guard !isWorking, !recoveryRequired,
+              !isCancellingAutomaticUsageRefresh,
+              automaticUsageRefreshTask == nil,
+              let loadProfileUsage,
+              let activeProfileID = profiles.first(where: \.active)?.id else {
+            return
+        }
+        let fullRefreshDue = lastFullUsageRefreshAt.map {
+            now.timeIntervalSince($0) >= Self.inactiveUsageRefreshInterval
+        } ?? true
+        let profileIDs: Set<ProfileID>? = fullRefreshDue ? nil : [activeProfileID]
+        let task = Task { try await loadProfileUsage(profileIDs) }
+        automaticUsageRefreshTask = task
+        let result = await withTaskCancellationHandler {
+            await task.result
+        } onCancel: {
+            task.cancel()
+        }
+        guard !isCancellingAutomaticUsageRefresh,
+              automaticUsageRefreshTask != nil else {
+            return
+        }
+        automaticUsageRefreshTask = nil
+        guard case let .success(report) = result else { return }
+        applyUsageReport(
+            report,
+            profileIDs: profileIDs,
+            at: now,
+            preservingMissingUsage: true
+        )
+    }
+
+    private func performUsageRefresh(profileIDs: Set<ProfileID>?, at date: Date) async {
         guard !isWorking, !recoveryRequired, loadProfileUsage != nil else {
             if recoveryRequired { errorMessage = recoveryErrorMessage }
             return
         }
         isWorking = true
         defer { isWorking = false }
-        await reloadUsage()
+        await reloadUsage(profileIDs: profileIDs, at: date)
     }
 
     public var canRefreshUsage: Bool {
@@ -129,6 +175,7 @@ public final class MenuBarViewModel: ObservableObject {
     }
 
     public func select(_ profile: ProfileListItem) async {
+        await cancelAutomaticUsageRefresh()
         statusMessage = nil
         guard !isWorking, !recoveryRequired else {
             if recoveryRequired { errorMessage = recoveryErrorMessage }
@@ -145,6 +192,7 @@ public final class MenuBarViewModel: ObservableObject {
     }
 
     public func confirmSwitch(_ confirmedProfile: ProfileListItem? = nil) async {
+        await cancelAutomaticUsageRefresh()
         guard !isWorking, !recoveryRequired,
               let profile = confirmedProfile ?? pendingProfile else {
             if recoveryRequired { errorMessage = recoveryErrorMessage }
@@ -172,6 +220,7 @@ public final class MenuBarViewModel: ObservableObject {
     }
 
     public func confirmRemoval(_ confirmedProfile: ProfileListItem? = nil) async {
+        await cancelAutomaticUsageRefresh()
         guard !isWorking, !recoveryRequired,
               let removeProfile,
               let profile = confirmedProfile ?? pendingRemovalProfile else {
@@ -220,6 +269,7 @@ public final class MenuBarViewModel: ObservableObject {
     }
 
     public func confirmRelogin(_ confirmedProfile: ProfileListItem? = nil) async {
+        await cancelAutomaticUsageRefresh()
         guard !isWorking, !recoveryRequired,
               let profile = confirmedProfile ?? pendingReloginProfile else {
             cancelRelogin()
@@ -345,6 +395,7 @@ public final class MenuBarViewModel: ObservableObject {
     }
 
     public func confirmRecovery(_ confirmed: RecoveryConfirmation? = nil) async {
+        await cancelAutomaticUsageRefresh()
         guard !isWorking,
               let confirmation = confirmed ?? pendingRecoveryConfirmation else {
             cancelRecovery()
@@ -387,6 +438,7 @@ public final class MenuBarViewModel: ObservableObject {
     }
 
     public func retryRecovery() async {
+        await cancelAutomaticUsageRefresh()
         guard !isWorking,
               let retryPendingRecovery,
               let transactionID = retryRecoveryTransactionID else {
@@ -436,6 +488,7 @@ public final class MenuBarViewModel: ObservableObject {
 
     @discardableResult
     public func register(label: String) async -> Bool {
+        await cancelAutomaticUsageRefresh()
         statusMessage = nil
         guard !isWorking, !recoveryRequired else {
             if recoveryRequired { errorMessage = recoveryErrorMessage }
@@ -537,6 +590,7 @@ public final class MenuBarViewModel: ObservableObject {
     }
 
     public func syncActive() async {
+        await cancelAutomaticUsageRefresh()
         statusMessage = nil
         guard !isWorking, !recoveryRequired else {
             if recoveryRequired { errorMessage = recoveryErrorMessage }
@@ -797,16 +851,71 @@ public final class MenuBarViewModel: ObservableObject {
         usageFailedProfileIDs.formIntersection(profileIDs)
     }
 
-    private func reloadUsage() async {
+    private func reloadUsage(
+        profileIDs requestedProfileIDs: Set<ProfileID>? = nil,
+        at date: Date = .now
+    ) async {
         guard let loadProfileUsage else { return }
         do {
-            let report = try await loadProfileUsage()
+            let report = try await loadProfileUsage(requestedProfileIDs)
+            applyUsageReport(report, profileIDs: requestedProfileIDs, at: date)
+        } catch {
+            let failedProfileIDs = requestedProfileIDs ?? Set(profiles.map(\.id))
+            for profileID in failedProfileIDs {
+                usageByProfileID[profileID] = nil
+            }
+            usageFailedProfileIDs.formUnion(failedProfileIDs)
+        }
+    }
+
+    private func applyUsageReport(
+        _ report: ProfileUsageReport,
+        profileIDs requestedProfileIDs: Set<ProfileID>?,
+        at date: Date,
+        preservingMissingUsage: Bool = false
+    ) {
+        if requestedProfileIDs == nil {
+            lastFullUsageRefreshAt = date
+        }
+        if preservingMissingUsage {
+            let targetProfileIDs = requestedProfileIDs ?? Set(profiles.map(\.id))
+            for profileID in targetProfileIDs {
+                if let usage = report.usageByProfileID[profileID] {
+                    usageByProfileID[profileID] = usage
+                    usageFailedProfileIDs.remove(profileID)
+                } else if usageByProfileID[profileID] == nil {
+                    usageFailedProfileIDs.insert(profileID)
+                }
+            }
+        } else if let requestedProfileIDs {
+            for profileID in requestedProfileIDs {
+                if let usage = report.usageByProfileID[profileID] {
+                    usageByProfileID[profileID] = usage
+                    usageFailedProfileIDs.remove(profileID)
+                } else {
+                    usageByProfileID[profileID] = nil
+                    usageFailedProfileIDs.insert(profileID)
+                }
+            }
+        } else {
             usageByProfileID = report.usageByProfileID
             usageFailedProfileIDs = report.failedProfileIDs
-        } catch {
-            usageByProfileID = [:]
-            usageFailedProfileIDs = Set(profiles.map(\.id))
         }
+    }
+
+    private func cancelAutomaticUsageRefresh() async {
+        if isCancellingAutomaticUsageRefresh, let task = automaticUsageRefreshTask {
+            _ = await task.result
+            return
+        }
+        guard let task = automaticUsageRefreshTask else { return }
+        isCancellingAutomaticUsageRefresh = true
+        defer {
+            automaticUsageRefreshTask = nil
+            isCancellingAutomaticUsageRefresh = false
+        }
+        task.cancel()
+        _ = await task.result
     }
 
     private func refreshState() async throws {

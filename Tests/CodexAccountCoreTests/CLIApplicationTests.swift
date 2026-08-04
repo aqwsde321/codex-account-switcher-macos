@@ -114,6 +114,13 @@ func cliApplicationTests() -> [TestCase] {
                     "usage workspace was not removed"
                 )
 
+                let activeOnly = try await provider.profileUsage(profileIDs: [fixture.source.id])
+                try expect(
+                    Set(activeOnly.usageByProfileID.keys) == [fixture.source.id]
+                        && activeOnly.failedProfileIDs.isEmpty,
+                    "active-only usage query included an inactive account"
+                )
+
                 let targetURL = fixture.storeURL
                     .appendingPathComponent("credentials", isDirectory: true)
                     .appendingPathComponent("\(fixture.target.id).json", isDirectory: false)

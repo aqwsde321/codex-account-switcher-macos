@@ -252,7 +252,9 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
         }
     }
 
-    public func profileUsage() async throws -> ProfileUsageReport {
+    public func profileUsage(
+        profileIDs requestedProfileIDs: Set<ProfileID>? = nil
+    ) async throws -> ProfileUsageReport {
         guard !switchInProgress else {
             throw LocalCLIDataProviderFailure.switchAlreadyRunning
         }
@@ -273,11 +275,14 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
               try !verificationWorkspaceExists() else {
             throw LocalCLIDataProviderFailure.pendingRecovery
         }
+        let targetProfiles = registry.profiles.filter { profile in
+            requestedProfileIDs?.contains(profile.id) ?? true
+        }
         var usageByProfileID = [ProfileID: AppServerRateLimitsRead]()
         var failedProfileIDs = Set<ProfileID>()
 
         // ponytail: three accounts share one recovery-safe workspace; split only if measured refresh latency requires it.
-        for (index, profile) in registry.profiles.enumerated() {
+        for (index, profile) in targetProfiles.enumerated() {
             try Task.checkCancellation()
             guard !profile.needsRelogin else {
                 failedProfileIDs.insert(profile.id)
@@ -322,7 +327,7 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
                 where failure.childDisposition == .unconfirmed
             {
                 probeChildUnconfirmed = true
-                failedProfileIDs.formUnion(registry.profiles[index...].map(\.id))
+                failedProfileIDs.formUnion(targetProfiles[index...].map(\.id))
                 break
             } catch is CancellationError {
                 throw CancellationError()
@@ -346,7 +351,7 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
                     if (error as? LocalCLIDataProviderFailure) == .verificationWorkspaceFailed {
                         probeChildUnconfirmed = true
                     }
-                    failedProfileIDs.formUnion(registry.profiles[index...].map(\.id))
+                    failedProfileIDs.formUnion(targetProfiles[index...].map(\.id))
                     break
                 }
             }

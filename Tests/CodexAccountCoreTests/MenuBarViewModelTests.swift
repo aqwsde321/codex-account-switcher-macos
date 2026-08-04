@@ -75,7 +75,7 @@ func menuBarViewModelTests() -> [TestCase] {
             let usageLoads = RefreshOrderRecorder()
             let model = await makeMenuBarModel(
                 provider: provider,
-                loadProfileUsage: {
+                loadProfileUsage: { _ in
                     await usageLoads.record("usage")
                     return report
                 }
@@ -106,6 +106,152 @@ func menuBarViewModelTests() -> [TestCase] {
             try expect(
                 usageLoadEvents == ["usage", "usage", "usage"],
                 "credential changes did not reload usage"
+            )
+        },
+        TestCase("MenuBarViewModel refreshes active usage at two minutes and all usage at thirty") {
+            let profiles = menuBarProfiles()
+            let activeID = profiles[0].id
+            let inactiveID = profiles[1].id
+            let fullReport = ProfileUsageReport(
+                usageByProfileID: [
+                    activeID: AppServerRateLimitsRead(
+                        planType: "pro",
+                        windows: [
+                            AppServerRateLimitWindow(
+                                usedPercent: 20,
+                                windowDurationMinutes: 300,
+                                resetsAt: nil
+                            ),
+                        ]
+                    ),
+                    inactiveID: AppServerRateLimitsRead(
+                        planType: "team",
+                        windows: [
+                            AppServerRateLimitWindow(
+                                usedPercent: 15,
+                                windowDurationMinutes: 10_080,
+                                resetsAt: nil
+                            ),
+                        ]
+                    ),
+                ],
+                failedProfileIDs: []
+            )
+            let activeReport = ProfileUsageReport(
+                usageByProfileID: [
+                    activeID: AppServerRateLimitsRead(
+                        planType: "pro",
+                        windows: [
+                            AppServerRateLimitWindow(
+                                usedPercent: 40,
+                                windowDurationMinutes: 300,
+                                resetsAt: nil
+                            ),
+                        ]
+                    ),
+                ],
+                failedProfileIDs: []
+            )
+            let partialFullReport = ProfileUsageReport(
+                usageByProfileID: [activeID: activeReport.usageByProfileID[activeID]!],
+                failedProfileIDs: [inactiveID]
+            )
+            let provider = MenuBarProviderSpy(profiles: profiles)
+            let usageLoads = UsageReportSequence(
+                reports: [fullReport, activeReport, partialFullReport]
+            )
+            let model = await makeMenuBarModel(
+                provider: provider,
+                loadProfileUsage: { profileIDs in
+                    await usageLoads.load(profileIDs: profileIDs)
+                }
+            )
+
+            await model.load()
+            let now = Date.now
+            await model.refreshUsageAutomatically(now: now.addingTimeInterval(120))
+
+            let activeRefreshUsage = await MainActor.run { model.usageByProfileID }
+            try expect(
+                activeRefreshUsage[activeID]?.windows.first?.usedPercent == 40,
+                "two-minute refresh did not update the active account"
+            )
+            try expect(
+                activeRefreshUsage[inactiveID]?.windows.first?.usedPercent == 15,
+                "active refresh discarded cached inactive usage"
+            )
+
+            await model.refreshUsageAutomatically(now: now.addingTimeInterval(1_801))
+            let usageLoadEvents = await usageLoads.events
+            let fullRefreshUsage = await MainActor.run { model.usageByProfileID }
+            try expect(
+                usageLoadEvents == ["all", "active", "all"],
+                "automatic refresh did not use the 2-minute/30-minute scopes"
+            )
+            try expect(
+                fullRefreshUsage[inactiveID]?.windows.first?.usedPercent == 15,
+                "automatic partial failure discarded cached inactive usage"
+            )
+            try expect(
+                MenuBarViewModel.activeUsageRefreshInterval == .seconds(120)
+                    && MenuBarViewModel.inactiveUsageRefreshInterval == 1_800,
+                "automatic refresh intervals changed"
+            )
+        },
+        TestCase("MenuBarViewModel cancels automatic usage before an account action") {
+            let profiles = menuBarProfiles()
+            let activeID = profiles[0].id
+            let report = ProfileUsageReport(
+                usageByProfileID: [
+                    activeID: AppServerRateLimitsRead(
+                        planType: "pro",
+                        windows: [
+                            AppServerRateLimitWindow(
+                                usedPercent: 20,
+                                windowDurationMinutes: 300,
+                                resetsAt: nil
+                            ),
+                        ]
+                    ),
+                ],
+                failedProfileIDs: []
+            )
+            let provider = MenuBarProviderSpy(profiles: profiles)
+            let usageProbe = AutomaticUsageRefreshProbe(report: report)
+            let model = await makeMenuBarModel(
+                provider: provider,
+                loadProfileUsage: { try await usageProbe.load(profileIDs: $0) }
+            )
+
+            await model.load()
+            let automaticRefresh = Task {
+                await model.refreshUsageAutomatically(
+                    now: Date.now.addingTimeInterval(120)
+                )
+            }
+            await usageProbe.waitUntilAutomaticRefreshStarted()
+
+            let blockedByRefresh = await MainActor.run { model.isWorking }
+            try expect(!blockedByRefresh, "automatic refresh disabled account actions")
+            let firstSelection = Task { await model.select(profiles[0]) }
+            await usageProbe.waitUntilCancellationStarted()
+            let secondSelection = Task { await model.select(profiles[0]) }
+            for _ in 0..<10 { await Task.yield() }
+            let eventsBeforeCancellationFinished = await provider.events
+            try expect(
+                eventsBeforeCancellationFinished.isEmpty,
+                "a second account action bypassed automatic refresh cancellation"
+            )
+            await usageProbe.finishCancellation()
+            await firstSelection.value
+            await secondSelection.value
+            await automaticRefresh.value
+
+            let cancellationCount = await usageProbe.cancellationCount
+            let events = await provider.events
+            try expect(
+                cancellationCount == 1 && events == ["activate"],
+                "account action did not preempt automatic refresh"
             )
         },
         TestCase("MenuBarViewModel loads three cards and confirms only inactive selection") {
@@ -1255,6 +1401,75 @@ private actor RefreshOrderRecorder {
 
     func record(_ event: String) {
         events.append(event)
+    }
+}
+
+private actor UsageReportSequence {
+    private var reports: [ProfileUsageReport]
+    private(set) var events = [String]()
+
+    init(reports: [ProfileUsageReport]) {
+        self.reports = reports
+    }
+
+    func load(profileIDs: Set<ProfileID>?) -> ProfileUsageReport {
+        events.append(profileIDs == nil ? "all" : "active")
+        return reports.removeFirst()
+    }
+}
+
+private actor AutomaticUsageRefreshProbe {
+    private let report: ProfileUsageReport
+    private var loadCount = 0
+    private var startedContinuation: CheckedContinuation<Void, Never>?
+    private var cancellationStartedContinuation: CheckedContinuation<Void, Never>?
+    private var finishCancellationContinuation: CheckedContinuation<Void, Never>?
+    private var automaticRefreshStarted = false
+    private var cancellationStarted = false
+    private(set) var cancellationCount = 0
+
+    init(report: ProfileUsageReport) {
+        self.report = report
+    }
+
+    func load(profileIDs: Set<ProfileID>?) async throws -> ProfileUsageReport {
+        loadCount += 1
+        guard loadCount == 2 else { return report }
+        automaticRefreshStarted = true
+        startedContinuation?.resume()
+        startedContinuation = nil
+        do {
+            try await Task.sleep(for: .seconds(10))
+            return report
+        } catch is CancellationError {
+            cancellationCount += 1
+            cancellationStarted = true
+            cancellationStartedContinuation?.resume()
+            cancellationStartedContinuation = nil
+            await withCheckedContinuation { continuation in
+                finishCancellationContinuation = continuation
+            }
+            throw CancellationError()
+        }
+    }
+
+    func waitUntilAutomaticRefreshStarted() async {
+        guard !automaticRefreshStarted else { return }
+        await withCheckedContinuation { continuation in
+            startedContinuation = continuation
+        }
+    }
+
+    func waitUntilCancellationStarted() async {
+        guard !cancellationStarted else { return }
+        await withCheckedContinuation { continuation in
+            cancellationStartedContinuation = continuation
+        }
+    }
+
+    func finishCancellation() {
+        finishCancellationContinuation?.resume()
+        finishCancellationContinuation = nil
     }
 }
 
