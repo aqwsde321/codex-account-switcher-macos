@@ -8,6 +8,7 @@ struct CodexAccountMenuBarApp: App {
     @NSApplicationDelegateAdaptor(MenuBarAppDelegate.self) private var appDelegate
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @StateObject private var model: MenuBarViewModel
+    @StateObject private var sleepPrevention: SleepPreventionViewModel
 
     init() {
         let home = FileManager.default.homeDirectoryForCurrentUser
@@ -75,14 +76,29 @@ struct CodexAccountMenuBarApp: App {
                 }
             )
         )
+        _sleepPrevention = StateObject(
+            wrappedValue: SleepPreventionViewModel(
+                readEnabled: {
+                    try await SleepPreventionSystem.readEnabled()
+                },
+                setEnabled: { enabled in
+                    try await SleepPreventionSystem.setEnabled(enabled)
+                }
+            )
+        )
     }
 
     var body: some Scene {
         MenuBarExtra {
-            AccountMenuView(model: model)
+            AccountMenuView(model: model, sleepPrevention: sleepPrevention)
         } label: {
             HStack(spacing: 4) {
-                Image(nsImage: usageStatusImage(model.activeRemainingPercent))
+                Image(
+                    nsImage: usageStatusImage(
+                        model.activeRemainingPercent,
+                        sleepPreventionEnabled: sleepPrevention.isEnabled == true
+                    )
+                )
                     .scaleEffect(model.isAutomaticallyRefreshing && !reduceMotion ? 1.06 : 1)
                     .opacity(model.isAutomaticallyRefreshing ? 0.55 : 1)
                     .animation(refreshAnimation, value: model.isAutomaticallyRefreshing)
@@ -92,15 +108,8 @@ struct CodexAccountMenuBarApp: App {
                 }
             }
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel(
-                model.activeRemainingPercent.map {
-                    model.isAutomaticallyRefreshing
-                        ? "Codex 계정 한도 자동 조회 중, \($0)% 남음"
-                        : "Codex 계정 \($0)% 남음"
-                } ?? (model.isAutomaticallyRefreshing
-                    ? "Codex 계정 한도 자동 조회 중"
-                    : "Codex 계정")
-            )
+            .accessibilityLabel(statusAccessibilityLabel)
+            .task { await sleepPrevention.load() }
             .task {
                 await model.load()
                 while !Task.isCancelled {
@@ -116,10 +125,25 @@ struct CodexAccountMenuBarApp: App {
         .menuBarExtraStyle(.window)
     }
 
-    private func usageStatusImage(_ remainingPercent: Int?) -> NSImage {
-        let size = NSSize(width: 17, height: 17)
+    private var statusAccessibilityLabel: String {
+        let usage = model.activeRemainingPercent.map {
+            model.isAutomaticallyRefreshing
+                ? "Codex 계정 한도 자동 조회 중, \($0)% 남음"
+                : "Codex 계정 \($0)% 남음"
+        } ?? (model.isAutomaticallyRefreshing
+            ? "Codex 계정 한도 자동 조회 중"
+            : "Codex 계정")
+        return usage + (sleepPrevention.isEnabled == true ? ", 잠자기 방지 켜짐" : "")
+    }
+
+    private func usageStatusImage(
+        _ remainingPercent: Int?,
+        sleepPreventionEnabled: Bool
+    ) -> NSImage {
+        let size = NSSize(width: sleepPreventionEnabled ? 24 : 17, height: 17)
         let image = NSImage(size: size, flipped: false) { rect in
-            let circleRect = rect.insetBy(dx: 1.25, dy: 1.25)
+            let ringRect = NSRect(x: 0, y: 0, width: 17, height: 17)
+            let circleRect = ringRect.insetBy(dx: 1.25, dy: 1.25)
             let track = NSBezierPath(ovalIn: circleRect)
             track.lineWidth = 1.5
             NSColor.black.withAlphaComponent(0.22).setStroke()
@@ -128,7 +152,7 @@ struct CodexAccountMenuBarApp: App {
             if let remainingPercent, remainingPercent > 0 {
                 let arc = NSBezierPath()
                 arc.appendArc(
-                    withCenter: NSPoint(x: rect.midX, y: rect.midY),
+                    withCenter: NSPoint(x: ringRect.midX, y: ringRect.midY),
                     radius: circleRect.width / 2,
                     startAngle: 90,
                     endAngle: 90 - 360 * CGFloat(remainingPercent) / 100,
@@ -148,11 +172,18 @@ struct CodexAccountMenuBarApp: App {
             let labelSize = label.size(withAttributes: attributes)
             label.draw(
                 at: NSPoint(
-                    x: rect.midX - labelSize.width / 2,
-                    y: rect.midY - labelSize.height / 2
+                    x: ringRect.midX - labelSize.width / 2,
+                    y: ringRect.midY - labelSize.height / 2
                 ),
                 withAttributes: attributes
             )
+            if sleepPreventionEnabled,
+               let badge = NSImage(
+                   systemSymbolName: "cup.and.saucer.fill",
+                   accessibilityDescription: nil
+               ) {
+                badge.draw(in: NSRect(x: 14, y: 9, width: 10, height: 8))
+            }
             return true
         }
         image.isTemplate = true
@@ -173,8 +204,53 @@ private final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+private enum SleepPreventionSystem {
+    static func readEnabled() async throws -> Bool {
+        let output = try await Task.detached(priority: .utility) {
+            let process = Process()
+            let outputPipe = Pipe()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/pmset")
+            process.arguments = ["-g"]
+            process.standardOutput = outputPipe
+            process.standardError = FileHandle.nullDevice
+            try process.run()
+            let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0,
+                  let output = String(data: data, encoding: .utf8) else {
+                throw SleepPreventionSystemError.commandFailed
+            }
+            return output
+        }.value
+        guard let enabled = SleepPreventionViewModel.parsePMSetOutput(output) else {
+            throw SleepPreventionSystemError.commandFailed
+        }
+        return enabled
+    }
+
+    @MainActor
+    static func setEnabled(_ enabled: Bool) throws {
+        let value = enabled ? 1 : 0
+        guard let script = NSAppleScript(
+            source: "do shell script \"/usr/bin/pmset -a disablesleep \(value)\" with administrator privileges"
+        ) else {
+            throw SleepPreventionSystemError.commandFailed
+        }
+        var errorInfo: NSDictionary?
+        _ = script.executeAndReturnError(&errorInfo)
+        guard errorInfo == nil else {
+            throw SleepPreventionSystemError.commandFailed
+        }
+    }
+}
+
+private enum SleepPreventionSystemError: Error {
+    case commandFailed
+}
+
 private struct AccountMenuView: View {
     @ObservedObject var model: MenuBarViewModel
+    @ObservedObject var sleepPrevention: SleepPreventionViewModel
     @State private var isRegistering = false
     @State private var registrationLabel = ""
 
@@ -347,6 +423,30 @@ private struct AccountMenuView: View {
             }
 
             Divider()
+            HStack {
+                Label("잠자기 방지", systemImage: "cup.and.saucer")
+                Spacer()
+                if sleepPrevention.isWorking {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+                Toggle("잠자기 방지", isOn: sleepPreventionBinding)
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .disabled(
+                        sleepPrevention.isWorking
+                            || sleepPrevention.isEnabled == nil
+                    )
+                    .help("덮개를 닫아도 계속 동작해 발열과 배터리 소모가 증가할 수 있습니다. 앱 종료 후에도 유지됩니다.")
+            }
+            if let errorMessage = sleepPrevention.errorMessage {
+                Text(errorMessage)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .accessibilityLabel("오류: \(errorMessage)")
+            }
+
+            Divider()
             Button("종료") {
                 NSApplication.shared.terminate(nil)
             }
@@ -354,6 +454,17 @@ private struct AccountMenuView: View {
         }
         .padding(14)
         .frame(width: 320)
+        .task { await sleepPrevention.load() }
+    }
+
+    private var sleepPreventionBinding: Binding<Bool> {
+        Binding(
+            get: { sleepPrevention.isEnabled == true },
+            set: { enabled in
+                guard sleepPrevention.isEnabled != enabled else { return }
+                Task { await sleepPrevention.setEnabled(enabled) }
+            }
+        )
     }
 
     private var registrationLabelIsValid: Bool {

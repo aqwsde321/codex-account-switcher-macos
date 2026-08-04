@@ -4,6 +4,42 @@ import CodexAccountMenuBarModel
 
 func menuBarViewModelTests() -> [TestCase] {
     [
+        TestCase("SleepPreventionViewModel parses and verifies pmset mutations") {
+            let probe = SleepPreventionProbe(enabled: true)
+            let model = await MainActor.run {
+                SleepPreventionViewModel(
+                    readEnabled: { try await probe.read() },
+                    setEnabled: { await probe.set($0) }
+                )
+            }
+
+            await model.load()
+            await model.setEnabled(false)
+            await probe.stopApplyingChanges()
+            await model.setEnabled(true)
+            let mismatchState = await MainActor.run {
+                (model.isEnabled, model.errorMessage)
+            }
+            await probe.failReads()
+            await model.load()
+
+            let unknownState = await MainActor.run {
+                (model.isEnabled, model.errorMessage)
+            }
+            let requests = await probe.requests
+            try expect(
+                mismatchState.0 == false
+                    && mismatchState.1 != nil
+                    && unknownState.0 == true
+                    && unknownState.1?.contains("켜짐으로 표시") == true
+                    && requests == [false, true]
+                    && SleepPreventionViewModel.parsePMSetOutput("SleepDisabled 1") == true
+                    && SleepPreventionViewModel.parsePMSetOutput("SleepDisabled 0") == false
+                    && SleepPreventionViewModel.parsePMSetOutput("SleepDisabled unknown") == nil
+                    && SleepPreventionViewModel.parsePMSetOutput("sleep 1") == nil,
+                "sleep prevention state was not parsed or verified fail-closed"
+            )
+        },
         TestCase("MenuBarViewModel attempts recovery before loading state") {
             let provider = MenuBarProviderSpy(profiles: menuBarProfiles())
             let order = RefreshOrderRecorder()
@@ -1569,6 +1605,39 @@ private func restoredProfile(_ profile: ProfileListItem) -> ProfileListItem {
         active: true,
         needsRelogin: profile.needsRelogin
     )
+}
+
+private actor SleepPreventionProbe {
+    private var enabled: Bool
+    private var appliesChanges = true
+    private var readsFail = false
+    private(set) var requests = [Bool]()
+
+    init(enabled: Bool) {
+        self.enabled = enabled
+    }
+
+    func read() throws -> Bool {
+        if readsFail { throw SleepPreventionProbeError.readFailed }
+        return enabled
+    }
+
+    func set(_ enabled: Bool) {
+        requests.append(enabled)
+        if appliesChanges { self.enabled = enabled }
+    }
+
+    func stopApplyingChanges() {
+        appliesChanges = false
+    }
+
+    func failReads() {
+        readsFail = true
+    }
+}
+
+private enum SleepPreventionProbeError: Error {
+    case readFailed
 }
 
 private actor MenuBarProviderSpy {
