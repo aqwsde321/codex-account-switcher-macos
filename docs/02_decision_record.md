@@ -227,7 +227,7 @@
 
 ## ADR-012: 프로덕션 비활성 인증은 macOS Keychain에 저장한다
 
-- 상태: 승인
+- 상태: ADR-034로 대체 (2026-08-04)
 - 결정:
   - Spike는 한정된 로컬 `0600` 파일 저장을 허용한다.
   - 메뉴바 제품은 각 프로필의 인증 blob을 Keychain에 저장한다.
@@ -517,7 +517,7 @@
 
 ## ADR-030: 소스 배포는 사용자 기본 file-based Keychain을 사용한다
 
-- 상태: 승인 (2026-07-31)
+- 상태: ADR-034로 대체 (2026-08-04)
 - 결정:
   - 초기 제품은 GitHub 소스에서 직접 빌드하는 비샌드박스 `.app`으로 배포한다.
   - 제품 비활성 인증은 기존 service `CodexAccountSwitcher.credentials.v1`과 profile UUID account를 유지한 사용자 기본 file-based Keychain generic-password item에 저장한다. 일반 구성에서는 login Keychain이다.
@@ -541,7 +541,7 @@
 
 ## ADR-031: 비활성 계정 삭제는 로컬 저장본만 제거한다
 
-- 상태: 승인 (2026-08-02)
+- 상태: 승인 (2026-08-02), 저장 backend 문구는 ADR-034로 대체
 - 결정:
   - 삭제는 비활성 프로필에만 허용한다. 활성 프로필에는 삭제 UI를 노출하지 않고 Core도 거부한다.
   - 삭제 범위는 메뉴바 registry의 해당 프로필과 profile UUID로 저장한 Keychain item이다. OpenAI 계정, 현재 `~/.codex/auth.json`, 현재 Codex 로그인은 변경하지 않는다.
@@ -602,6 +602,31 @@
   - 공식 앱이 세션 폐기 없이 여러 계정을 저장하는 공개 API를 제공함
   - 격리 `codex login` 또는 `account/read` 계약이 제거됨
 
+## ADR-034: 메뉴바 저장 프로필 인증은 private JSON으로 관리한다
+
+- 상태: 승인 (2026-08-04)
+- 결정:
+  - 메뉴바 제품도 기존 `FileCredentialStore`를 사용한다. 저장 위치는 `~/Library/Application Support/CodexAccountSwitcher/credentials/<profile-UUID>.json`, directory mode는 `0700`, file mode는 `0600`이다.
+  - JSON은 토큰을 원문으로 보관한다. 같은 사용자 권한 프로세스에 대한 비밀 격리는 제공하지 않는다.
+  - 등록·전환·복구의 이메일 검증, durable replace, journal 순서는 바꾸지 않는다.
+  - 제품 런타임은 Keychain을 읽거나 쓰지 않는다. 기존 `CodexAccountSwitcher.credentials.v1` item은 자동 이전·삭제하지 않는다.
+- 기존 설치 전환:
+  - 기존 registry와 활성 ID는 유지한다. Keychain-only 비활성 B/C는 먼저 삭제하고 브라우저 격리 로그인으로 다시 등록한다.
+  - 추가 등록 직전 활성 A JSON이 없으면 현재 공용 `auth.json`을 A 이메일로 검증하고 round-trip 확인 뒤 A JSON을 생성한다. 검증 실패 시 A JSON과 새 프로필을 만들지 않는다.
+  - 새 B/C는 비활성 JSON으로 저장한다. 공식 Codex 로그아웃은 사용하지 않는다.
+- 이유:
+  - ad-hoc 재빌드의 Keychain ACL·승인·잠금 실패면이 계정 전환에 불필요하게 결합됐다.
+  - Core의 기존 private file store가 권한, strict JSON, same-directory atomic replace, `fsync`, recovery 계약을 이미 제공한다.
+  - 이 변경은 Keychain 고유 실패면만 제거한다. 기존 전환 오류 전체의 원인이 Keychain이었다고 단정하지 않는다.
+- 기각 대안:
+  - Keychain item을 자동 읽어 JSON으로 이전: 피하려는 Keychain 접근과 승인을 업그레이드 필수 경로로 만든다.
+  - 새 store namespace에서 A부터 전부 재등록: 안전하지만 기존 registry와 활성 표시까지 버린다.
+  - 계정별 영구 `CODEX_HOME`: CLI child에는 맞지만 실행 중인 공식 macOS 앱의 기본 인증 전환을 대체하지 못한다.
+- 대체 범위: ADR-012·ADR-030 전체와 ADR-031의 Keychain backend 문구를 대체한다.
+- 검증:
+  - 임시 store에서 기존 A/B credential 파일이 없는 상태를 만들고, B 삭제→검증된 현재 A seed→격리 B 재등록→A active·B inactive·공용 auth 불변을 회귀 테스트한다.
+  - 실환경은 B 삭제→B 재등록→B 전환→A 복귀 후에만 C를 등록한다.
+
 ## 2. 결정 간 핵심 제약
 
 아래 제약은 하나라도 깨지면 구현을 계속하지 않는다.
@@ -611,14 +636,14 @@
 3. 현재 인증 최신화는 현재 이메일이 등록 프로필과 일치할 때만 한다.
 4. 공식 앱은 정상 종료만 사용한다.
 5. 독립 Codex 프로세스가 남으면 인증을 변경하지 않는다.
-6. 비활성 인증은 제품에서 Keychain에 둔다.
+6. 저장 프로필 인증은 제품 private JSON store의 `0700` directory와 `0600` file에 둔다.
 7. 대상 실패 시 이전 계정 검증 복원, 복원 실패 시 앱 미실행 원칙을 지킨다.
 8. `auth.json` 외 공용 상태와 공식 앱 번들을 수정하지 않는다.
 9. MVP는 최대 3개 프로필만 허용하고 네 번째 등록은 무변경 거부한다.
 10. MVP는 사용량, 자동 전환, 계정별 환경을 포함하지 않는다.
 11. 실제 인증값과 이메일을 문서·로그·fixture에 넣지 않는다.
 12. 재로그인 반영은 exact inactive target만 허용하며 성공 후 앱을 자동 실행하지 않는다.
-13. 계정 삭제는 비활성 로컬 프로필과 해당 Keychain item에만 적용하고 현재 로그인은 바꾸지 않는다.
+13. 계정 삭제는 비활성 로컬 프로필과 해당 JSON credential에만 적용하고 현재 로그인은 바꾸지 않는다.
 
 ## 3. 재검토 절차
 
@@ -627,11 +652,11 @@
 1. 어떤 재검토 트리거가 발생했는가
 2. 공식 문서 또는 재현 가능한 실험 근거는 무엇인가
 3. 동일 task 연속성, 인증 무결성, 사용자 작업 손실 위험이 어떻게 변하는가
-4. 기존 Keychain 항목, 저널, registry migration이 필요한가
+4. 기존 Keychain·JSON credential, 저널, registry migration이 필요한가
 5. 실패 시 이전 버전으로 되돌리는 방법은 무엇인가
 
 편의만 좋아지고 위 핵심 제약이 약해지는 변경은 승인하지 않는다.
 
 ## 4. 구현 task 시작용 요약
 
-Swift CLI Core와 메뉴바의 등록·전환·복구·재로그인·비활성 프로필 삭제 연결은 완료됐다. 기본 `~/.codex`만 지원하고 비활성 인증은 Keychain에 둔다. 공식 앱 정상 종료, 독립 CLI 차단, `flock`, 비밀 없는 저널, `account/read` 이메일 검증, 전체 롤백 불변조건은 유지한다. 최대 3개 프로필을 노출하고 사용량은 후속이다. ADR-027에 따라 개발은 진행하되 B-010 정식 증거는 MVP 완료·배포 전 확보한다.
+Swift CLI Core와 메뉴바의 등록·전환·복구·재로그인·비활성 프로필 삭제 연결은 완료됐다. 기본 `~/.codex`만 지원하고 저장 프로필 인증은 private JSON store에 둔다. 기존 Keychain-only 비활성 프로필은 삭제·재등록하며, 추가 등록 전에 검증된 현재 활성 인증으로 활성 JSON을 1회 생성한다. 공식 앱 정상 종료, 독립 CLI 차단, `flock`, 비밀 없는 저널, `account/read` 이메일 검증, 전체 롤백 불변조건은 유지한다. 최대 3개 프로필을 노출하고 사용량은 후속이다. ADR-027에 따라 개발은 진행하되 B-010 정식 증거는 MVP 완료·배포 전 확보한다.

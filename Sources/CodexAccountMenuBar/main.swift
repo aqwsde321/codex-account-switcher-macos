@@ -1,10 +1,7 @@
 import AppKit
 import CodexAccountCore
 import CodexAccountMenuBarModel
-import Darwin
 import SwiftUI
-
-private let productCredentialService = "CodexAccountSwitcher.credentials.v1"
 
 @main
 struct CodexAccountMenuBarApp: App {
@@ -12,11 +9,6 @@ struct CodexAccountMenuBarApp: App {
     @StateObject private var model: MenuBarViewModel
 
     init() {
-        if CommandLine.arguments.count == 2,
-           CommandLine.arguments[1] == "--keychain-smoke-test" {
-            Darwin.exit(runKeychainSmokeTest())
-        }
-
         let home = FileManager.default.homeDirectoryForCurrentUser
         let storeURL = home
             .appendingPathComponent("Library/Application Support", isDirectory: true)
@@ -24,12 +16,10 @@ struct CodexAccountMenuBarApp: App {
         let authURL = home
             .appendingPathComponent(".codex", isDirectory: true)
             .appendingPathComponent("auth.json", isDirectory: false)
-        let provider = try? LocalCLIDataProvider(
+        let provider = LocalCLIDataProvider(
             storeURL: storeURL,
             activeAuthURL: authURL,
-            credentialStore: KeychainCredentialStore(
-                service: productCredentialService
-            ),
+            credentialStore: FileCredentialStore(rootURL: storeURL),
             confirmAppOwnedTermination: { count in
                 await MainActor.run {
                     confirmAppOwnedTermination(count: count)
@@ -39,73 +29,44 @@ struct CodexAccountMenuBarApp: App {
         _model = StateObject(
             wrappedValue: MenuBarViewModel(
                 loadProfiles: {
-                    guard let provider else {
-                        throw MenuBarStartupFailure.credentialStoreConfiguration
-                    }
-                    return try await provider.profiles()
+                    try await provider.profiles()
                 },
                 loadRecoveryStatus: {
-                    guard let provider else {
-                        throw MenuBarStartupFailure.credentialStoreConfiguration
-                    }
-                    return try await provider.recoveryStatus()
+                    try await provider.recoveryStatus()
                 },
                 captureProfile: {
-                    guard let provider else {
-                        throw MenuBarStartupFailure.credentialStoreConfiguration
-                    }
-                    return try await provider.captureProfile(label: $0)
+                    try await provider.captureProfile(label: $0)
                 },
                 removeProfile: { profileID in
-                    guard let provider else {
-                        throw MenuBarStartupFailure.credentialStoreConfiguration
-                    }
-                    return try await provider.removeProfile(profileID)
+                    try await provider.removeProfile(profileID)
                 },
                 syncActiveProfile: {
-                    guard let provider else {
-                        throw MenuBarStartupFailure.credentialStoreConfiguration
-                    }
-                    return try await provider.syncActiveProfile()
+                    try await provider.syncActiveProfile()
                 },
                 switchProfile: { target, onPhaseChange in
-                    guard let provider else {
-                        throw MenuBarStartupFailure.credentialStoreConfiguration
-                    }
-                    return try await provider.switchProfile(
+                    try await provider.switchProfile(
                         target: target,
                         onPhaseChange: onPhaseChange
                     )
                 },
                 reloginProfile: { target in
-                    guard let provider else {
-                        throw MenuBarStartupFailure.credentialStoreConfiguration
-                    }
-                    return try await provider.reloginProfile(target: target)
+                    try await provider.reloginProfile(target: target)
                 },
                 cancelProfileLogin: {
-                    guard let provider else { return }
                     await provider.cancelProfileLogin()
                 },
                 restoreRecoveryProfile: { target, transactionID in
-                    guard let provider else {
-                        throw MenuBarStartupFailure.credentialStoreConfiguration
-                    }
-                    return try await provider.restoreRecoveryProfile(
+                    try await provider.restoreRecoveryProfile(
                         target: target,
                         expectedTransactionID: transactionID
                     )
                 },
                 retryPendingRecovery: { transactionID in
-                    guard let provider else {
-                        throw MenuBarStartupFailure.credentialStoreConfiguration
-                    }
-                    return try await provider.retryPendingRecovery(
+                    try await provider.retryPendingRecovery(
                         expectedTransactionID: transactionID
                     )
                 },
                 attemptAutomaticRecovery: {
-                    guard let provider else { return }
                     _ = try? await provider.recoverPendingTransaction()
                 }
             )
@@ -377,80 +338,6 @@ private struct ProfileCard: View {
     }
 }
 
-private enum MenuBarStartupFailure: Error, Sendable {
-    case credentialStoreConfiguration
-}
-
-private enum KeychainSmokeFailure: Error {
-    case credentialMismatch
-    case deletedCredentialReadable
-}
-
-private func runKeychainSmokeTest() -> Int32 {
-    let profileID = ProfileID(UUID())
-    let service = "\(productCredentialService).smoke.\(UUID().uuidString)"
-    var stage = "configuration"
-    var created = false
-
-    do {
-        let store = try KeychainCredentialStore(service: service)
-        let first = try CredentialBlob(
-            validating: Data(
-                #"{"auth_mode":"chatgpt","tokens":{"id_token":"synthetic-id-1","access_token":"synthetic-access-1","refresh_token":"synthetic-refresh-1"}}"#.utf8
-            )
-        )
-        let second = try CredentialBlob(
-            validating: Data(
-                #"{"auth_mode":"chatgpt","tokens":{"id_token":"synthetic-id-2","access_token":"synthetic-access-2","refresh_token":"synthetic-refresh-2"}}"#.utf8
-            )
-        )
-
-        stage = "create"
-        try store.saveCredential(first, for: profileID)
-        created = true
-
-        stage = "read"
-        guard try store.loadCredential(for: profileID) == first else {
-            throw KeychainSmokeFailure.credentialMismatch
-        }
-
-        stage = "update"
-        try store.saveCredential(second, for: profileID)
-        guard try store.loadCredential(for: profileID) == second else {
-            throw KeychainSmokeFailure.credentialMismatch
-        }
-
-        stage = "delete"
-        try store.removeCredential(for: profileID)
-        try store.removeCredential(for: profileID)
-
-        stage = "verify-delete"
-        do {
-            _ = try store.loadCredential(for: profileID)
-            throw KeychainSmokeFailure.deletedCredentialReadable
-        } catch CredentialStoreError.notFound {
-            created = false
-            print("keychain_smoke=passed")
-            return 0
-        }
-    } catch {
-        let cleanup: String
-        if created,
-           let store = try? KeychainCredentialStore(service: service) {
-            do {
-                try store.removeCredential(for: profileID)
-                cleanup = "passed"
-            } catch {
-                cleanup = "failed"
-            }
-        } else {
-            cleanup = "not_needed"
-        }
-        print("keychain_smoke=failed stage=\(stage) cleanup=\(cleanup)")
-        return cleanup == "failed" ? 2 : 1
-    }
-}
-
 @MainActor
 private func confirmAppOwnedTermination(count: Int) -> Bool {
     let alert = NSAlert()
@@ -514,7 +401,7 @@ private func confirmProfileRemoval(_ profile: ProfileListItem) -> Bool {
     let alert = NSAlert()
     alert.alertStyle = .warning
     alert.messageText = "\(profile.label) 계정을 삭제할까요?"
-    alert.informativeText = "이 앱에 저장된 계정 정보와 키체인 자격증명만 삭제합니다. OpenAI 계정은 삭제되지 않고 현재 Codex 로그인도 바뀌지 않습니다. 나중에 같은 계정으로 로그인해 다시 등록할 수 있습니다."
+    alert.informativeText = "이 앱에 저장된 계정 정보와 로컬 JSON 자격증명만 삭제합니다. OpenAI 계정은 삭제되지 않고 현재 Codex 로그인도 바뀌지 않습니다. 나중에 같은 계정으로 로그인해 다시 등록할 수 있습니다."
     let cancel = alert.addButton(withTitle: "취소")
     cancel.keyEquivalent = "\u{1b}"
     let remove = alert.addButton(withTitle: "삭제")

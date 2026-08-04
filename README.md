@@ -26,8 +26,8 @@
 - `rollbackFailed` journal의 이전 프로필을 명시적으로 복구하는 `recovery restore`
 - 수동 복구의 완전 성공·앱 실행 미확인·journal 완료 불확실 typed outcome과 phase/expected-active finalization evidence gate
 - fake 3계정 카드와 확인 흐름을 가진 `MenuBarExtra` UI 프로토타입
-- CLI private file store와 제품 Keychain을 분리한 credential backend 경계, generic-password CRUD와 plaintext fallback 금지
-- `MenuBarExtra`의 실제 `LocalCLIDataProvider`·Keychain 주입과 Spike에서 분리된 제품 metadata store
+- CLI와 메뉴바가 동일 구현을 쓰는 계정별 `0600` JSON credential store
+- `MenuBarExtra`의 실제 `LocalCLIDataProvider`·`FileCredentialStore` 주입과 제품 metadata store
 - 메뉴바의 종료 확인 뒤 첫 로그인 등록·재실행, 추가 계정 격리 로그인·비활성 저장, recovery 상태의 mutation 차단
 - 메뉴바의 명시적 현재 활성 인증 저장, 실행 전 수동 종료 확인, 성공·복구 차단 상태 표시
 - 메뉴바 recovery pending phase와 journal의 정확한 이전 프로필 표시, blocked 상태의 fail-closed 안내
@@ -37,16 +37,17 @@
 - 메뉴바 상태 조회 전 미완료 journal 자동 복구, 불확실 상태 STOP, 복구 중 앱 자동 실행 금지
 - 비종결 recovery pending을 exact transaction에 묶어 공식 앱 정상 종료 뒤 다시 처리하는 메뉴바 복구 재시도
 - 메뉴바의 native 비동기 잔존 앱 프로세스 2차 확인, 취소 기본, 종료 전 exact snapshot 대상에만 `SIGTERM` 1회
-- 메뉴바 비활성 계정의 로컬 profile·Keychain item 삭제, 중단 자동 복구, 같은 계정 재등록 허용
+- 메뉴바 비활성 계정의 로컬 profile·JSON credential 삭제, 중단 자동 복구, 같은 계정 재등록 허용
 - Command Line Tools만으로 만드는 ad-hoc 서명 `.app`, 고정 경로 설치·LaunchAgent 자동 실행·보존형 제거
-- 번들·설치 실행파일의 random synthetic Keychain create/read/update/read/delete/notFound smoke; 제품 service·실제 auth 접근 0회
 
 아직 구현·노출하지 않음:
 
-- 실계정 제품 flow의 Keychain 검증, ad-hoc 재빌드 ACL과 잠금·접근 거부 정책 검증
+- B 삭제→B 재등록→A↔B 전환의 실계정 제품 검증
 - 5시간·주간 사용량 표시
 
 첫 capture는 명시 확인 뒤 공식 앱을 정상 종료하고 현재 인증을 갱신·저장해 활성 프로필로 확정한 뒤 앱을 다시 연다. 추가 capture는 별도 `CODEX_HOME`의 공식 브라우저 로그인을 사용해 새 프로필을 비활성으로 저장하며, 실행 중인 공식 앱·공용 `auth.json`·기존 활성 프로필은 바꾸지 않는다.
+
+계정별 JSON에는 토큰이 원문으로 들어간다. directory `0700`·file `0600`으로 제한하지만 Keychain 암호화가 아니며 같은 macOS 사용자 권한의 프로세스는 읽을 수 있다.
 
 ## 빌드와 테스트
 
@@ -59,7 +60,7 @@
 ./Scripts/install-app.sh
 ```
 
-`install-app.sh`는 `~/Applications/CodexAccountSwitcher.app`과 `~/Library/LaunchAgents/local.codex.account-switcher.plist`만 소유권 확인 후 교체한다. 제거는 `./Scripts/uninstall-app.sh`이며 Application Support, Keychain, 로그는 보존한다. 현재 ad-hoc 서명은 코드 변경 뒤 기존 Keychain item 접근 확인 또는 거부가 발생할 수 있으므로 update-safe identity로 간주하지 않는다.
+`install-app.sh`는 `~/Applications/CodexAccountSwitcher.app`과 `~/Library/LaunchAgents/local.codex.account-switcher.plist`만 소유권 확인 후 교체한다. 제거는 `./Scripts/uninstall-app.sh`이며 Application Support, 이전 버전의 Keychain item, 로그는 보존한다. 현재 앱은 이전 Keychain item을 읽거나 삭제하지 않는다.
 
 다른 Mac에서 SDK를 직접 지정하는 예:
 
@@ -138,9 +139,11 @@ cd codex-account-switcher-spike
 
 ### 메뉴바에서 비활성 계정 삭제·재등록
 
-비활성 카드 오른쪽 휴지통을 누르면 독립 확인창이 열린다. `취소`가 기본 동작이며 `삭제`를 승인하면 이 앱의 profile과 해당 Keychain item만 제거한다. OpenAI 계정, 현재 `auth.json`, 현재 Codex 로그인은 바뀌지 않으므로 삭제를 위해 Codex를 종료하거나 로그아웃할 필요가 없다. 활성 카드에는 휴지통이 없고 Core도 활성 profile 삭제를 거부한다.
+비활성 카드 오른쪽 휴지통을 누르면 독립 확인창이 열린다. `취소`가 기본 동작이며 `삭제`를 승인하면 이 앱의 profile과 해당 JSON credential만 제거한다. OpenAI 계정, 현재 `auth.json`, 현재 Codex 로그인은 바뀌지 않으므로 삭제를 위해 Codex를 종료하거나 로그아웃할 필요가 없다. 활성 카드에는 휴지통이 없고 Core도 활성 profile 삭제를 거부한다.
 
-삭제한 계정을 다시 등록하려면 메뉴바의 `계정 등록`을 누르고 열린 브라우저에서 그 계정으로 로그인한다. 같은 라벨·이메일을 다시 쓸 수 있지만 새 profile ID가 발급되며, 기존 활성 계정은 유지된다.
+이전 Keychain 버전에서 처음 전환할 때는 현재 공식 Codex가 registry의 활성 A인지 먼저 확인하고 비활성 B를 삭제한다. 이어서 `계정 등록`을 누르면 메뉴바가 현재 A를 기존 이메일 검증 뒤 JSON으로 저장하고, 열린 브라우저의 B를 새 비활성 JSON credential로 등록한다. 이전 Keychain item은 건드리지 않는다.
+
+삭제한 계정을 다시 등록하면 같은 라벨·이메일을 쓸 수 있지만 새 profile ID가 발급되며, 기존 활성 계정은 유지된다.
 
 ### 저장된 계정으로 전환
 

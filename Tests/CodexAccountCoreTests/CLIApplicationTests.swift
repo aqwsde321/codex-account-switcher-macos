@@ -2068,6 +2068,41 @@ func cliApplicationTests() -> [TestCase] {
                 try expect(credentials.pendingProfileIDs == [profileC.id], "C credential preceded its durable intent")
             }
         },
+        TestCase("Local provider replaces a file-less inactive profile through isolated registration") {
+            try await withCaptureTemporaryDirectory { directory in
+                let fixture = try makeReloginFixture(
+                    in: directory,
+                    activeAuthIsSource: true,
+                    isolatedLoginAccount: "b"
+                )
+                let store = try SpikeStore.openExisting(at: fixture.storeURL)
+                _ = try store.removeCredential(for: fixture.source.id)
+                _ = try store.removeCredential(for: fixture.target.id)
+                let authBefore = try DarwinDurableFileOperations().snapshot(at: fixture.authURL)
+                let provider = LocalCLIDataProvider(
+                    storeURL: fixture.storeURL,
+                    activeAuthURL: fixture.authURL,
+                    processProvider: EmptyProcessSnapshotProvider(),
+                    locateApp: { fixture.descriptor },
+                    runningApplicationPIDs: { _ in [42] }
+                )
+
+                let removed = try await provider.removeProfile(fixture.target.id)
+                let captured = try await provider.captureProfile(label: "B")
+
+                let registry = try store.loadRegistry()
+                let storedSource = try store.loadCredential(for: fixture.source.id)
+                let storedTarget = try store.loadCredential(for: captured.id)
+                let authAfter = try DarwinDurableFileOperations().snapshot(at: fixture.authURL)
+                try expect(removed.id == fixture.target.id, "file-less B was not removed")
+                try expect(registry.activeProfileID == fixture.source.id, "registration changed active A")
+                try expect(registry.profiles.map(\.label) == ["A", "B"], "B was not re-registered")
+                try expect(!captured.active, "registration activated B")
+                try expect(storedSource == fixture.sourceCredential, "current A auth was not seeded")
+                try expect(storedTarget == fixture.refreshedTargetCredential, "B credential changed")
+                try expect(authAfter == authBefore, "registration rewrote public auth")
+            }
+        },
         TestCase("Local provider rolls back isolated credential commits after an active auth race") {
             try await withCaptureTemporaryDirectory { directory in
                 let fixture = try makeReloginFixture(

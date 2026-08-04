@@ -4,7 +4,9 @@
 - 구현 상태: 최대 3개 프로필 Core/CLI, 수동 복구 typed outcome, `MenuBarExtra` 재로그인·시작 자동 복구·비활성 계정 삭제 slice 완료
 - 실제 검증: A↔B 기능 왕복 3회, 수동 A 복구 2회, B-011 자동 롤백 PASS
 - 제품 단계: ADR-027에 따라 `MenuBarExtra` MVP 개발 승인
-- 마지막 조사일: 2026-08-02
+- 마지막 조사일: 2026-08-04
+
+> 저장 backend의 현행 결정은 ADR-034다. 다른 문서의 제품 Keychain 계약은 이전 설계 기록이며 private JSON 계약으로 대체됐다.
 
 ## 1. 결론
 
@@ -91,7 +93,7 @@
 - 전환은 `flock` + secret-free journal + atomic rename
 - 떠나는 현재 계정의 갱신된 인증을 이메일 일치 때만 저장
 - 대상 저장 인증은 격리 홈에서 이메일 확인 후 refresh까지 성공한 최신본만 저장·적용
-- CLI Spike 비활성 인증은 repo 밖 `0700`/`0600` private file store, 제품 비활성 인증은 macOS Keychain; 제품의 평문 활성 인증 한 개만 `~/.codex/auth.json`에 materialize
+- CLI와 제품 저장 프로필 인증은 repo 밖 `0700`/`0600` private JSON store; 선택된 활성 인증 한 개만 `~/.codex/auth.json`에 materialize
 - 대상 실패 시 이전 계정 자동 롤백
 - 롤백 검증 실패 시 공식 앱을 실행하지 않음
 - MVP 등록은 최대 3개, 내부 모델은 배열

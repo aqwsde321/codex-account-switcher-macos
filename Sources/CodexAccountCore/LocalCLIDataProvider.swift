@@ -369,7 +369,6 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
         guard ApprovedResidentRule.codexCrashpad(for: descriptor) != nil else {
             throw LocalCLIDataProviderFailure.incompatibleApplication
         }
-        let sourceCredential = try credentialStore.loadCredential(for: source.id)
         let current = try readCurrentCredential()
         _ = try await validatedCredential(
             current.credential,
@@ -381,9 +380,24 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
               try journalIsDurablyAbsent(in: store),
               try store.loadCaptureProfileIDIfPresent() == nil,
               try store.loadProfileRemovalIfPresent() == nil,
-              try files.snapshot(at: activeAuthURL) == .exact(current.identity),
-              try credentialStore.loadCredential(for: source.id) == sourceCredential else {
+              try files.snapshot(at: activeAuthURL) == .exact(current.identity) else {
             throw LocalCLIDataProviderFailure.activeAuthChanged
+        }
+        let sourceCredential: CredentialBlob
+        if let stored = try loadCredentialIfPresent(for: source.id) {
+            sourceCredential = stored
+        } else {
+            do {
+                try credentialStore.saveCredential(current.credential, for: source.id)
+            } catch {
+                guard (try? credentialStore.loadCredential(for: source.id)) == current.credential else {
+                    throw error
+                }
+            }
+            sourceCredential = current.credential
+        }
+        guard try credentialStore.loadCredential(for: source.id) == sourceCredential else {
+            throw LocalCLIDataProviderFailure.credentialRoundTripFailed
         }
 
         let login = try await runIsolatedLogin(
