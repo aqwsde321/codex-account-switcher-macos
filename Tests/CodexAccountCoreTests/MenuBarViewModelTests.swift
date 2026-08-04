@@ -95,7 +95,6 @@ func menuBarViewModelTests() -> [TestCase] {
                     && MenuBarViewModel.periodLabel(minutes: 43_200) == "30d",
                 "dynamic rate-limit period labels changed"
             )
-
             await model.select(profiles[1])
             await model.confirmSwitch(profiles[1])
             let switchedRemaining = await MainActor.run { model.activeRemainingPercent }
@@ -231,8 +230,13 @@ func menuBarViewModelTests() -> [TestCase] {
             }
             await usageProbe.waitUntilAutomaticRefreshStarted()
 
-            let blockedByRefresh = await MainActor.run { model.isWorking }
-            try expect(!blockedByRefresh, "automatic refresh disabled account actions")
+            let refreshState = await MainActor.run {
+                (model.isWorking, model.isAutomaticallyRefreshing)
+            }
+            try expect(
+                !refreshState.0 && refreshState.1,
+                "automatic refresh did not expose a non-blocking visual state"
+            )
             let firstSelection = Task { await model.select(profiles[0]) }
             await usageProbe.waitUntilCancellationStarted()
             let secondSelection = Task { await model.select(profiles[0]) }
@@ -249,8 +253,9 @@ func menuBarViewModelTests() -> [TestCase] {
 
             let cancellationCount = await usageProbe.cancellationCount
             let events = await provider.events
+            let stillRefreshing = await MainActor.run { model.isAutomaticallyRefreshing }
             try expect(
-                cancellationCount == 1 && events == ["activate"],
+                cancellationCount == 1 && events == ["activate"] && !stillRefreshing,
                 "account action did not preempt automatic refresh"
             )
         },

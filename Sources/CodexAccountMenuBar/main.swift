@@ -6,6 +6,7 @@ import SwiftUI
 @main
 struct CodexAccountMenuBarApp: App {
     @NSApplicationDelegateAdaptor(MenuBarAppDelegate.self) private var appDelegate
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @StateObject private var model: MenuBarViewModel
 
     init() {
@@ -81,12 +82,25 @@ struct CodexAccountMenuBarApp: App {
             AccountMenuView(model: model)
         } label: {
             HStack(spacing: 4) {
-                Image(systemName: "person.2.circle")
+                Image(nsImage: usageStatusImage(model.activeRemainingPercent))
+                    .scaleEffect(model.isAutomaticallyRefreshing && !reduceMotion ? 1.06 : 1)
+                    .opacity(model.isAutomaticallyRefreshing ? 0.55 : 1)
+                    .animation(refreshAnimation, value: model.isAutomaticallyRefreshing)
                 if let remaining = model.activeRemainingPercent {
                     Text("\(remaining)%")
                         .monospacedDigit()
                 }
             }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(
+                model.activeRemainingPercent.map {
+                    model.isAutomaticallyRefreshing
+                        ? "Codex 계정 한도 자동 조회 중, \($0)% 남음"
+                        : "Codex 계정 \($0)% 남음"
+                } ?? (model.isAutomaticallyRefreshing
+                    ? "Codex 계정 한도 자동 조회 중"
+                    : "Codex 계정")
+            )
             .task {
                 await model.load()
                 while !Task.isCancelled {
@@ -100,6 +114,56 @@ struct CodexAccountMenuBarApp: App {
             }
         }
         .menuBarExtraStyle(.window)
+    }
+
+    private func usageStatusImage(_ remainingPercent: Int?) -> NSImage {
+        let size = NSSize(width: 17, height: 17)
+        let image = NSImage(size: size, flipped: false) { rect in
+            let circleRect = rect.insetBy(dx: 1.25, dy: 1.25)
+            let track = NSBezierPath(ovalIn: circleRect)
+            track.lineWidth = 1.5
+            NSColor.black.withAlphaComponent(0.22).setStroke()
+            track.stroke()
+
+            if let remainingPercent, remainingPercent > 0 {
+                let arc = NSBezierPath()
+                arc.appendArc(
+                    withCenter: NSPoint(x: rect.midX, y: rect.midY),
+                    radius: circleRect.width / 2,
+                    startAngle: 90,
+                    endAngle: 90 - 360 * CGFloat(remainingPercent) / 100,
+                    clockwise: true
+                )
+                arc.lineWidth = 1.5
+                arc.lineCapStyle = .round
+                NSColor.black.setStroke()
+                arc.stroke()
+            }
+
+            let attributes: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: 8, weight: .bold),
+                .foregroundColor: NSColor.black,
+            ]
+            let label = "C" as NSString
+            let labelSize = label.size(withAttributes: attributes)
+            label.draw(
+                at: NSPoint(
+                    x: rect.midX - labelSize.width / 2,
+                    y: rect.midY - labelSize.height / 2
+                ),
+                withAttributes: attributes
+            )
+            return true
+        }
+        image.isTemplate = true
+        return image
+    }
+
+    private var refreshAnimation: Animation? {
+        guard !reduceMotion else { return nil }
+        return model.isAutomaticallyRefreshing
+            ? .easeInOut(duration: 0.7).repeatForever(autoreverses: true)
+            : .easeOut(duration: 0.2)
     }
 }
 

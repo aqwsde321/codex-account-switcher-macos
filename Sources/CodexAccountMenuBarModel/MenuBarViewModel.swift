@@ -39,6 +39,7 @@ public final class MenuBarViewModel: ObservableObject {
     @Published public private(set) var recoveryStatus = RecoveryCLIStatus.blocked
     @Published public private(set) var switchPhase: SwitchPhase?
     @Published public private(set) var isWorking = false
+    @Published public private(set) var isAutomaticallyRefreshing = false
     @Published public private(set) var isProfileLoginInProgress = false
     @Published public private(set) var errorMessage: String?
     @Published public private(set) var statusMessage: String?
@@ -123,6 +124,8 @@ public final class MenuBarViewModel: ObservableObject {
         let profileIDs: Set<ProfileID>? = fullRefreshDue ? nil : [activeProfileID]
         let task = Task { try await loadProfileUsage(profileIDs) }
         automaticUsageRefreshTask = task
+        isAutomaticallyRefreshing = true
+        defer { isAutomaticallyRefreshing = false }
         let result = await withTaskCancellationHandler {
             await task.result
         } onCancel: {
