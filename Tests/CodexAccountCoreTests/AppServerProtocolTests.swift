@@ -48,6 +48,106 @@ func appServerProtocolTests() -> [TestCase] {
             )
             try expect(machine.readyToCloseStandardInput, "stdin close gate did not open")
         },
+        TestCase("AppServerProtocolMachine reads only the main Codex rate-limit bucket") {
+            var machine = try makeRateLimitsMachine()
+
+            let response = Data(
+                ("{\"id\":3,\"result\":{" +
+                    "\"rateLimits\":{\"planType\":\"free\",\"primary\":{" +
+                    "\"usedPercent\":2,\"windowDurationMins\":43200}}," +
+                    "\"rateLimitsByLimitId\":{" +
+                    "\"codex\":{\"planType\":\"pro\",\"primary\":{" +
+                    "\"usedPercent\":25.5,\"windowDurationMins\":300," +
+                    "\"resetsAt\":1800000000},\"secondary\":{" +
+                    "\"usedPercent\":40,\"windowDurationMins\":10080," +
+                    "\"resetsAt\":null}}," +
+                    "\"codex_bengalfox\":{\"primary\":{\"usedPercent\":\"ignored\"}}}}}\n").utf8
+            )
+            _ = try machine.receive(response)
+
+            try expect(
+                machine.rateLimits == AppServerRateLimitsRead(
+                    planType: "pro",
+                    windows: [
+                        AppServerRateLimitWindow(
+                            usedPercent: 25.5,
+                            windowDurationMinutes: 300,
+                            resetsAt: Date(timeIntervalSince1970: 1_800_000_000)
+                        ),
+                        AppServerRateLimitWindow(
+                            usedPercent: 40,
+                            windowDurationMinutes: 10_080,
+                            resetsAt: nil
+                        ),
+                    ]
+                ),
+                "main Codex windows were not selected"
+            )
+            try expect(machine.readyToCloseStandardInput, "rate-limit response did not open stdin gate")
+            try machine.validateEndOfFile()
+
+            var fallback = try makeRateLimitsMachine()
+            _ = try fallback.receive(
+                Data(
+                    ("{\"id\":3,\"result\":{" +
+                        "\"rateLimits\":{\"limitId\":\"codex\",\"planType\":\"free\",\"primary\":{" +
+                        "\"usedPercent\":4,\"windowDurationMins\":43200}}," +
+                        "\"rateLimitsByLimitId\":null}}\n").utf8
+                )
+            )
+            try expect(fallback.rateLimits?.planType == "free", "top-level fallback was not used")
+            try expect(
+                fallback.rateLimits?.windows.first?.windowDurationMinutes == 43_200,
+                "top-level fallback window changed"
+            )
+
+            var sparkOnly = try makeRateLimitsMachine()
+            _ = try sparkOnly.receive(
+                Data(
+                    ("{\"id\":3,\"result\":{" +
+                        "\"rateLimits\":{\"limitId\":\"codex_bengalfox\",\"primary\":{" +
+                        "\"usedPercent\":99,\"windowDurationMins\":10080}}," +
+                        "\"rateLimitsByLimitId\":{\"codex_bengalfox\":{\"primary\":{" +
+                        "\"usedPercent\":99,\"windowDurationMins\":10080}}}}}\n").utf8
+                )
+            )
+            try expect(sparkOnly.rateLimits?.windows.isEmpty == true, "Spark-only limit was exposed")
+
+            var unknownDuration = try makeRateLimitsMachine()
+            _ = try unknownDuration.receive(
+                Data(
+                    ("{\"id\":3,\"result\":{\"rateLimits\":{\"primary\":{" +
+                        "\"usedPercent\":10,\"windowDurationMins\":null},\"secondary\":{" +
+                        "\"usedPercent\":20,\"windowDurationMins\":300}}}}\n").utf8
+                )
+            )
+            try expect(
+                unknownDuration.rateLimits?.windows.map(\.windowDurationMinutes) == [300],
+                "a schema-valid unknown duration hid known windows"
+            )
+        },
+        TestCase("AppServerProtocolMachine rejects invalid rate-limit windows") {
+            let invalidWindows = [
+                "{\"usedPercent\":101,\"windowDurationMins\":300}",
+                "{\"usedPercent\":20,\"windowDurationMins\":0}",
+                "{\"usedPercent\":20,\"windowDurationMins\":300.5}",
+                "{\"usedPercent\":true,\"windowDurationMins\":300}",
+                "{\"usedPercent\":20,\"windowDurationMins\":300,\"resetsAt\":\"later\"}",
+            ]
+            for window in invalidWindows {
+                var machine = try makeRateLimitsMachine()
+                try expectError(
+                    AppServerProtocolFailure(code: .protocolViolation),
+                    "invalid rate-limit window was accepted"
+                ) {
+                    _ = try machine.receive(
+                        Data(
+                            "{\"id\":3,\"result\":{\"rateLimits\":{\"primary\":\(window)}}}\n".utf8
+                        )
+                    )
+                }
+            }
+        },
         TestCase("AccountIdentityValidator uses exact email equality") {
             let account = AppServerAccountRead.chatGPT(
                 email: "Person@example.invalid",
@@ -132,6 +232,43 @@ func appServerProtocolTests() -> [TestCase] {
                 } catch let failure as AppServerProbeFailure {
                     try expect(failure.code == .alreadyUsed, "second run returned the wrong error")
                 }
+            }
+        },
+        TestCase("AppServerProbeSession returns account usage after normal child exit") {
+            try await withProbeTemporaryDirectory { directory in
+                let executable = try makeUsageFakeAppServer(in: directory)
+                let home = directory.appendingPathComponent("codex-home", isDirectory: true)
+                try FileManager.default.createDirectory(at: home, withIntermediateDirectories: false)
+                try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: home.path)
+                let session = AppServerProbeSession(
+                    configuration: AppServerProbeConfiguration(
+                        executableURL: executable,
+                        codexHomeURL: home,
+                        refreshToken: false,
+                        timeouts: AppServerProbeTimeouts(
+                            initializeResponse: .seconds(2),
+                            accountResponse: .seconds(2),
+                            normalExit: .seconds(2),
+                            terminateExit: .seconds(1)
+                        )
+                    )
+                )
+
+                let result = try await session.runAccountUsage()
+
+                try expect(
+                    result.account == .chatGPT(
+                        email: "probe@example.invalid",
+                        planType: "test",
+                        requiresOpenAIAuth: true
+                    ),
+                    "usage probe account changed"
+                )
+                try expect(result.rateLimits.planType == "test", "usage probe plan changed")
+                try expect(
+                    result.rateLimits.windows.first?.windowDurationMinutes == 300,
+                    "usage probe window changed"
+                )
             }
         },
         TestCase("AppServerProbeSession stops when an exited child leaves inherited pipes open") {
@@ -238,6 +375,24 @@ private func makeFakeAppServer(in directory: URL) throws -> URL {
     return executable
 }
 
+private func makeUsageFakeAppServer(in directory: URL) throws -> URL {
+    let executable = directory.appendingPathComponent("fake-usage-app-server")
+    let script = #"""
+    #!/bin/zsh
+    IFS= read -r initialize
+    print -r -- '{"id":1,"result":{}}'
+    IFS= read -r initialized
+    IFS= read -r account_read
+    print -r -- '{"id":2,"result":{"account":{"type":"chatgpt","email":"probe@example.invalid","planType":"test"},"requiresOpenaiAuth":true}}'
+    IFS= read -r rate_limits_read
+    print -r -- '{"id":3,"result":{"rateLimits":{"planType":"fallback","primary":{"usedPercent":1,"windowDurationMins":43200}},"rateLimitsByLimitId":{"codex":{"planType":"test","primary":{"usedPercent":12,"windowDurationMins":300}},"codex_bengalfox":{"primary":{"usedPercent":99,"windowDurationMins":10080}}}}}'
+    while IFS= read -r ignored; do :; done
+    """#
+    try Data(script.utf8).write(to: executable, options: .withoutOverwriting)
+    try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+    return executable
+}
+
 private func makePipeHoldingAppServer(in directory: URL) throws -> URL {
     let executable = directory.appendingPathComponent("pipe-holding-app-server")
     let script = #"""
@@ -264,4 +419,25 @@ private func wireRefreshToken(_ data: Data) throws -> Bool? {
     let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
     let params = object?["params"] as? [String: Any]
     return params?["refreshToken"] as? Bool
+}
+
+private func makeRateLimitsMachine() throws -> AppServerProtocolMachine {
+    var machine = AppServerProtocolMachine()
+    _ = try machine.start(refreshToken: false, readRateLimits: true)
+    _ = try machine.receive(Data("{\"id\":1,\"result\":{}}\n".utf8))
+    let rateLimitRequest = try machine.receive(
+        Data(
+            ("{\"id\":2,\"result\":{\"account\":{\"type\":\"chatgpt\"," +
+                "\"email\":\"probe@example.invalid\",\"planType\":\"test\"}," +
+                "\"requiresOpenaiAuth\":true}}\n").utf8
+        )
+    )
+    try expect(rateLimitRequest.count == 1, "rate-limit request count changed")
+    let rateLimitMethod = try wireMethod(rateLimitRequest[0])
+    try expect(
+        rateLimitMethod == "account/rateLimits/read",
+        "rate-limit request method changed"
+    )
+    try expect(!machine.readyToCloseStandardInput, "stdin closed before rate-limit response")
+    return machine
 }

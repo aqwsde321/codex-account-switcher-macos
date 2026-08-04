@@ -5,6 +5,38 @@ public enum AppServerAccountRead: Equatable, Sendable {
     case chatGPT(email: String?, planType: String?, requiresOpenAIAuth: Bool)
 }
 
+public struct AppServerRateLimitWindow: Equatable, Sendable {
+    public let usedPercent: Double
+    public let windowDurationMinutes: Int
+    public let resetsAt: Date?
+
+    public init(usedPercent: Double, windowDurationMinutes: Int, resetsAt: Date?) {
+        self.usedPercent = usedPercent
+        self.windowDurationMinutes = windowDurationMinutes
+        self.resetsAt = resetsAt
+    }
+}
+
+public struct AppServerRateLimitsRead: Equatable, Sendable {
+    public let planType: String?
+    public let windows: [AppServerRateLimitWindow]
+
+    public init(planType: String?, windows: [AppServerRateLimitWindow]) {
+        self.planType = planType
+        self.windows = windows
+    }
+}
+
+public struct AppServerAccountUsageRead: Equatable, Sendable {
+    public let account: AppServerAccountRead
+    public let rateLimits: AppServerRateLimitsRead
+
+    public init(account: AppServerAccountRead, rateLimits: AppServerRateLimitsRead) {
+        self.account = account
+        self.rateLimits = rateLimits
+    }
+}
+
 public enum AccountIdentityError: Error, Equatable, Sendable {
     case invalidExpectedEmail
     case signedOut
@@ -59,19 +91,23 @@ public struct AppServerProtocolMachine {
         case idle
         case awaitingInitialize
         case awaitingAccount
+        case awaitingRateLimits
         case accountReceived
     }
 
     private static let initializeID = 1
     private static let accountID = 2
+    private static let rateLimitsID = 3
     private static let maximumBufferedBytes = 1_048_576
     private static let maximumFrameBytes = 262_144
 
     private var state = State.idle
     private var buffer = Data()
     private var refreshToken = false
+    private var readRateLimits = false
 
     public private(set) var account: AppServerAccountRead?
+    public private(set) var rateLimits: AppServerRateLimitsRead?
 
     public init() {}
 
@@ -79,11 +115,16 @@ public struct AppServerProtocolMachine {
         state == .accountReceived
     }
 
-    public mutating func start(refreshToken: Bool) throws -> [Data] {
+    var awaitingRateLimitsResponse: Bool {
+        state == .awaitingRateLimits
+    }
+
+    public mutating func start(refreshToken: Bool, readRateLimits: Bool = false) throws -> [Data] {
         guard state == .idle else {
             throw AppServerProtocolFailure(code: .alreadyStarted)
         }
         self.refreshToken = refreshToken
+        self.readRateLimits = readRateLimits
         state = .awaitingInitialize
         return [
             try Self.line([
@@ -178,6 +219,24 @@ private extension AppServerProtocolMachine {
                 throw AppServerProtocolFailure(code: .protocolViolation)
             }
             account = try decodeAccount(result)
+            guard readRateLimits else {
+                state = .accountReceived
+                return []
+            }
+            state = .awaitingRateLimits
+            return [
+                try Self.line([
+                    "method": "account/rateLimits/read",
+                    "id": Self.rateLimitsID,
+                ]),
+            ]
+        case .awaitingRateLimits:
+            guard identifier == Self.rateLimitsID else { return [] }
+            try validateResponseEnvelope(object)
+            guard let result = object["result"] as? [String: Any] else {
+                throw AppServerProtocolFailure(code: .protocolViolation)
+            }
+            rateLimits = try decodeRateLimits(result)
             state = .accountReceived
             return []
         }
@@ -223,6 +282,69 @@ private extension AppServerProtocolMachine {
         )
     }
 
+    func decodeRateLimits(_ result: [String: Any]) throws -> AppServerRateLimitsRead {
+        let selected: Any?
+        if let byLimitID = result["rateLimitsByLimitId"], !(byLimitID is NSNull) {
+            guard let byLimitID = byLimitID as? [String: Any] else {
+                throw AppServerProtocolFailure(code: .protocolViolation)
+            }
+            if let codex = byLimitID["codex"], !(codex is NSNull) {
+                selected = codex
+            } else {
+                return AppServerRateLimitsRead(planType: nil, windows: [])
+            }
+        } else {
+            selected = result["rateLimits"]
+        }
+        if selected == nil || selected is NSNull {
+            return AppServerRateLimitsRead(planType: nil, windows: [])
+        }
+        guard let snapshot = selected as? [String: Any] else {
+            throw AppServerProtocolFailure(code: .protocolViolation)
+        }
+        if let limitID = try nullableString(snapshot["limitId"]), limitID != "codex" {
+            return AppServerRateLimitsRead(planType: nil, windows: [])
+        }
+
+        var windows = [AppServerRateLimitWindow]()
+        for key in ["primary", "secondary"] {
+            guard let value = snapshot[key], !(value is NSNull) else { continue }
+            guard let window = value as? [String: Any],
+                  let usedPercent = finiteNumber(window["usedPercent"]),
+                  0 ... 100 ~= usedPercent else {
+                throw AppServerProtocolFailure(code: .protocolViolation)
+            }
+            guard let durationValue = window["windowDurationMins"],
+                  !(durationValue is NSNull) else {
+                continue
+            }
+            guard let duration = positiveInteger(durationValue) else {
+                throw AppServerProtocolFailure(code: .protocolViolation)
+            }
+
+            let resetsAt: Date?
+            if let value = window["resetsAt"], !(value is NSNull) {
+                guard let timestamp = finiteNumber(value) else {
+                    throw AppServerProtocolFailure(code: .protocolViolation)
+                }
+                resetsAt = Date(timeIntervalSince1970: timestamp)
+            } else {
+                resetsAt = nil
+            }
+            windows.append(
+                AppServerRateLimitWindow(
+                    usedPercent: usedPercent,
+                    windowDurationMinutes: duration,
+                    resetsAt: resetsAt
+                )
+            )
+        }
+        return AppServerRateLimitsRead(
+            planType: try nullableString(snapshot["planType"]),
+            windows: windows
+        )
+    }
+
     func nullableString(_ value: Any?) throws -> String? {
         if value == nil || value is NSNull {
             return nil
@@ -243,6 +365,25 @@ private extension AppServerProtocolMachine {
               candidate.rounded(.towardZero) == candidate,
               candidate >= Double(Int32.min),
               candidate <= Double(Int32.max) else {
+            return nil
+        }
+        return Int(candidate)
+    }
+
+    func finiteNumber(_ value: Any?) -> Double? {
+        guard let number = value as? NSNumber,
+              String(cString: number.objCType) != "c",
+              number.doubleValue.isFinite else {
+            return nil
+        }
+        return number.doubleValue
+    }
+
+    func positiveInteger(_ value: Any?) -> Int? {
+        guard let candidate = finiteNumber(value),
+              candidate.rounded(.towardZero) == candidate,
+              candidate > 0,
+              candidate < Double(Int.max) else {
             return nil
         }
         return Int(candidate)

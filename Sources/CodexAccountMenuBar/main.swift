@@ -31,6 +31,9 @@ struct CodexAccountMenuBarApp: App {
                 loadProfiles: {
                     try await provider.profiles()
                 },
+                loadProfileUsage: {
+                    try await provider.profileUsage()
+                },
                 loadRecoveryStatus: {
                     try await provider.recoveryStatus()
                 },
@@ -74,8 +77,17 @@ struct CodexAccountMenuBarApp: App {
     }
 
     var body: some Scene {
-        MenuBarExtra("Codex Accounts", systemImage: "person.2.circle") {
+        MenuBarExtra {
             AccountMenuView(model: model)
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "person.2.circle")
+                if let remaining = model.activeRemainingPercent {
+                    Text("\(remaining)%")
+                        .monospacedDigit()
+                }
+            }
+            .task { await model.load() }
         }
         .menuBarExtraStyle(.window)
     }
@@ -104,6 +116,15 @@ private struct AccountMenuView: View {
                         .controlSize(.small)
                         .accessibilityLabel("계정 작업 진행 중")
                 }
+                Button {
+                    Task { await model.refreshUsage() }
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.plain)
+                .disabled(model.isWorking || !model.canRefreshUsage)
+                .help("모든 계정 한도 새로고침")
+                .accessibilityLabel("모든 계정 한도 새로고침")
             }
             if model.profiles.isEmpty {
                 Text(model.isWorking ? "불러오는 중…" : "등록된 계정이 없습니다.")
@@ -130,7 +151,11 @@ private struct AccountMenuView: View {
                                 await model.confirmSwitch(confirmation)
                             }
                         } label: {
-                            ProfileCard(profile: profile)
+                            ProfileCard(
+                                profile: profile,
+                                usage: model.usageByProfileID[profile.id],
+                                usageFailed: model.usageFailedProfileIDs.contains(profile.id)
+                            )
                         }
                         .buttonStyle(.plain)
                         .frame(maxWidth: .infinity)
@@ -278,7 +303,6 @@ private struct AccountMenuView: View {
         }
         .padding(14)
         .frame(width: 320)
-        .task { await model.load() }
     }
 
     private var registrationLabelIsValid: Bool {
@@ -296,30 +320,59 @@ private struct AccountMenuView: View {
 
 private struct ProfileCard: View {
     let profile: ProfileListItem
+    let usage: AppServerRateLimitsRead?
+    let usageFailed: Bool
 
     var body: some View {
-        HStack(spacing: 10) {
-            Image(systemName: profile.active ? "checkmark.circle.fill" : "circle")
-                .foregroundStyle(profile.active ? Color.accentColor : .secondary)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                Image(systemName: profile.active ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(profile.active ? Color.accentColor : .secondary)
 
-            VStack(alignment: .leading, spacing: 2) {
-                Text(profile.label)
-                    .fontWeight(profile.active ? .semibold : .regular)
-                Text(profile.email)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(profile.label)
+                        .fontWeight(profile.active ? .semibold : .regular)
+                    Text(profile.email)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+
+                if let planType = usage?.planType {
+                    Text(planType.uppercased())
+                        .font(.caption2.weight(.semibold))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.secondary.opacity(0.12), in: Capsule())
+                }
+
+                if profile.needsRelogin {
+                    Text("재로그인 필요")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                } else if profile.active {
+                    Text("활성")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
 
-            Spacer()
-
-            if profile.needsRelogin {
-                Text("재로그인 필요")
+            if let usage {
+                if usage.windows.isEmpty {
+                    Text("한도 정보 없음")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(Array(usage.windows.sorted(by: windowOrder).enumerated()), id: \.offset) {
+                        _, window in
+                        UsageWindowRow(window: window)
+                    }
+                }
+            } else if usageFailed {
+                Text("한도 조회 실패")
                     .font(.caption2)
                     .foregroundStyle(.orange)
-            } else if profile.active {
-                Text("활성")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
         }
         .padding(10)
@@ -330,11 +383,59 @@ private struct ProfileCard: View {
         .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(profile.label), \(profile.email)")
-        .accessibilityValue(
-            profile.needsRelogin
-                ? "재로그인 필요"
-                : (profile.active ? "활성 계정" : "비활성 계정")
-        )
+        .accessibilityValue(accessibilityValue)
+    }
+
+    private func windowOrder(_ lhs: AppServerRateLimitWindow, _ rhs: AppServerRateLimitWindow) -> Bool {
+        lhs.windowDurationMinutes < rhs.windowDurationMinutes
+    }
+
+    private var accessibilityValue: String {
+        var values = [profile.needsRelogin ? "재로그인 필요" : (profile.active ? "활성 계정" : "비활성 계정")]
+        if let planType = usage?.planType {
+            values.append(planType.uppercased())
+        }
+        if let usage {
+            values.append(contentsOf: usage.windows.map {
+                "\(MenuBarViewModel.periodLabel(minutes: $0.windowDurationMinutes)) \(MenuBarViewModel.remainingPercent($0))% 남음"
+            })
+        } else if usageFailed {
+            values.append("한도 조회 실패")
+        }
+        return values.joined(separator: ", ")
+    }
+}
+
+private struct UsageWindowRow: View {
+    let window: AppServerRateLimitWindow
+
+    private var remaining: Int {
+        MenuBarViewModel.remainingPercent(window)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack {
+                Text(MenuBarViewModel.periodLabel(minutes: window.windowDurationMinutes))
+                    .font(.caption.weight(.medium))
+                Spacer()
+                Text("\(remaining)% 남음")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            ProgressView(value: Double(remaining), total: 100)
+                .controlSize(.small)
+                .accessibilityLabel("남은 사용 한도")
+                .accessibilityValue("\(remaining)%")
+            if let resetsAt = window.resetsAt {
+                HStack(spacing: 3) {
+                    Text(resetsAt, format: .dateTime.month().day().hour().minute())
+                    Text("초기화")
+                }
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            }
+        }
     }
 }
 

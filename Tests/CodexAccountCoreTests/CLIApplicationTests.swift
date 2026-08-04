@@ -48,6 +48,89 @@ func cliApplicationTests() -> [TestCase] {
             try expect(!result.standardError.contains("secret-error-canary"), "raw error leaked")
             try expect(result.standardError == "error=operation_failed\n", "error output is not allow-listed")
         },
+        TestCase("Local provider reads active and inactive usage without changing public auth") {
+            try await withCaptureTemporaryDirectory { directory in
+                let fixture = try makeReloginFixture(in: directory, activeAuthIsSource: true)
+                let store = try SpikeStore.openExisting(at: fixture.storeURL)
+                let availableTarget = ProfileMetadata(
+                    id: fixture.target.id,
+                    label: fixture.target.label,
+                    email: fixture.target.email,
+                    planType: fixture.target.planType,
+                    needsRelogin: false,
+                    createdAt: fixture.target.createdAt,
+                    updatedAt: fixture.target.updatedAt
+                )
+                let registry = try ProfileRegistry(
+                    activeProfileID: fixture.source.id,
+                    profiles: [fixture.source, availableTarget]
+                )
+                _ = try store.saveRegistry(registry)
+                let authBefore = try Data(contentsOf: fixture.authURL)
+                let sourceBefore = try store.loadCredential(for: fixture.source.id)
+                let targetBefore = try store.loadCredential(for: fixture.target.id)
+                let provider = LocalCLIDataProvider(
+                    storeURL: fixture.storeURL,
+                    activeAuthURL: fixture.authURL,
+                    processProvider: EmptyProcessSnapshotProvider(),
+                    locateApp: { fixture.descriptor },
+                    runningApplicationPIDs: { _ in [] }
+                )
+
+                let report = try await provider.profileUsage()
+                let authAfter = try Data(contentsOf: fixture.authURL)
+                let registryAfter = try store.loadRegistry()
+                let sourceAfter = try store.loadCredential(for: fixture.source.id)
+                let targetAfter = try store.loadCredential(for: fixture.target.id)
+
+                try expect(
+                    report.usageByProfileID.count == 2,
+                    "inactive usage was not queried: loaded=\(report.usageByProfileID.count) failed=\(report.failedProfileIDs.count)"
+                )
+                try expect(report.failedProfileIDs.isEmpty, "successful account was marked failed")
+                try expect(
+                    report.usageByProfileID[fixture.source.id]?.planType == "pro",
+                    "active plan type changed"
+                )
+                try expect(
+                    report.usageByProfileID[fixture.target.id]?.planType == "team",
+                    "inactive plan type changed"
+                )
+                try expect(
+                    report.usageByProfileID[fixture.source.id]?.windows.map(\.windowDurationMinutes)
+                        == [300, 10_080],
+                    "dynamic main Codex windows changed"
+                )
+                try expect(authAfter == authBefore, "usage query changed public auth.json")
+                try expect(registryAfter == registry, "usage query changed registry")
+                try expect(sourceAfter == sourceBefore, "usage query changed source credential")
+                try expect(targetAfter == targetBefore, "usage query changed target credential")
+                try expect(
+                    !FileManager.default.fileExists(
+                        atPath: fixture.storeURL
+                            .appendingPathComponent("credential-verification-workspace")
+                            .path
+                    ),
+                    "usage workspace was not removed"
+                )
+
+                let targetURL = fixture.storeURL
+                    .appendingPathComponent("credentials", isDirectory: true)
+                    .appendingPathComponent("\(fixture.target.id).json", isDirectory: false)
+                let files = DarwinDurableFileOperations()
+                _ = try files.replace(
+                    contents: SensitiveBytes(Data("{}".utf8)),
+                    at: targetURL,
+                    expecting: files.snapshot(at: targetURL)
+                )
+                let partial = try await provider.profileUsage()
+                try expect(
+                    Set(partial.usageByProfileID.keys) == [fixture.source.id]
+                        && partial.failedProfileIDs == [fixture.target.id],
+                    "one invalid credential hid another account's usage"
+                )
+            }
+        },
         TestCase("CLIApplication keeps recovery status output stable") {
             let previousProfileID = ProfileID(
                 UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
@@ -4798,7 +4881,19 @@ private func makeCaptureAppServer(
       (sleep 3) &!
       exit 0
     fi
-    while IFS= read -r ignored; do :; done
+    if IFS= read -r rate_limits_read; then
+      grep -q '"auth_mode":"chatgptAuthTokens"' "$CODEX_HOME/auth.json" || exit 11
+      grep -q '"refresh_token":""' "$CODEX_HOME/auth.json" || exit 12
+      if [[ "$account_email" == "b@example.invalid" ]]; then
+        plan_type='team'
+        used_percent=35
+      else
+        plan_type='pro'
+        used_percent=25
+      fi
+      print -r -- '{"id":3,"result":{"rateLimits":{"planType":"free","primary":{"usedPercent":1,"windowDurationMins":43200}},"rateLimitsByLimitId":{"codex":{"planType":"'"$plan_type"'","primary":{"usedPercent":'"$used_percent"',"windowDurationMins":300,"resetsAt":1800000000},"secondary":{"usedPercent":40,"windowDurationMins":10080}},"codex_bengalfox":{"planType":"spark","primary":{"usedPercent":99,"windowDurationMins":10080}}}}}'
+      while IFS= read -r ignored; do :; done
+    fi
     """#
     try Data(script.utf8).write(to: executable, options: .withoutOverwriting)
     try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)

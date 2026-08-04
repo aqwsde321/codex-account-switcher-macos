@@ -51,4 +51,22 @@ public struct CredentialBlob: Equatable, Sendable, CustomStringConvertible, Cust
     static func persistenceData(for credential: CredentialBlob) -> Data {
         credential.storage
     }
+
+    static func usageProbeData(for credential: CredentialBlob) throws -> Data {
+        guard var root = try JSONSerialization.jsonObject(with: credential.storage) as? [String: Any],
+              var tokens = root["tokens"] as? [String: Any] else {
+            throw CredentialBlobError.invalidJSON
+        }
+        root["auth_mode"] = "chatgptAuthTokens"
+        tokens["refresh_token"] = ""
+        root["tokens"] = tokens
+        guard JSONSerialization.isValidJSONObject(root) else {
+            throw CredentialBlobError.invalidJSON
+        }
+        do {
+            return try JSONSerialization.data(withJSONObject: root, options: [.sortedKeys])
+        } catch {
+            throw CredentialBlobError.invalidJSON
+        }
+    }
 }

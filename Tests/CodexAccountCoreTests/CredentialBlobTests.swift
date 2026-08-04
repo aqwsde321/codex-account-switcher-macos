@@ -1,5 +1,5 @@
 import Foundation
-import CodexAccountCore
+@testable import CodexAccountCore
 
 func credentialBlobTests() -> [TestCase] {
     [
@@ -11,6 +11,32 @@ func credentialBlobTests() -> [TestCase] {
         let credential = try CredentialBlob(validating: data)
 
         try expect(credential.byteCount == data.count, "credential byte count changed")
+        },
+        TestCase("CredentialBlob creates a refresh-disabled probe copy") {
+            let data = Data(
+                #"{"auth_mode":"chatgpt","tokens":{"id_token":"fake-id","access_token":"fake-access","refresh_token":"fake-refresh","account_id":"fake-account"},"last_refresh":"2026-07-28T00:00:00Z"}"#.utf8
+            )
+            let credential = try CredentialBlob(validating: data)
+
+            let probe = try JSONSerialization.jsonObject(
+                with: CredentialBlob.usageProbeData(for: credential)
+            ) as? [String: Any]
+            let tokens = probe?["tokens"] as? [String: Any]
+
+            try expect(
+                probe?["auth_mode"] as? String == "chatgptAuthTokens",
+                "probe mode can refresh"
+            )
+            try expect(tokens?["refresh_token"] as? String == "", "probe copy retained refresh token")
+            try expect(tokens?["id_token"] as? String == "fake-id", "probe copy lost id token")
+            try expect(
+                tokens?["access_token"] as? String == "fake-access",
+                "probe copy lost access token"
+            )
+            try expect(
+                CredentialBlob.persistenceData(for: credential) == data,
+                "probe copy changed stored credential"
+            )
         },
         TestCase("CredentialBlob rejects duplicate JSON keys") {
             let data = Data(

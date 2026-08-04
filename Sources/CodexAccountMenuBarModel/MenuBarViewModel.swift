@@ -9,6 +9,7 @@ public final class MenuBarViewModel: ObservableObject {
     }
 
     public typealias LoadProfiles = @Sendable () async throws -> [ProfileListItem]
+    public typealias LoadProfileUsage = @Sendable () async throws -> ProfileUsageReport
     public typealias LoadRecoveryStatus = @Sendable () async throws -> RecoveryCLIStatus
     public typealias CaptureProfile = @Sendable (String) async throws -> ProfileListItem
     public typealias RemoveProfile = @Sendable (ProfileID) async throws -> ProfileListItem
@@ -25,6 +26,8 @@ public final class MenuBarViewModel: ObservableObject {
     public typealias AttemptAutomaticRecovery = @Sendable () async -> Void
 
     @Published public private(set) var profiles = [ProfileListItem]()
+    @Published public private(set) var usageByProfileID = [ProfileID: AppServerRateLimitsRead]()
+    @Published public private(set) var usageFailedProfileIDs = Set<ProfileID>()
     @Published public private(set) var pendingProfile: ProfileListItem?
     @Published public private(set) var pendingRemovalProfile: ProfileListItem?
     @Published public private(set) var pendingReloginProfile: ProfileListItem?
@@ -37,6 +40,7 @@ public final class MenuBarViewModel: ObservableObject {
     @Published public private(set) var statusMessage: String?
 
     private let loadProfiles: LoadProfiles
+    private let loadProfileUsage: LoadProfileUsage?
     private let loadRecoveryStatus: LoadRecoveryStatus
     private let captureProfile: CaptureProfile
     private let removeProfile: RemoveProfile?
@@ -51,6 +55,7 @@ public final class MenuBarViewModel: ObservableObject {
 
     public init(
         loadProfiles: @escaping LoadProfiles,
+        loadProfileUsage: LoadProfileUsage? = nil,
         loadRecoveryStatus: @escaping LoadRecoveryStatus,
         captureProfile: @escaping CaptureProfile,
         removeProfile: RemoveProfile? = nil,
@@ -63,6 +68,7 @@ public final class MenuBarViewModel: ObservableObject {
         attemptAutomaticRecovery: @escaping AttemptAutomaticRecovery = {}
     ) {
         self.loadProfiles = loadProfiles
+        self.loadProfileUsage = loadProfileUsage
         self.loadRecoveryStatus = loadRecoveryStatus
         self.captureProfile = captureProfile
         self.removeProfile = removeProfile
@@ -81,10 +87,45 @@ public final class MenuBarViewModel: ObservableObject {
         defer { isWorking = false }
         do {
             try await refreshState()
+            if !recoveryRequired {
+                await reloadUsage()
+            }
             errorMessage = recoveryRequired ? recoveryErrorMessage : nil
         } catch {
             errorMessage = "계정 정보를 불러오지 못했습니다."
         }
+    }
+
+    public func refreshUsage() async {
+        guard !isWorking, !recoveryRequired, loadProfileUsage != nil else {
+            if recoveryRequired { errorMessage = recoveryErrorMessage }
+            return
+        }
+        isWorking = true
+        defer { isWorking = false }
+        await reloadUsage()
+    }
+
+    public var canRefreshUsage: Bool {
+        loadProfileUsage != nil && !profiles.isEmpty && !recoveryRequired
+    }
+
+    public var activeRemainingPercent: Int? {
+        guard let activeID = profiles.first(where: \.active)?.id,
+              let usage = usageByProfileID[activeID] else {
+            return nil
+        }
+        return usage.windows.map(Self.remainingPercent).min()
+    }
+
+    public nonisolated static func remainingPercent(_ window: AppServerRateLimitWindow) -> Int {
+        Int(max(0, min(100, 100 - window.usedPercent)).rounded(.down))
+    }
+
+    public nonisolated static func periodLabel(minutes: Int) -> String {
+        if minutes.isMultiple(of: 1_440) { return "\(minutes / 1_440)d" }
+        if minutes.isMultiple(of: 60) { return "\(minutes / 60)h" }
+        return "\(minutes)m"
     }
 
     public func select(_ profile: ProfileListItem) async {
@@ -230,6 +271,7 @@ public final class MenuBarViewModel: ObservableObject {
                 }
                 return
             }
+            await reloadUsage()
             errorMessage = nil
             statusMessage = "\(current.label) 계정 인증을 갱신했습니다. 현재 계정은 유지됩니다. 전환하려면 계정을 다시 선택하세요."
         } catch {
@@ -266,6 +308,7 @@ public final class MenuBarViewModel: ObservableObject {
                 errorMessage = "계정 재로그인 완료 여부를 확인하지 못했습니다. 계정 작업을 중단했습니다."
                 return
             }
+            await reloadUsage()
             errorMessage = nil
             statusMessage = "\(profile.label) 계정 인증을 갱신했습니다. 현재 계정은 유지됩니다. 전환하려면 계정을 다시 선택하세요."
         }
@@ -441,6 +484,7 @@ public final class MenuBarViewModel: ObservableObject {
                 errorMessage = "계정 등록 결과를 확인하지 못했습니다. 계정 작업을 중단했습니다."
                 return false
             }
+            await reloadUsage()
             reportRegistrationSuccess(label: label, additional: additional)
             return true
         } catch {
@@ -461,6 +505,7 @@ public final class MenuBarViewModel: ObservableObject {
                         errorMessage = "계정 등록 완료 여부를 확인하지 못했습니다. 계정 작업을 중단했습니다."
                         return false
                     }
+                    await reloadUsage()
                     reportRegistrationSuccess(label: label, additional: true)
                 } else {
                     errorMessage = "계정은 등록했지만 Codex 앱을 다시 열지 못했습니다."
@@ -506,6 +551,7 @@ public final class MenuBarViewModel: ObservableObject {
                 errorMessage = recoveryErrorMessage
                 return
             }
+            await reloadUsage()
             errorMessage = nil
             statusMessage = "현재 인증을 활성 프로필 저장본에 반영했습니다."
         } catch {
@@ -587,7 +633,12 @@ public final class MenuBarViewModel: ObservableObject {
                 await self?.setSwitchPhase(phase)
             }
             try await refreshState()
-            errorMessage = recoveryRequired ? recoveryErrorMessage : nil
+            if recoveryRequired {
+                errorMessage = recoveryErrorMessage
+            } else {
+                await reloadUsage()
+                errorMessage = nil
+            }
         } catch {
             await refreshAfterMutationFailure()
             if recoveryRequired {
@@ -741,6 +792,21 @@ public final class MenuBarViewModel: ObservableObject {
         let loadedRecoveryStatus = try await loadRecoveryStatus()
         profiles = loadedProfiles
         recoveryStatus = loadedRecoveryStatus
+        let profileIDs = Set(loadedProfiles.map(\.id))
+        usageByProfileID = usageByProfileID.filter { profileIDs.contains($0.key) }
+        usageFailedProfileIDs.formIntersection(profileIDs)
+    }
+
+    private func reloadUsage() async {
+        guard let loadProfileUsage else { return }
+        do {
+            let report = try await loadProfileUsage()
+            usageByProfileID = report.usageByProfileID
+            usageFailedProfileIDs = report.failedProfileIDs
+        } catch {
+            usageByProfileID = [:]
+            usageFailedProfileIDs = Set(profiles.map(\.id))
+        }
     }
 
     private func refreshState() async throws {

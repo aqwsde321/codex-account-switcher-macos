@@ -38,12 +38,9 @@
 - 비종결 recovery pending을 exact transaction에 묶어 공식 앱 정상 종료 뒤 다시 처리하는 메뉴바 복구 재시도
 - 메뉴바의 native 비동기 잔존 앱 프로세스 2차 확인, 취소 기본, 종료 전 exact snapshot 대상에만 `SIGTERM` 1회
 - 메뉴바 비활성 계정의 로컬 profile·JSON credential 삭제, 중단 자동 복구, 같은 계정 재등록 허용
+- B 삭제·재등록 뒤 A↔B 및 A→B→C→A 실계정 전환 검증
+- 공식 `account/rateLimits/read` 기반 계정별 Codex 한도·초기화 시각·plan 표시, 활성 계정 최소 잔여율 메뉴바 표시
 - Command Line Tools만으로 만드는 ad-hoc 서명 `.app`, 고정 경로 설치·LaunchAgent 자동 실행·보존형 제거
-
-아직 구현·노출하지 않음:
-
-- B 삭제→B 재등록→A↔B 전환의 실계정 제품 검증
-- 5시간·주간 사용량 표시
 
 첫 capture는 명시 확인 뒤 공식 앱을 정상 종료하고 현재 인증을 갱신·저장해 활성 프로필로 확정한 뒤 앱을 다시 연다. 추가 capture는 별도 `CODEX_HOME`의 공식 브라우저 로그인을 사용해 새 프로필을 비활성으로 저장하며, 실행 중인 공식 앱·공용 `auth.json`·기존 활성 프로필은 바꾸지 않는다.
 

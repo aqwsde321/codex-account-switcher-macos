@@ -252,6 +252,112 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
         }
     }
 
+    public func profileUsage() async throws -> ProfileUsageReport {
+        guard !switchInProgress else {
+            throw LocalCLIDataProviderFailure.switchAlreadyRunning
+        }
+        switchInProgress = true
+        defer { switchInProgress = false }
+
+        guard let store = try openStoreIfPresent(),
+              let lock = try store.tryAcquireTransactionLock() else {
+            throw LocalCLIDataProviderFailure.lockBusy
+        }
+        defer { lock.release() }
+
+        let registry = try store.loadRegistry()
+        guard !probeChildUnconfirmed,
+              try journalIsDurablyAbsent(in: store),
+              try store.loadCaptureProfileIDIfPresent() == nil,
+              try store.loadProfileRemovalIfPresent() == nil,
+              try !verificationWorkspaceExists() else {
+            throw LocalCLIDataProviderFailure.pendingRecovery
+        }
+        var usageByProfileID = [ProfileID: AppServerRateLimitsRead]()
+        var failedProfileIDs = Set<ProfileID>()
+
+        // ponytail: three accounts share one recovery-safe workspace; split only if measured refresh latency requires it.
+        for (index, profile) in registry.profiles.enumerated() {
+            try Task.checkCancellation()
+            guard !profile.needsRelogin else {
+                failedProfileIDs.insert(profile.id)
+                continue
+            }
+            do {
+                let descriptor = try await locateApp()
+                let usage: AppServerAccountUsageRead
+                if registry.activeProfileID == profile.id {
+                    usage = try await readActiveProfileUsage(
+                        expectedEmail: profile.email,
+                        descriptor: descriptor
+                    )
+                } else {
+                    guard let credential = try loadCredentialIfPresent(for: profile.id) else {
+                        failedProfileIDs.insert(profile.id)
+                        continue
+                    }
+                    usage = try await readProfileUsage(
+                        credential,
+                        expectedEmail: profile.email,
+                        descriptor: descriptor
+                    )
+                }
+                guard try await locateApp() == descriptor else {
+                    throw LocalCLIDataProviderFailure.incompatibleApplication
+                }
+                guard try store.loadRegistry() == registry else {
+                    throw LocalCLIDataProviderFailure.registryRoundTripFailed
+                }
+                try Task.checkCancellation()
+                usageByProfileID[profile.id] = AppServerRateLimitsRead(
+                    planType: usage.rateLimits.planType ?? planType(from: usage.account),
+                    windows: usage.rateLimits.windows
+                )
+            } catch let failure as AppServerProbeFailure where failure.code == .cancelled {
+                if failure.childDisposition == .unconfirmed {
+                    probeChildUnconfirmed = true
+                }
+                throw failure
+            } catch let failure as AppServerProbeFailure
+                where failure.childDisposition == .unconfirmed
+            {
+                probeChildUnconfirmed = true
+                failedProfileIDs.formUnion(registry.profiles[index...].map(\.id))
+                break
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                failedProfileIDs.insert(profile.id)
+                let mustStop: Bool
+                if usageFailureRequiresStop(error) {
+                    mustStop = true
+                } else {
+                    do {
+                        mustStop = try pathExists(credentialVerificationHomeURL)
+                        if mustStop {
+                            probeChildUnconfirmed = true
+                        }
+                    } catch {
+                        probeChildUnconfirmed = true
+                        mustStop = true
+                    }
+                }
+                if mustStop {
+                    if (error as? LocalCLIDataProviderFailure) == .verificationWorkspaceFailed {
+                        probeChildUnconfirmed = true
+                    }
+                    failedProfileIDs.formUnion(registry.profiles[index...].map(\.id))
+                    break
+                }
+            }
+        }
+
+        return ProfileUsageReport(
+            usageByProfileID: usageByProfileID,
+            failedProfileIDs: failedProfileIDs
+        )
+    }
+
     public func removeProfile(_ profileID: ProfileID) async throws -> ProfileListItem {
         guard !switchInProgress else {
             throw LocalCLIDataProviderFailure.switchAlreadyRunning
@@ -2822,6 +2928,79 @@ private extension LocalCLIDataProvider {
         }
     }
 
+    func readProfileUsage(
+        _ credential: CredentialBlob,
+        expectedEmail: String,
+        descriptor: CodexAppDescriptor
+    ) async throws -> AppServerAccountUsageRead {
+        let homeURL = credentialVerificationHomeURL
+        try createVerificationHome(homeURL)
+        let authURL = homeURL.appendingPathComponent("auth.json", isDirectory: false)
+        do {
+            let authIdentity = try files.replace(
+                contents: SensitiveBytes(try CredentialBlob.usageProbeData(for: credential)),
+                at: authURL,
+                expecting: .absent
+            )
+            let usage = try await probeAccountUsage(
+                descriptor: descriptor,
+                codexHomeURL: homeURL
+            )
+            try AccountIdentityValidator.validate(expectedEmail: expectedEmail, account: usage.account)
+            guard try files.snapshot(at: authURL) == .exact(authIdentity) else {
+                throw LocalCLIDataProviderFailure.credentialRoundTripFailed
+            }
+            try removeVerificationHome(homeURL)
+            return usage
+        } catch let failure as AppServerProbeFailure where failure.childDisposition == .unconfirmed {
+            probeChildUnconfirmed = true
+            throw failure
+        } catch is AccountIdentityError {
+            try removeVerificationHome(homeURL)
+            throw ProfileCaptureFailure.identityMismatch
+        } catch {
+            try removeVerificationHome(homeURL)
+            throw error
+        }
+    }
+
+    func readActiveProfileUsage(
+        expectedEmail: String,
+        descriptor: CodexAppDescriptor
+    ) async throws -> AppServerAccountUsageRead {
+        let current = try readCurrentCredential()
+        let usage: AppServerAccountUsageRead
+        do {
+            usage = try await readProfileUsage(
+                current.credential,
+                expectedEmail: expectedEmail,
+                descriptor: descriptor
+            )
+        } catch is ProfileCaptureFailure {
+            throw LocalCLIDataProviderFailure.activeAuthChanged
+        }
+        guard try files.snapshot(at: activeAuthURL) == .exact(current.identity) else {
+            throw LocalCLIDataProviderFailure.activeAuthChanged
+        }
+        return usage
+    }
+
+    func usageFailureRequiresStop(_ error: Error) -> Bool {
+        guard let failure = error as? LocalCLIDataProviderFailure else { return false }
+        switch failure {
+        case .incompatibleApplication, .credentialRoundTripFailed, .registryRoundTripFailed,
+             .activeAuthChanged, .verificationWorkspaceFailed:
+            return true
+        default:
+            return false
+        }
+    }
+
+    func planType(from account: AppServerAccountRead) -> String? {
+        guard case let .chatGPT(_, planType, _) = account else { return nil }
+        return planType
+    }
+
     func runIsolatedLogin(
         descriptor: CodexAppDescriptor,
         expectedEmail: String? = nil,
@@ -2930,6 +3109,32 @@ private extension LocalCLIDataProvider {
         homePolicy: AppServerProbeHomePolicy = .privateDirectory,
         refreshToken: Bool = false
     ) async throws -> AppServerAccountRead {
+        try await makeAppServerProbeSession(
+            descriptor: descriptor,
+            codexHomeURL: codexHomeURL,
+            homePolicy: homePolicy,
+            refreshToken: refreshToken
+        ).run()
+    }
+
+    func probeAccountUsage(
+        descriptor: CodexAppDescriptor,
+        codexHomeURL: URL
+    ) async throws -> AppServerAccountUsageRead {
+        try await makeAppServerProbeSession(
+            descriptor: descriptor,
+            codexHomeURL: codexHomeURL,
+            homePolicy: .privateDirectory,
+            refreshToken: false
+        ).runAccountUsage()
+    }
+
+    func makeAppServerProbeSession(
+        descriptor: CodexAppDescriptor,
+        codexHomeURL: URL,
+        homePolicy: AppServerProbeHomePolicy,
+        refreshToken: Bool
+    ) throws -> AppServerProbeSession {
         let didLaunch: @Sendable (Int32) throws -> Void
         switch homePolicy {
         case .privateDirectory:
@@ -2944,7 +3149,7 @@ private extension LocalCLIDataProvider {
         case .ownerControlled:
             didLaunch = { _ in }
         }
-        return try await AppServerProbeSession(
+        return AppServerProbeSession(
             configuration: AppServerProbeConfiguration(
                 executableURL: descriptor.bundledCodexURL,
                 codexHomeURL: codexHomeURL,
@@ -2958,7 +3163,7 @@ private extension LocalCLIDataProvider {
                 )
             ),
             didLaunch: didLaunch
-        ).run()
+        )
     }
 
     func restoreOriginalAfterCapture(

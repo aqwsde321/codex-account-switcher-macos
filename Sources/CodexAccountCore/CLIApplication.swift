@@ -62,6 +62,19 @@ public struct ProfileListItem: Equatable, Sendable {
     }
 }
 
+public struct ProfileUsageReport: Equatable, Sendable {
+    public let usageByProfileID: [ProfileID: AppServerRateLimitsRead]
+    public let failedProfileIDs: Set<ProfileID>
+
+    public init(
+        usageByProfileID: [ProfileID: AppServerRateLimitsRead],
+        failedProfileIDs: Set<ProfileID>
+    ) {
+        self.usageByProfileID = usageByProfileID
+        self.failedProfileIDs = failedProfileIDs
+    }
+}
+
 public enum RecoveryCLIStatus: Equatable, Sendable {
     case none
     case pending(transactionID: String, phase: SwitchPhase, previousProfileID: ProfileID)

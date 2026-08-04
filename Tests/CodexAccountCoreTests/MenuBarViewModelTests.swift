@@ -36,6 +36,78 @@ func menuBarViewModelTests() -> [TestCase] {
                 "menu bar loaded stale state before recovery"
             )
         },
+        TestCase("MenuBarViewModel loads per-account usage and derives the active remaining limit") {
+            let profiles = menuBarProfiles()
+            let activeID = profiles[0].id
+            let inactiveID = profiles[1].id
+            let failedID = profiles[2].id
+            let report = ProfileUsageReport(
+                usageByProfileID: [
+                    activeID: AppServerRateLimitsRead(
+                        planType: "pro",
+                        windows: [
+                            AppServerRateLimitWindow(
+                                usedPercent: 20,
+                                windowDurationMinutes: 300,
+                                resetsAt: nil
+                            ),
+                            AppServerRateLimitWindow(
+                                usedPercent: 90,
+                                windowDurationMinutes: 10_080,
+                                resetsAt: nil
+                            ),
+                        ]
+                    ),
+                    inactiveID: AppServerRateLimitsRead(
+                        planType: "team",
+                        windows: [
+                            AppServerRateLimitWindow(
+                                usedPercent: 15,
+                                windowDurationMinutes: 43_200,
+                                resetsAt: nil
+                            ),
+                        ]
+                    ),
+                ],
+                failedProfileIDs: [failedID]
+            )
+            let provider = MenuBarProviderSpy(profiles: profiles)
+            let usageLoads = RefreshOrderRecorder()
+            let model = await makeMenuBarModel(
+                provider: provider,
+                loadProfileUsage: {
+                    await usageLoads.record("usage")
+                    return report
+                }
+            )
+
+            await model.load()
+
+            let loadedUsage = await MainActor.run { model.usageByProfileID }
+            let failures = await MainActor.run { model.usageFailedProfileIDs }
+            let remaining = await MainActor.run { model.activeRemainingPercent }
+            try expect(loadedUsage.count == 2, "inactive account usage was not retained")
+            try expect(failures == [failedID], "one account failure affected other accounts")
+            try expect(remaining == 10, "menu bar did not use the tightest active limit")
+            try expect(
+                MenuBarViewModel.periodLabel(minutes: 300) == "5h"
+                    && MenuBarViewModel.periodLabel(minutes: 10_080) == "7d"
+                    && MenuBarViewModel.periodLabel(minutes: 43_200) == "30d",
+                "dynamic rate-limit period labels changed"
+            )
+
+            await model.select(profiles[1])
+            await model.confirmSwitch(profiles[1])
+            let switchedRemaining = await MainActor.run { model.activeRemainingPercent }
+            try expect(switchedRemaining == 85, "switch left the previous active usage in the menu bar")
+
+            await model.syncActive()
+            let usageLoadEvents = await usageLoads.events
+            try expect(
+                usageLoadEvents == ["usage", "usage", "usage"],
+                "credential changes did not reload usage"
+            )
+        },
         TestCase("MenuBarViewModel loads three cards and confirms only inactive selection") {
             let provider = MenuBarProviderSpy(profiles: menuBarProfiles())
             let model = await MainActor.run {
@@ -1238,6 +1310,7 @@ private actor ProfileLoginCancellationProbe {
 private func makeMenuBarModel(
     provider: MenuBarProviderSpy,
     useInjectedProfileLoad: Bool = false,
+    loadProfileUsage: MenuBarViewModel.LoadProfileUsage? = nil,
     captureProfile: MenuBarViewModel.CaptureProfile? = nil,
     removeProfile: MenuBarViewModel.RemoveProfile? = nil,
     retryPendingRecovery: MenuBarViewModel.RetryPendingRecovery? = nil,
@@ -1252,6 +1325,7 @@ private func makeMenuBarModel(
                 }
                 return await provider.profiles()
             },
+            loadProfileUsage: loadProfileUsage,
             loadRecoveryStatus: { await provider.recoveryStatus() },
             captureProfile: captureProfile ?? { try await provider.captureProfile(label: $0) },
             removeProfile: removeProfile ?? { try await provider.removeProfile($0) },

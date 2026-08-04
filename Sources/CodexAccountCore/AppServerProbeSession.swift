@@ -51,6 +51,7 @@ public enum AppServerProbeStage: Sendable, Equatable {
     case launching
     case initializing
     case readingAccount
+    case readingRateLimits
     case awaitingNormalExit
     case terminating
 }
@@ -119,8 +120,9 @@ public actor AppServerProbeSession {
     private var exitCode: Int32?
     private var machine = AppServerProtocolMachine()
     private var account: AppServerAccountRead?
+    private var readRateLimits = false
     private var pendingFailure: AppServerProbeFailure?
-    private var continuation: CheckedContinuation<AppServerAccountRead, Error>?
+    private var continuation: CheckedContinuation<AppServerAccountUsageRead, Error>?
     private var timeoutTask: Task<Void, Never>?
 
     public init(
@@ -132,6 +134,14 @@ public actor AppServerProbeSession {
     }
 
     public func run() async throws -> AppServerAccountRead {
+        try await execute(readRateLimits: false).account
+    }
+
+    public func runAccountUsage() async throws -> AppServerAccountUsageRead {
+        try await execute(readRateLimits: true)
+    }
+
+    private func execute(readRateLimits: Bool) async throws -> AppServerAccountUsageRead {
         guard !used else {
             throw AppServerProbeFailure(
                 code: .alreadyUsed,
@@ -140,6 +150,7 @@ public actor AppServerProbeSession {
             )
         }
         used = true
+        self.readRateLimits = readRateLimits
 
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
@@ -231,7 +242,10 @@ private extension AppServerProbeSession {
             try didLaunch(process.processIdentifier)
             stage = .initializing
             scheduleTimeout(configuration.timeouts.initializeResponse, expectedStage: .initializing)
-            let initial = try machine.start(refreshToken: configuration.refreshToken)
+            let initial = try machine.start(
+                refreshToken: configuration.refreshToken,
+                readRateLimits: readRateLimits
+            )
             try write(initial)
         } catch let failure as AppServerProbeFailure {
             beginFailure(failure)
@@ -280,7 +294,7 @@ private extension AppServerProbeSession {
             do {
                 try machine.validateEndOfFile()
             } catch {
-                if account == nil {
+                if !machine.readyToCloseStandardInput {
                     beginFailure(protocolFailure(error, stage: stage))
                 }
             }
@@ -293,6 +307,10 @@ private extension AppServerProbeSession {
             if outbound.count == 2, stage == .initializing {
                 stage = .readingAccount
                 scheduleTimeout(configuration.timeouts.accountResponse, expectedStage: .readingAccount)
+            }
+            if machine.awaitingRateLimitsResponse, stage == .readingAccount {
+                stage = .readingRateLimits
+                scheduleTimeout(configuration.timeouts.accountResponse, expectedStage: .readingRateLimits)
             }
             try write(outbound)
             if machine.readyToCloseStandardInput, account == nil {
@@ -327,7 +345,7 @@ private extension AppServerProbeSession {
                 exitCode: status,
                 childPID: process?.processIdentifier
             )
-        } else if account == nil, pendingFailure == nil {
+        } else if !machine.readyToCloseStandardInput, pendingFailure == nil {
             pendingFailure = AppServerProbeFailure(
                 code: .unexpectedEOF,
                 stage: stage,
@@ -408,7 +426,9 @@ private extension AppServerProbeSession {
         }
         do {
             try machine.validateEndOfFile()
-            finish(.success(account))
+            let rateLimits = machine.rateLimits
+                ?? AppServerRateLimitsRead(planType: nil, windows: [])
+            finish(.success(AppServerAccountUsageRead(account: account, rateLimits: rateLimits)))
         } catch {
             finish(.failure(protocolFailure(error, stage: stage)))
         }
@@ -542,7 +562,7 @@ private extension AppServerProbeSession {
         try? standardInput?.close()
     }
 
-    func finish(_ result: Result<AppServerAccountRead, Error>) {
+    func finish(_ result: Result<AppServerAccountUsageRead, Error>) {
         guard !finished else { return }
         finished = true
         timeoutTask?.cancel()
