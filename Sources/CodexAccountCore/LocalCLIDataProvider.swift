@@ -2519,7 +2519,12 @@ private extension LocalCLIDataProvider {
         } else {
             Set<Int32>()
         }
-        let records = try processProvider.snapshot()
+        let records: [ProcessRecord]
+        do {
+            records = try processProvider.snapshot()
+        } catch ProcessSnapshotFailure.processChanged {
+            throw LocalCLIDataProviderFailure.processSnapshotUnstable
+        }
         let runningAfter = if let descriptor {
             Set(try await runningApplicationPIDs(descriptor))
         } else {

@@ -4185,6 +4185,26 @@ func cliApplicationTests() -> [TestCase] {
                 )
 
                 try expect(result.standardError == "error=process_blocked\n", "snapshot race allowed capture")
+
+                let authBefore = try Data(contentsOf: authURL)
+                let changedProcessProvider = LocalCLIDataProvider(
+                    storeURL: directory.appendingPathComponent("changed-store", isDirectory: true),
+                    activeAuthURL: authURL,
+                    processProvider: ChangedProcessSnapshotProvider(),
+                    locateApp: { descriptor },
+                    runningApplicationPIDs: { _ in [] }
+                )
+                let changedProcessResult = await CLIApplication(provider: changedProcessProvider).run(
+                    arguments: ["profile", "capture", "--label", "A"],
+                    mutationConfirmed: true
+                )
+                let authAfter = try Data(contentsOf: authURL)
+
+                try expect(
+                    changedProcessResult.standardError == "error=process_blocked\n",
+                    "changed process identity did not fail closed"
+                )
+                try expect(authAfter == authBefore, "changed process identity mutated auth")
             }
         },
         TestCase("CLI capture detects an auth replacement after identity verification") {
@@ -4285,6 +4305,12 @@ private func rollbackTestConfirmationTest() -> TestCase {
 
 private struct EmptyProcessSnapshotProvider: ProcessSnapshotProviding {
     func snapshot() throws -> [ProcessRecord] { [] }
+}
+
+private struct ChangedProcessSnapshotProvider: ProcessSnapshotProviding {
+    func snapshot() throws -> [ProcessRecord] {
+        throw ProcessSnapshotFailure.processChanged
+    }
 }
 
 private final class TerminableProcessSnapshotProvider: ProcessSnapshotProviding, @unchecked Sendable {

@@ -191,10 +191,15 @@ private extension ProcessClassifier {
         context: ProcessClassificationContext
     ) -> ProcessDisposition {
         if context.approvedResidents.contains(where: { rule in
-            record.executablePath == rule.executablePath
-                && record.nameHint == rule.name
+            record.nameHint == rule.name
                 && record.signingIdentifier == rule.signingIdentifier
                 && record.teamIdentifier == rule.teamIdentifier
+                && (record.executablePath == rule.executablePath
+                    || (record.executablePath == nil
+                        && record.parentPID == 1
+                        && rule.name == "browser_crashpad_handler"
+                        && rule.signingIdentifier == "browser_crashpad_handler"
+                        && rule.teamIdentifier == CodexAppLocator.observedOfficialTeamIdentifier))
         }) {
             return .approvedNonAuthResident
         }

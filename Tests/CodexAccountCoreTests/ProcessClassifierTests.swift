@@ -210,6 +210,112 @@ func processClassifierTests() -> [TestCase] {
             )
             try expect(!mismatchInventory.authMutationAllowed, "resident tuple mismatch allowed mutation")
         },
+        TestCase("LibprocSnapshotProvider accepts only valid Developer ID crashpad kernel metadata") {
+            let validFlags: UInt32 = 0x22010311
+            try expect(
+                LibprocSnapshotProvider.isTrustedKernelCrashpadSignature(
+                    flags: validFlags,
+                    validationCategory: 6,
+                    identity: "browser_crashpad_handler",
+                    teamIdentifier: "2DC432GLL2"
+                ),
+                "valid kernel crashpad metadata was rejected"
+            )
+            let rejectedMetadata: [(UInt32, UInt32, String?, String?)] = [
+                (validFlags | 0x2, 6, "browser_crashpad_handler", "2DC432GLL2"),
+                (validFlags | 0x10000000, 6, "browser_crashpad_handler", "2DC432GLL2"),
+                (validFlags & ~0x1, 6, "browser_crashpad_handler", "2DC432GLL2"),
+                (validFlags & ~0x10000, 6, "browser_crashpad_handler", "2DC432GLL2"),
+                (validFlags & ~0x20000000, 6, "browser_crashpad_handler", "2DC432GLL2"),
+                (validFlags, 5, "browser_crashpad_handler", "2DC432GLL2"),
+                (validFlags, 6, "other", "2DC432GLL2"),
+                (validFlags, 6, "browser_crashpad_handler", "OTHERTEAM"),
+            ]
+            try expect(
+                rejectedMetadata.allSatisfy { flags, category, identity, teamIdentifier in
+                    !LibprocSnapshotProvider.isTrustedKernelCrashpadSignature(
+                        flags: flags,
+                        validationCategory: category,
+                        identity: identity,
+                        teamIdentifier: teamIdentifier
+                    )
+                },
+                "untrusted kernel crashpad metadata was accepted"
+            )
+
+            let identity = Array("browser_crashpad_handler".utf8)
+            let totalLength = UInt32(identity.count + 9)
+            let header: [UInt8] = [
+                0, 0, 0, 0,
+                UInt8((totalLength >> 24) & 0xff),
+                UInt8((totalLength >> 16) & 0xff),
+                UInt8((totalLength >> 8) & 0xff),
+                UInt8(totalLength & 0xff),
+            ]
+            let encoded = header + identity + [0]
+            try expect(
+                LibprocSnapshotProvider.decodeCodeSigningText(encoded) == "browser_crashpad_handler",
+                "csops identity header was decoded incorrectly"
+            )
+            try expect(
+                LibprocSnapshotProvider.decodeCodeSigningText(Array(encoded.dropLast())) == nil,
+                "truncated csops identity was accepted"
+            )
+        },
+        TestCase("ProcessClassifier approves a kernel-validated crashpad after its executable is removed") {
+            let rule = ApprovedResidentRule(
+                executablePath: "/Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/151.0.7922.71/Helpers/browser_crashpad_handler",
+                name: "browser_crashpad_handler",
+                signingIdentifier: "browser_crashpad_handler",
+                teamIdentifier: "2DC432GLL2"
+            )
+            let resident = ProcessRecord(
+                identity: ProcessIdentity(pid: 25, startSeconds: 100, startMicroseconds: 1),
+                parentPID: 1,
+                executablePath: nil,
+                nameHint: rule.name,
+                signingIdentifier: rule.signingIdentifier,
+                teamIdentifier: rule.teamIdentifier
+            )
+            let context = ProcessClassificationContext(
+                bundleRootPath: "/Applications/ChatGPT.app",
+                mainExecutablePath: "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT",
+                bundledCodexPath: "/Applications/ChatGPT.app/Contents/Resources/codex",
+                appRootIdentities: [],
+                helperOwnedIdentities: [],
+                approvedResidents: [rule]
+            )
+
+            let inventory = ProcessClassifier.classify([resident], context: context)
+
+            try expect(
+                inventory.disposition(forPID: resident.identity.pid) == .approvedNonAuthResident,
+                "kernel-validated crashpad residue blocked account switching"
+            )
+            try expect(inventory.authMutationAllowed, "kernel-validated crashpad residue blocked auth mutation")
+
+            let wrongParent = ProcessRecord(
+                identity: ProcessIdentity(pid: 27, startSeconds: 100, startMicroseconds: 1),
+                parentPID: 42,
+                executablePath: nil,
+                nameHint: rule.name,
+                signingIdentifier: rule.signingIdentifier,
+                teamIdentifier: rule.teamIdentifier
+            )
+            let wrongTeam = ProcessRecord(
+                identity: ProcessIdentity(pid: 28, startSeconds: 100, startMicroseconds: 1),
+                parentPID: 1,
+                executablePath: nil,
+                nameHint: rule.name,
+                signingIdentifier: rule.signingIdentifier,
+                teamIdentifier: "OTHERTEAM"
+            )
+            let invalidInventory = ProcessClassifier.classify([wrongParent, wrongTeam], context: context)
+            try expect(
+                invalidInventory.processes.allSatisfy { $0.disposition == .unclassifiedRelevant },
+                "unverified pathless crashpad was approved"
+            )
+        },
         TestCase("ProcessClassifier blocks an unresolved crashpad resident") {
             let record = ProcessRecord(
                 identity: ProcessIdentity(pid: 25, startSeconds: 100, startMicroseconds: 1),
