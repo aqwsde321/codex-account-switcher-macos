@@ -1,12 +1,12 @@
 # Codex Account Switcher 문서 인덱스
 
 - 문서 상태: 기준안 완료
-- 구현 상태: 최대 3개 프로필 Core/CLI, 수동 복구 typed outcome, `MenuBarExtra` 재로그인·시작 자동 복구·비활성 계정 삭제 slice 완료
-- 실제 검증: A↔B 기능 왕복 3회, 수동 A 복구 2회, B-011 자동 롤백 PASS
-- 제품 단계: ADR-027에 따라 `MenuBarExtra` MVP 개발 승인
+- 구현 상태: 최대 3개 프로필 전환·복구·삭제·재등록, 계정별 한도 조회, 메뉴바 상태 링, 시스템 잠자기 방지 토글 완료
+- 실제 검증: A↔B 기능 왕복 3회, B 삭제·재등록 후 A→B→C→A 전환, 수동 A 복구 2회, B-011 자동 롤백, 잠자기 방지 OFF/ON 재시작 유지 PASS
+- 제품 단계: 주요 `MenuBarExtra` 기능 완료, 배포 전 Black-box 인수 게이트 진행
 - 마지막 조사일: 2026-08-04
 
-> 저장 backend의 현행 결정은 ADR-034다. 다른 문서의 제품 Keychain 계약은 이전 설계 기록이며 private JSON 계약으로 대체됐다.
+> 저장 backend의 현행 결정은 ADR-034다. ADR-012·ADR-030과 당시 incident의 Keychain 표현은 역사 기록이며 private JSON 계약으로 대체됐다.
 
 ## 1. 결론
 
@@ -14,7 +14,7 @@
 
 > 개인·회사 ChatGPT 로그인의 Codex 인증을 전환하는 별도 macOS 메뉴바 helper. 하나의 기본 `~/.codex`를 공유하고 계정별 인증 blob만 보관한다. 계정 선택 시 공식 Codex 앱 정상 종료 → 프로세스 안전 게이트 → `auth.json` 원자 교체 → 앱 재실행 → 이메일 검증을 수행한다.
 
-재사용 가능한 Swift CLI Core와 실제 전환·롤백 검증은 완료됐다. cycle nonce와 단계별 task ID 기록이 없어 B-010 정식 PASS는 보류하지만, ADR-027에 따라 이 증거 형식 공백을 수용하고 메뉴바 MVP 개발을 시작한다. B-010 정식 증거는 MVP 완료·배포 전 확보한다.
+재사용 가능한 Swift CLI Core와 메뉴바 주요 기능, 실제 전환·롤백 검증은 완료됐다. cycle nonce와 단계별 task ID 기록이 없어 B-010 정식 PASS는 보류한다. 배포 전 같은 task ID·nonce를 포함한 정식 증거와 재부팅·릴리스 Black-box 검증을 확보한다.
 
 공식 문서상 file 기반 `CODEX_HOME/auth.json` 복사·재사용과 자동 token refresh는 지원되는 패턴이다. 그러나 다음 제품 핵심은 문서만으로 보장되지 않는다.
 
@@ -102,7 +102,10 @@
 - 앱이 닫혀 있으면 전환 후 실행
 - 외부 미등록 로그인은 자동 덮어쓰기 금지
 - 만료·폐기 프로필 자동 삭제 금지
-- 사용량 UI는 후속
+- 사용량은 인증과 분리된 읽기 전용 UI이며 활성 계정은 2분, 모든 계정은 30분 주기로 조회
+- 사용량 기간은 서버 응답을 `5h`·`7d`·`30d`처럼 표시하고 Spark 한도는 제외
+- 잠자기 방지는 실제 `pmset` 상태를 권위로 하며 관리자 인증 뒤 변경·재검증
+- 잠자기 방지 켜짐은 메뉴바 커피 배지로 표시하고 앱 종료 후에도 시스템에 유지
 - 동일 task A→B→A 실제 메시지 왕복 3회 필수
 - 올바른 인증 전환 뒤 구조적 same-task ownership 실패 시 제품 중단; Helper 결함은 수정 후 전체 재검증
 
@@ -117,7 +120,7 @@
 - App Server는 인증 상태 조회와 `account/read(refreshToken: ...)`를 제공한다.
 - ChatGPT account 응답은 이메일과 plan을 제공한다.
 
-공식 문서가 file credential mode를 지원한다는 사실은 데스크톱 앱이 현재 `auth.json`만을 권위 저장소로 사용한다는 보장은 아니다. 현재 Mac에 `auth.json`이 존재하지만, 데스크톱 앱이 Keychain/Electron 상태보다 이 파일을 우선하는지는 실제 Spike에서 검증한다. Helper가 사용자 `config.toml`을 몰래 바꿔 file mode를 강제하지 않는다.
+공식 문서가 file credential mode를 지원한다는 사실만으로 데스크톱 앱의 권위 저장소를 단정할 수는 없다. 현재 build에서는 A/B/C 실전환으로 file 기반 인증 채택을 확인했으며 Codex 업데이트 뒤에는 다시 검증한다. Helper가 사용자 `config.toml`을 몰래 바꿔 file mode를 강제하지 않는다.
 
 ### 현재 Mac에서 읽기 전용 확인
 
@@ -125,7 +128,7 @@
 |---|---|
 | 앱 | `/Applications/ChatGPT.app` |
 | bundle id | `com.openai.codex` |
-| version/build | `26.721.81911` / `5973` |
+| version/build | `26.727.51351` / `6119` |
 | main executable | `Contents/MacOS/ChatGPT` |
 | bundled Codex | `Contents/Resources/codex` |
 | Swift | `6.2.3` |
@@ -165,6 +168,7 @@
 9. 롤백을 검증할 수 없으면 앱을 실행하지 않는다.
 10. 실제 Spike는 비민감 가짜 task만 사용한다.
 11. 실제 앱 종료·전환은 Codex 앱 내부 agent가 아니라 외부 Terminal에서 수행한다.
+12. 잠자기 방지는 시스템 전체 설정이다. 발열·배터리 위험을 UI에 알리고 상태를 알 수 없으면 ON으로 표시하며 변경 완료는 실제 `pmset` 재검증 뒤에만 인정한다.
 
 ## 8. 다음 작업
 
@@ -177,19 +181,22 @@ Swift CLI Core의 비파괴 기반 구현은 저장소 루트에 있다. 빌드�
 5. 완료: 최대 3개 registration coordinator, 추가 등록 격리 로그인·비활성 저장, 외부 Terminal confirmation gate
 6. 개발 승인: 사용자 확인상 동일 task 기능 왕복 완료, `07_test_acceptance.md` §16 형식 증거는 릴리스 게이트로 유지
 7. 완료: `CodexAccountMenuBar` target, fake 3계정 카드, active 선택·inactive 확인 모델
-8. 완료: credential backend 경계, CLI private file store 명시 연결, Keychain generic-password CRUD와 plaintext fallback 금지
-9. 완료: 메뉴바 앱에 실제 Core provider와 Keychain backend 주입, Spike metadata·credential 자동 migration 금지
+8. 완료: CLI와 메뉴바의 공통 `FileCredentialStore` 구현·분리된 metadata root, `0700` directory·`0600` file, 기존 Keychain 자동 이전 금지
+9. 완료: 메뉴바 앱에 실제 Core provider와 제품 metadata·credential store 주입
 10. 완료: 메뉴바 현재 로그인 등록, 추가 등록 뒤 기존 active 보존 검증, recovery pending/blocked mutation 차단
-11. 완료: 메뉴바 활성 인증 수동 동기화, 명시 확인, 성공·복구 차단 상태 표시
+11. 완료 후 메뉴 UI 제거: Core/CLI의 활성 인증 수동 동기화는 유지하되 메뉴바에는 별도 동기화 버튼 없음
 12. 완료: 메뉴바 pending phase·정확한 이전 프로필·blocked recovery 상태 표시
 13. 완료: 수동 복구 완전 성공·앱 실행 미확인·journal 완료 불확실 typed outcome, phase/expected-active finalization evidence와 공통 재개 gate
 14. 완료: 메뉴바 exact transaction/previous-profile 수동 복구, 명시 확인, typed outcome별 성공·launch 미확인·STOP 처리
 15. 완료: durable journal phase 직후 callback과 메뉴바 실시간 전환 진행 문구 연결
-16. 완료: inactive `needsRelogin` exact-ID 확인, B credential 갱신·marker 해제·B 활성화, finalization/throw 재조정, 앱 수동 실행 안내
+16. 완료: inactive `needsRelogin` exact-ID 확인, B credential 갱신·marker 해제, 기존 active 유지, B 재선택 시 별도 전환
 17. 완료: 메뉴바 상태 조회 전 미완료 transaction 자동 복구, phase/registry/marker 모순 STOP, startup 앱 자동 실행 금지
 18. 완료: 메뉴바 native 잔존 앱 프로세스 2차 확인, 취소 기본, 종료 전 exact snapshot 대상의 `SIGTERM` 1회 제한
-19. 완료: Command Line Tools 기반 ad-hoc `.app` build/install, LaunchAgent 실행, 번들·설치 실행파일의 random synthetic Keychain CRUD와 cleanup
-20. 다음: B-015~B-017 실계정, 재부팅 startup recovery, 잔존 프로세스 2차 확인, ad-hoc 재빌드 ACL Black-box 검증
+19. 완료: Command Line Tools 기반 ad-hoc `.app` build/install, LaunchAgent 실행, 이전 Keychain backend의 synthetic CRUD·cleanup
+20. 완료: 비활성 B 삭제·재등록, B 전환·A 복귀, C 등록 뒤 A→B→C→A 실계정 전환
+21. 완료: 계정별 동적 Codex 한도 카드, 활성 2분·전체 30분 자동 조회, 메뉴바 최소 잔여율 링·숫자·자동 조회 맥동
+22. 완료: 실제 `pmset` 상태 기반 잠자기 방지 토글, 관리자 인증, 변경 후 재검증, 커피 배지, OFF/ON 앱 재시작 유지 확인
+23. 다음: B-017 exact 재로그인, B-010 정식 증거, 재부팅 startup recovery, 잔존 프로세스 2차 확인, 릴리스 build Black-box 검증
 
 구현 상세와 각 단계 검증은 `08_implementation_handoff.md`에 있다.
 
@@ -197,9 +204,9 @@ Swift CLI Core의 비파괴 기반 구현은 저장소 루트에 있다. 빌드�
 
 ```text
 `docs/00_README.md`부터 연결된 문서를 읽어.
-`02_decision_record.md`의 ADR-027·ADR-029·ADR-030과 기존 안전 결정을 유지하고,
-`08_implementation_handoff.md` Step 9의 B-015~B-017 실계정·재부팅 복구와
-잔존 프로세스 2차 확인 Black-box 검증을 진행해. 실제 Codex 앱 종료와
+`02_decision_record.md`의 ADR-027·ADR-034·ADR-035·ADR-036과 기존 안전 결정을 유지하고,
+`08_implementation_handoff.md` Step 9의 B-017 exact 재로그인, 재부팅 복구와 잔존 프로세스 2차 확인,
+릴리스 build Black-box 검증을 진행해. 실제 Codex 앱 종료와
 auth.json 교체는 외부 Terminal 실행 게이트로 남겨둬. B-010 정식 증거는 릴리스 전 확보해.
 ```
 

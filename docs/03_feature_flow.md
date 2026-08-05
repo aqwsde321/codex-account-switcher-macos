@@ -1,7 +1,7 @@
 # Codex 계정 전환 기능 흐름
 
-- 상태: Swift CLI Spike 완료, 메뉴바 등록·전환·복구·재로그인·비활성 계정 삭제 slice 완료
-- 기준일: 2026-08-02
+- 상태: Swift CLI와 메뉴바 전환·복구·삭제·재등록, 계정 한도, 잠자기 방지 구현 완료
+- 기준일: 2026-08-04
 - 대상: macOS 공식 Codex 앱용 별도 메뉴바 helper
 - 선행 단계: Swift CLI Spike
 
@@ -71,7 +71,7 @@
 | 대상 토큰 만료·폐기 | 이전 계정으로 롤백, 대상 프로필 유지, 재로그인 필요 표시 |
 | 대상 이메일 불일치 | 새 앱을 정상 종료한 뒤 자동 롤백 |
 | 롤백 검증 실패 | 앱을 실행하지 않은 안전 정지 상태 유지, 수동 복구 안내 |
-| 비활성 프로필 삭제 | 로컬 registry 항목과 해당 Keychain item만 제거; 현재 로그인·OpenAI 계정 불변 |
+| 비활성 프로필 삭제 | 로컬 registry 항목과 해당 private JSON credential만 제거; 현재 로그인·OpenAI 계정 불변 |
 | 활성 프로필 삭제 | UI 미노출, Core 거부 |
 | Codex 업데이트 감지 | version/build와 무관하게 공식 서명·canonical bundle 경로·App Server 계약을 다시 검사하고, 통과하면 진행하며 불일치하면 차단 |
 | bundle/auth/App Server 계약 파손 | 즉시 차단; 인증 파일을 변경하지 않음 |
@@ -121,9 +121,7 @@ flowchart TD
 5. 새·분류 불명 프로세스나 독립 Codex CLI·IDE가 있으면 자동 종료하지 않고 중단한다.
 6. Helper가 소유한 짧은 app-server로 `account/read(refreshToken: true)`를 호출한다.
 7. 응답이 ChatGPT 계정이고 이메일이 존재하는지 확인한다.
-8. 최신 `auth.json`을 첫 프로필에 저장한다.
-   - Spike: 전용 비밀 디렉터리의 `0600` 파일
-   - 제품: macOS Keychain
+8. 최신 `auth.json`을 제품 metadata 아래 `0700` 비밀 디렉터리의 `0600` private JSON으로 첫 프로필에 저장한다.
 9. secret-free registry에 프로필 ID, 레이블, 이메일, plan 표시값, 생성 시각을 저장한다.
 10. 최초 프로필을 활성 프로필로 설정하고 앱을 다시 연다.
 
@@ -178,11 +176,11 @@ flowchart TD
 ### 3.4.1 비활성 계정 삭제·재등록
 
 1. 활성 카드에는 삭제 동작을 노출하지 않는다. 비활성 카드의 휴지통만 삭제 확인을 연다.
-2. 독립 native modal은 로컬 registry와 해당 Keychain item만 삭제하며 OpenAI 계정과 현재 Codex 로그인은 바뀌지 않음을 표시한다. 취소가 기본 동작이다.
+2. 독립 native modal은 로컬 registry와 해당 JSON credential만 삭제하며 OpenAI 계정과 현재 Codex 로그인은 바뀌지 않음을 표시한다. 취소가 기본 동작이다.
 3. 확인 snapshot은 exact profile ID·라벨·이메일·상태를 보존한다. ViewModel은 Core 호출 직전에 profile과 recovery를 다시 읽고 동일한 비활성 프로필일 때만 진행한다.
 4. Core는 단일 transaction lock 아래 전환 journal·finalization evidence·capture marker·verifier workspace가 없고 대상이 여전히 비활성인지 재검증한다.
 5. `profile-removal.json`에 `schemaVersion, transactionId, profileId, expectedActiveProfileId`만 내구 기록한다.
-6. Keychain item 멱등 삭제→registry profile 내구 삭제→삭제 marker 내구 삭제 순서로 완료한다. `auth.json`과 활성 프로필은 쓰지 않는다.
+6. JSON credential 멱등 삭제→registry profile 내구 삭제→삭제 marker 내구 삭제 순서로 완료한다. `auth.json`과 활성 프로필은 쓰지 않는다.
 7. 중단되면 시작 자동 복구가 같은 순서를 재개한다. 삭제 marker와 전환 journal이 함께 있거나 예상 active ID가 바뀌었으면 자동 추정 없이 둘 다 보존하고 STOP한다.
 8. 완료 뒤 프로필 슬롯과 라벨·이메일 중복 제약이 해제된다. 사용자는 격리 브라우저 로그인으로 같은 라벨·이메일을 다시 등록할 수 있으며 새 profile ID가 발급되고 기존 active가 유지된다.
 
@@ -279,10 +277,10 @@ stateDiagram-v2
 
 ### 제품 저장
 
-- 계정별 인증 blob은 macOS Keychain에 저장한다.
-- 디스크에는 활성 계정의 `~/.codex/auth.json`만 materialize한다.
+- 계정별 인증 blob은 제품 metadata 아래 `0700` directory의 `0600` private JSON에 저장한다.
+- 공용 `~/.codex`에는 선택된 활성 계정의 `auth.json` 하나만 materialize한다.
 - registry와 journal은 secret-free JSON이다.
-- Keychain이 잠겼거나 접근이 거절되면 인증을 변경하지 않고 중단한다.
+- credential file 접근·권한·decode·round-trip을 확인하지 못하면 인증을 변경하지 않고 중단한다.
 
 ### token refresh 규칙
 
@@ -384,12 +382,13 @@ ADR-027에 따라 이 공백은 개발 착수에만 수용하며 MVP 완료·배
 
 ### Reference
 
-- 사용량과 초기화 시각 표시는 후속 기능이다.
+- 사용량 조회는 인증 mutation과 분리한다. 앱 시작·수동 새로고침은 모든 계정, 자동 조회는 활성 2분·전체 30분 주기로 순차 실행하며 실패해도 전환 상태를 바꾸지 않는다.
+- 잠자기 방지는 계정 flow와 분리한다. 실제 `pmset` 상태 읽기 → 관리자 인증 변경 → 실제 상태 재검증 순서만 허용한다.
 - 4개 이상 계정은 후속 범위다. MVP UI와 등록은 최대 3개다.
 - custom `CODEX_HOME`, App Store sandbox, 자동 업데이트는 MVP 범위 밖이다.
 
 ## 8. 다음 단계
 
-이 문서의 Core flow에는 미확정 제품 선택이 없다. ADR-027에 따라 다음 단계는 검증된 Core를 재사용하는 `MenuBarExtra` MVP다.
+Core와 `MenuBarExtra` 주요 기능 구현은 완료됐다. 다음 단계는 B-017 exact 재로그인, B-010 정식 증거, 재부팅 recovery, 잔존 프로세스 2차 확인, 릴리스 build Black-box 검증이다.
 
-신규 서버 API는 없으므로 별도 API 상세 리뷰를 생략한다. 메뉴바 UI는 `05_technical_design.md`의 로컬 프로세스·파일 트랜잭션을 복제하지 않고 adapter로 호출한다.
+신규 서버 API는 없다. 메뉴바 UI는 계속 `05_technical_design.md`의 로컬 프로세스·파일 트랜잭션을 복제하지 않고 adapter로 호출한다.

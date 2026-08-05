@@ -1,7 +1,7 @@
 # Codex Account Switcher 제품 요구사항
 
-- 상태: 메뉴바 MVP 개발 승인
-- 기준일: 2026-07-30
+- 상태: 메뉴바 주요 기능 구현 완료, 배포 전 인수 검증 진행
+- 기준일: 2026-08-04
 - 대상: macOS 공식 Codex 앱용 최대 3개 계정 전환 helper
 - 문서 역할: Spike와 MVP를 새 task에서 재개할 때 사용하는 제품 기준 문서
 
@@ -13,7 +13,7 @@
 
 - Mobius 전체 포크: 폐기. 신규 소형 Swift 앱을 만든다.
 - `userId + workspaceAccountId` 식별: MVP에서는 사용하지 않는다. `account/read`의 이메일을 사용한다.
-- 사용량 게이지를 MVP에 포함: 후속 기능으로 연기한다.
+- 사용량을 전환 성공 판정에 포함: 폐기. ADR-035의 읽기 전용 후속 slice로만 제공한다.
 - 실패 시 계정별 환경으로 자동 전환: 폐기. 올바른 인증 전환 뒤에도 동일 task 재개가 ownership 구조 때문에 불가능하면 제품 구현을 중단한다.
 - Spike용 shell 중심 구현: 폐기. 제품에서 재사용할 Swift CLI core로 만든다.
 
@@ -132,7 +132,7 @@ CLI 기능 검증과 ADR-027의 개발 승인 뒤 시작한다. B-010 정식 증
 - 앱 종료 상태에서 선택 시 전환 후 앱 실행
 - 이미 활성인 계정 선택 시 파일을 쓰지 않고 Codex 창 활성화
 - 전환 진행 단계와 오류 표시
-- Keychain 인증 보관
+- `0700`/`0600` private JSON 인증 보관
 - 비활성 프로필의 로컬 저장본 삭제와 같은 계정 재등록
 - 파일 lock, 전환 저널, 시작 시 복구
 - 대상 검증 실패 시 자동 롤백
@@ -140,11 +140,7 @@ CLI 기능 검증과 ADR-027의 개발 승인 뒤 시작한다. B-010 정식 증
 ### 7.3 후속 범위
 
 - 프로필 4개 이상 지원
-- 격리된 임시 `CODEX_HOME`과 app-server를 이용한 앱 내부 로그인
-- 5시간·주간 사용량과 초기화 시각 표시
-- 수동 새로고침과 stale 상태 표시
 - Developer ID 서명과 공증
-- 로그인 시 helper 자동 실행
 
 ### 7.4 비목표
 
@@ -169,7 +165,7 @@ CLI 기능 검증과 ADR-027의 개발 승인 뒤 시작한다. B-010 정식 증
 2. 사용자가 프로필 라벨을 정하고 공식 앱 종료·등록·재실행을 확인한다.
 3. helper가 공식 앱에 정상 종료를 요청하고 ADR-009의 잔존 프로세스 경계를 적용한다. 독립 CLI·IDE는 자동 종료하지 않는다.
 4. process gate가 깨끗할 때만 `account/read`로 이메일을 확인한다.
-5. Spike는 `0600` 파일, MVP는 Keychain에 인증을 저장한다.
+5. Spike와 제품은 repo 밖 `0700` directory의 `0600` private JSON에 저장 프로필 인증을 둔다.
 6. 공식 앱을 등록 계정으로 다시 연다.
 7. 로컬 메뉴바 UI에는 계정 구분을 위해 이메일을 표시한다. 진단 로그와 공유용 screenshot에서는 마스킹한다.
 
@@ -216,8 +212,8 @@ MVP는 등록 프로필을 최대 3개로 제한한다. 네 번째 등록은 기
 ### 8.4.1 비활성 프로필 삭제
 
 - 활성 프로필에는 삭제 동작을 제공하지 않는다.
-- 비활성 프로필 삭제 전 로컬 profile과 Keychain item만 제거하며 OpenAI 계정·현재 Codex 로그인은 바뀌지 않음을 확인한다.
-- 취소를 기본 동작으로 두고, 승인 시 삭제 marker→Keychain item→registry profile→marker 순서로 처리한다.
+- 비활성 프로필 삭제 전 로컬 profile과 JSON credential만 제거하며 OpenAI 계정·현재 Codex 로그인은 바뀌지 않음을 확인한다.
+- 취소를 기본 동작으로 두고, 승인 시 삭제 marker→JSON credential→registry profile→marker 순서로 처리한다.
 - 중단된 삭제는 시작 자동 복구가 재개하며 switch journal과 충돌하면 둘 다 보존하고 STOP한다.
 - 삭제한 계정은 같은 라벨·이메일로 다시 등록할 수 있으며 새 profile ID를 사용한다.
 
@@ -274,11 +270,11 @@ MVP가 이미 3개 프로필을 보유하면 새 등록은 제한 안내 후 중
 
 ### FR-04 인증 저장
 
-- Spike 스냅샷은 `0600`, 상위 디렉터리는 `0700`이어야 한다.
-- MVP의 저장 프로필 인증은 macOS Keychain에 있어야 한다.
-- 평상시 파일시스템에는 활성 프로필의 `~/.codex/auth.json`만 존재해야 한다.
-- 현재 활성 이메일이 등록 프로필과 일치할 때만 전환 직전 최신 `auth.json`으로 해당 Keychain 항목을 갱신해야 한다.
-- 대상 저장 인증은 격리 App Server에서 먼저 `refreshToken: false`로 이메일을 확인한 뒤 `refreshToken: true` 검증이 성공한 경우에만 해당 대상 Keychain 항목을 갱신해야 한다.
+- 저장 프로필 인증 파일은 `0600`, 상위 디렉터리는 `0700`이어야 한다.
+- 제품 저장 위치는 `~/Library/Application Support/CodexAccountSwitcher/credentials/<profile-UUID>.json`이다.
+- 공용 `~/.codex`에는 선택된 활성 인증 한 개만 `auth.json`으로 materialize하고 계정별 저장본은 제품 private store에만 둔다.
+- 현재 활성 이메일이 등록 프로필과 일치할 때만 전환 직전 최신 `auth.json`으로 해당 JSON credential을 갱신해야 한다.
+- 대상 저장 인증은 격리 App Server에서 먼저 `refreshToken: false`로 이메일을 확인한 뒤 `refreshToken: true` 검증이 성공한 경우에만 해당 대상 JSON credential을 갱신해야 한다.
 - 대상 refresh, 이메일 검증, 안전 저장 중 하나라도 실패하면 active auth를 바꾸지 않고 기존 대상 프로필을 보존해야 한다. 명시적 인증 거부일 때만 `재로그인 필요`, 네트워크·서버 오류일 때는 `검증 불가—재시도`로 표시해야 한다.
 
 ### FR-05 프로세스 제어
@@ -328,7 +324,7 @@ MVP가 이미 3개 프로필을 보유하면 새 등록은 제한 안내 후 중
 
 - target verifier가 typed `target-unverified`를 반환하면 이전 인증과 이전 활성 프로필을 자동 복구해야 한다. process·registry race, verifier 종료 미확인, 내구성 상태 불명확은 쓰지 않고 STOP해야 한다.
 - 실행 중 일반 전환의 복원은 이전 이메일 검증 성공 후에만 공식 앱을 재실행해야 한다. 시작 자동 복구는 앱을 재실행하지 않아야 한다.
-- 복원 실패 시 앱을 닫아 두고 Keychain 원본과 저널을 보존해야 한다.
+- 복원 실패 시 앱을 닫아 두고 private JSON 원본과 저널을 보존해야 한다.
 
 ### FR-11 만료·취소된 대상 인증
 
@@ -359,30 +355,39 @@ MVP가 이미 3개 프로필을 보유하면 새 등록은 제한 안내 후 중
 
 ### FR-15 사용량 분리
 
-- MVP는 사용량을 전환 성공 판정에 사용하지 않아야 한다.
-- `account/rateLimits/read` 기반 사용량 표시는 후속 읽기 전용 기능이어야 한다.
+- 사용량을 전환 성공 판정, 계정 식별, 자동 계정 선택에 사용하지 않아야 한다.
+- `account/rateLimits/read` 기반 사용량은 읽기 전용이어야 한다.
+- 서버의 기간을 `Nm`·`Nh`·`Nd`로 표시하고 Spark 한도는 제외해야 한다.
+- 앱 시작·수동 새로고침은 모든 계정, 자동 조회는 활성 계정 2분·모든 계정 30분 주기를 사용해야 한다.
 - 조회 실패가 프로필 삭제, 전환 실패, 자동 계정 선택을 유발하면 안 된다.
 
 ### FR-16 로컬 프로필 삭제
 
 - 삭제는 exact inactive profile ID에만 허용해야 한다. 활성 프로필은 UI에서 숨기고 Core에서도 거부해야 한다.
-- 해당 Keychain item과 registry profile만 삭제하고 현재 `auth.json`, active profile, OpenAI 계정은 변경하지 않아야 한다.
-- secret-free 삭제 marker를 side effect 전에 내구 기록하고 Keychain→registry→marker 순서로 멱등 완료해야 한다.
-- Keychain 거부나 crash 뒤 marker와 registry를 보존하고 다음 자동 복구에서 재개해야 한다.
+- 해당 JSON credential과 registry profile만 삭제하고 현재 `auth.json`, active profile, OpenAI 계정은 변경하지 않아야 한다.
+- secret-free 삭제 marker를 side effect 전에 내구 기록하고 JSON credential→registry→marker 순서로 멱등 완료해야 한다.
+- 파일 삭제 실패나 crash 뒤 marker와 registry를 보존하고 다음 자동 복구에서 재개해야 한다.
 - 삭제 marker와 switch journal이 공존하거나 expected active가 달라지면 자동 추정·삭제 없이 STOP해야 한다.
+
+### FR-17 잠자기 방지
+
+- 토글은 `/usr/bin/pmset -g`의 실제 `SleepDisabled 0|1` 상태를 표시해야 한다.
+- 변경은 macOS 관리자 인증 뒤 고정된 `/usr/bin/pmset -a disablesleep 0|1`만 실행하고 실제 상태를 다시 확인해야 한다.
+- 상태를 확인할 수 없으면 fail-safe로 켜짐을 표시하고 오류를 알려야 한다.
+- 켜짐은 메뉴바 커피 배지로 표시하고 시스템 전체 지속성, 발열, 배터리 소모를 안내해야 한다.
 
 ## 10. 비기능 요구사항
 
 ### NFR-01 보안
 
 - 인증값은 UI, 로그, 테스트 결과, crash report, source control에 노출하지 않는다.
-- 프로덕션 인증은 Keychain 접근 제어를 사용한다.
-- 민감 파일 권한을 생성 직후 적용한다.
+- private credential directory는 `0700`, 파일은 `0600`을 생성 직후 적용한다.
+- JSON은 토큰 원문이므로 같은 macOS 사용자 권한 프로세스와 보안 격리를 제공한다고 표현하지 않는다.
 
 ### NFR-02 무결성
 
 - 어느 실패 지점에서도 유효했던 이전 인증을 덮어써 복구 불가능하게 만들면 안 된다.
-- Keychain 원본, 공용 활성 파일, 레지스트리 상태의 불일치를 저널로 복구할 수 있어야 한다.
+- private JSON 원본, 공용 활성 파일, 레지스트리 상태의 불일치를 저널로 복구할 수 있어야 한다.
 
 ### NFR-03 보수적 실패
 
@@ -397,7 +402,7 @@ MVP가 이미 3개 프로필을 보유하면 새 등록은 제한 안내 후 중
 
 ### NFR-05 단순성
 
-- Spike와 MVP에 계정별 환경, 사용량, 자동 전환을 섞지 않는다.
+- 사용량을 전환 판정·identity·자동 계정 선택에 섞지 않는다.
 - Swift CLI core와 메뉴 UI 사이에 전환 로직을 중복 구현하지 않는다.
 - Mobius 코드는 필요한 부분만 라이선스 확인 후 선택적으로 참고한다.
 
@@ -494,7 +499,7 @@ MVP가 이미 3개 프로필을 보유하면 새 등록은 제한 안내 후 중
 
 - CLI core를 호출하는 `MenuBarExtra` 앱
 - 최대 3개 프로필 등록·표시·전환
-- Keychain 저장
+- private JSON 저장
 - 전환 확인, 진행, 오류, 재로그인 UI
 - 비활성 프로필 삭제·재등록 UI
 - 시작 시 저널 복구
@@ -503,8 +508,6 @@ MVP가 이미 3개 프로필을 보유하면 새 등록은 제한 안내 후 중
 ### 단계 3: 후속 기능
 
 - 프로필 4개 이상
-- 앱 내부 격리 로그인
-- 사용량 표시
 - Developer ID 서명·공증
 
 ## 13. MVP 완료 조건
@@ -517,11 +520,13 @@ MVP가 이미 3개 프로필을 보유하면 새 등록은 제한 안내 후 중
 - 앱 실행·종료 상태 모두에서 수동 전환 성공
 - 이미 활성인 카드 선택 시 무변경 동작
 - 독립 CLI 감지 시 무변경 차단
-- 비활성 프로필 인증은 Keychain에만 저장되고 활성 인증 한 개만 `~/.codex/auth.json`에 존재함
+- 비활성 프로필 인증은 private JSON store에 저장되고 선택된 활성 인증 한 개만 `~/.codex/auth.json`에 materialize됨
 - 원자 교체, lock, 저널, 자동 롤백 검증
 - 만료 토큰과 미등록 외부 로그인 처리 검증
 - `needsRelogin` 비활성 대상의 exact-ID 격리 재로그인, 기존 active/auth·공식 앱 불변 검증
-- 비활성 프로필의 Keychain·registry 삭제, 활성 로그인 불변, 같은 계정 재등록 검증
+- 비활성 프로필의 JSON credential·registry 삭제, 활성 로그인 불변, 같은 계정 재등록 검증
+- 계정별 동적 한도, 활성 2분·전체 30분 자동 조회, 메뉴바 최소 잔여율 표시 검증
+- 잠자기 방지 실제 상태 읽기·변경 후 재검증과 앱 재시작 지속성 검증
 - Codex 버전 변경 사전 검사
 - 실제 task 왕복 성공 기준 유지
 - 로그·테스트 산출물에서 인증 비밀 미검출
@@ -529,7 +534,7 @@ MVP가 이미 3개 프로필을 보유하면 새 등록은 제한 안내 후 중
 ## 14. 배포와 운영
 
 - 초기 배포는 개인 사용 및 GitHub 공개 배포다.
-- App Store sandbox는 목표가 아니다. 기본 `~/.codex`, 프로세스 제어, Keychain 접근이 제품 동작에 필요하다.
+- App Store sandbox는 목표가 아니다. 기본 `~/.codex`, 프로세스 제어, private JSON이 계정 전환에 필요하며 잠자기 방지 사용 시에만 관리자 권한 `pmset`이 필요하다.
 - 안정화 후 Developer ID 서명과 공증을 추가한다.
 - 공식 Codex 업데이트 이후 첫 전환은 호환성 검사 결과를 사용자에게 보여준다.
 - 제품이 보안 격리를 제공하지 않는다는 경고를 첫 실행과 설정 화면에 명시한다.
@@ -538,7 +543,7 @@ MVP가 이미 3개 프로필을 보유하면 새 등록은 제한 안내 후 중
 
 - [ ] 이 문서와 `02_decision_record.md`를 읽음
 - [ ] 구조적 same-task ownership 실패는 NO-GO, Helper 실패는 FIX-AND-RETEST로 분리함
-- [ ] MVP에 사용량 또는 계정별 환경을 추가하지 않음
+- [ ] 사용량과 잠자기 방지를 계정 전환 판정·인증 mutation과 분리함
 - [ ] 실제 이메일과 인증값을 fixture·로그·문서에 넣지 않음
 - [ ] 기존 Swift CLI Core를 재사용하고 UI에 전환 로직을 복제하지 않음
 - [ ] 기본 `~/.codex` 외 환경에서 전환하지 않음

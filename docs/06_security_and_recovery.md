@@ -1,7 +1,7 @@
 # 보안·복구 설계
 
-- 상태: Swift CLI Spike·manual recovery typed outcome·durable finalization gate·Keychain backend·메뉴바 provider/등록/활성 인증 sync/수동 복구/전환 진행/재로그인/잔존 프로세스 2차 확인·ad-hoc 번들 synthetic Keychain CRUD 완료, 실계정·배포 보안 검증 전
-- 기준일: 2026-07-31
+- 상태: Swift CLI·메뉴바 복구 경계와 `0700`/`0600` private JSON credential 구현 완료, 배포 보안 검증 전
+- 기준일: 2026-08-04
 - 적용 대상: Swift CLI Spike와 후속 macOS 메뉴바 앱
 
 ## 1. 보안 목표와 비목표
@@ -20,7 +20,7 @@
 - 개인·회사 데이터 격리
 - 회사 정보유출방지 정책 우회
 - 서로 다른 macOS 사용자 간 비밀 공유
-- 공격자가 이미 사용자의 로그인 세션과 Keychain을 장악한 상황 방어
+- 공격자가 이미 같은 macOS 사용자 권한을 장악한 상황 방어
 - 공식 Codex 앱 내부 인증 구현의 보안 보증
 - App Store sandbox 배포
 
@@ -30,7 +30,7 @@
 
 | 자산 | 민감도 | 저장 위치 | 보호 원칙 |
 |---|---|---|---|
-| access/refresh/id token | 최상 | Spike 전용 `0600` 파일, 제품 Keychain | 원문 출력·전송 금지 |
+| access/refresh/id token | 최상 | 제품 metadata 아래 `0600` private JSON | 원문 출력·전송 금지, 같은 사용자 권한과 격리되지 않음 |
 | 활성 `auth.json` | 최상 | `~/.codex/auth.json` | 일반 파일·소유자·권한·원자성 검증 |
 | 계정 이메일 | 중간 | secret-free registry/UI | 로그에서는 마스킹 |
 | 프로필 ID | 낮음 | registry/journal | 이메일 대신 transaction 식별에 사용 |
@@ -43,7 +43,7 @@
 ```mermaid
 flowchart LR
     U["로컬 사용자"] --> H["계정 전환 Helper"]
-    H --> K["CredentialStore: Spike private file / 제품 Keychain"]
+    H --> K["FileCredentialStore: 0700 directory / 0600 JSON"]
     H --> A["~/.codex/auth.json"]
     H --> P["공식 Codex 앱 프로세스"]
     H --> S["Helper 소유 App Server"]
@@ -171,21 +171,22 @@ flowchart LR
 
 ### 제품
 
-- 저장 프로필의 인증 blob, 특히 비활성 프로필 인증은 사용자 기본 file-based macOS Keychain generic password item으로만 저장한다. 일반 구성에서는 login Keychain이며 Data Protection Keychain과 명시적 accessibility option을 사용하지 않는다.
-- Keychain service는 `CodexAccountSwitcher.credentials.v1`, item account key는 비밀이 아닌 profile UUID를 사용한다. service 변경은 기존 item migration 없이는 금지한다.
-- Keychain 접근 실패 시 fallback plaintext 저장을 만들지 않는다.
-- 평문 인증의 유일한 제품 예외는 현재 활성 계정 blob 하나를 materialize한 `~/.codex/auth.json`이다. 비활성 인증이나 추가 평문 백업을 만들지 않는다.
+- 저장 프로필 인증은 `~/Library/Application Support/CodexAccountSwitcher/credentials/<profile-UUID>.json`에 둔다. 상위 directory는 `0700`, 파일은 `0600`이다.
+- JSON은 토큰 원문을 포함한다. 같은 macOS 사용자 권한 프로세스에 대한 비밀 격리를 제공하지 않으며 Keychain 암호화라고 표현하지 않는다.
+- store 접근·권한·strict decode·round-trip 실패 시 다른 저장소 fallback을 만들지 않는다.
+- 공용 `~/.codex`에는 현재 선택된 활성 계정 blob 하나만 `auth.json`으로 materialize한다. 계정별 저장본은 제품 private store 밖에 추가로 만들지 않는다.
+- 이전 `CodexAccountSwitcher.credentials.v1` Keychain item은 제품 런타임에서 읽거나 자동 이전·삭제하지 않는다.
 - 현재 계정 갱신 전 journal을 `refreshingCurrent`로 내구 기록한다. 모든 관련 프로세스가 종료된 뒤 기본 `~/.codex`를 쓰는 Helper 소유 App Server에서 `account/read(refreshToken: true)`를 호출한다.
-- refresh 후 이메일이 현재 프로필과 완전 일치할 때만 갱신 blob을 해당 Keychain item에 저장한다. Keychain 쓰기 성공을 확인한 뒤 journal을 `currentSaved`로 내구 기록한다.
-- 대상 처리 전 journal을 `validatingTarget`으로 내구 기록한다. 대상 Keychain blob을 격리 홈에서 먼저 `account/read(refreshToken: false)`로 식별하고, 같은 격리 홈에서 `refreshToken: true`로 갱신한다.
-- 두 응답의 이메일이 모두 대상 프로필과 완전 일치할 때만 갱신된 대상 blob을 Keychain에 저장한다. Keychain 쓰기 성공을 확인한 뒤 journal을 `targetValidated`로 내구 기록한다.
-- 대상 식별·갱신·Keychain 저장 중 하나라도 실패하면 공용 active auth는 변경하지 않고 대상 프로필과 기존 저장본을 보존한다. 명시적 인증 만료·폐기·로그아웃·identity 불일치만 재로그인 상태로 바꾼다. timeout·network/server 오류는 retryable 검증 실패, Keychain write 실패는 저장소 오류이며 둘 다 token 폐기나 재로그인 근거가 아니다.
-- 비활성 B 재로그인은 exact profile ID 확인 뒤 별도 `CODEX_HOME`의 브라우저 로그인으로 시작한다. 격리 홈에서 B identity를 false→true→false로 확인한 뒤에만 B Keychain item을 교체한다.
+- refresh 후 이메일이 현재 프로필과 완전 일치할 때만 갱신 blob을 해당 JSON credential에 저장한다. durable write와 round-trip을 확인한 뒤 journal을 `currentSaved`로 기록한다.
+- 대상 처리 전 journal을 `validatingTarget`으로 내구 기록한다. 대상 JSON credential을 격리 홈에서 먼저 `account/read(refreshToken: false)`로 식별하고, 같은 격리 홈에서 `refreshToken: true`로 갱신한다.
+- 두 응답의 이메일이 모두 대상 프로필과 완전 일치할 때만 갱신된 대상 blob을 JSON credential에 저장한다. durable write와 round-trip을 확인한 뒤 journal을 `targetValidated`로 기록한다.
+- 대상 식별·갱신·credential 저장 중 하나라도 실패하면 공용 active auth는 변경하지 않고 대상 프로필과 기존 저장본을 보존한다. 명시적 인증 만료·폐기·로그아웃·identity 불일치만 재로그인 상태로 바꾼다. timeout·network/server 오류와 store write 실패는 token 폐기나 재로그인 근거가 아니다.
+- 비활성 B 재로그인은 exact profile ID 확인 뒤 별도 `CODEX_HOME`의 브라우저 로그인으로 시작한다. 격리 홈에서 B identity를 false→true→false로 확인한 뒤에만 B JSON credential을 교체한다.
 - 재로그인 성공 경로는 A active·공용 auth·A credential을 유지하고 B marker만 해제한다. 공식 앱은 종료·실행하지 않으며 pending·blocked·wrong-ID outcome·내구 상태 불일치에서는 자동 재시도하지 않는다.
-- 비활성 프로필 삭제는 해당 profile UUID의 Keychain item과 registry 항목만 제거한다. 활성 `auth.json`, active ID, OpenAI 계정은 변경하지 않으며 활성 프로필 삭제는 거부한다.
-- 삭제는 secret-free `profile-removal.json`을 먼저 내구 기록하고 Keychain item→registry profile→marker 순서로 멱등 수행한다. Keychain 거부·중단 시 marker와 registry를 보존하고 다음 자동 복구에서 재개한다.
+- 비활성 프로필 삭제는 해당 profile UUID의 JSON credential과 registry 항목만 제거한다. 활성 `auth.json`, active ID, OpenAI 계정은 변경하지 않으며 활성 프로필 삭제는 거부한다.
+- 삭제는 secret-free `profile-removal.json`을 먼저 내구 기록하고 JSON credential→registry profile→marker 순서로 멱등 수행한다. 파일 삭제 실패·중단 시 marker와 registry를 보존하고 다음 자동 복구에서 재개한다.
 - 공식 앱 재실행 후 검증은 공용 active auth를 임시 격리 홈에 복사해 `account/read(refreshToken: false)`를 호출한다. private Electron IPC에는 연결하지 않으며, 이 검증은 공용 active auth의 이메일만 직접 입증한다.
-- Developer ID 서명·공증은 공개 바이너리 배포 단계의 후속 gate다. 현재 ad-hoc 소스 build는 random synthetic item의 현재-build CRUD만 입증하며, 서명 identity가 바뀐 뒤 기존 item 접근과 잠금·거부 정책은 별도 재검증한다.
+- Developer ID 서명·공증은 공개 바이너리 배포 단계의 후속 gate다. 현재 ad-hoc 재빌드는 private JSON 접근에 Keychain ACL을 요구하지 않는다.
 
 ## 6. 원자 교체 불변조건
 
@@ -354,7 +355,7 @@ Spike는 stale verifier workspace 내용을 복구 입력으로 사용하지 않
 - App Server 원문 stderr
 - 전체 process command line
 - task 본문·사용자 prompt·회사 코드
-- Keychain item secret data
+- private credential JSON 원문 또는 일부
 
 기본 보존 기간은 MVP 구현 시 별도로 짧게 정한다. 사용자가 진단 로그를 내보내기 전에 민감정보 검사를 수행한다.
 
@@ -391,5 +392,5 @@ Spike는 stale verifier workspace 내용을 복구 입력으로 사용하지 않
 - [ ] rollback 실패 시 앱 미실행 테스트 존재
 - [ ] 미등록 이메일 자동 덮어쓰기 금지 테스트 존재
 - [ ] journal이 exact 7 fields이며 build/secret/email이 없음
-- [ ] 제품 저장소가 Keychain이며 plaintext fallback이 없음
+- [ ] 제품 private credential directory `0700`, 각 JSON file `0600`, 다른 저장소 fallback 없음
 - [ ] 실제 Spike는 비민감 task만 사용

@@ -7,7 +7,7 @@
 - 목적: 개인 계정 A와 회사 계정 B의 인증을 교체하면서 **동일한 Codex task를 양쪽 계정에서 실제로 이어갈 수 있는지** 검증
 - 실행 기준: 실제 CLI 명령은 `README.md`를 따른다. 이 문서의 `switcher ...` 표기는 설계 당시 예정 인터페이스이므로 실행하지 않는다.
 
-현재 구현된 명령은 `inspect`, `profiles list`, `profile capture`, `profile sync-active`, `switch`, `recovery status`, `recovery restore`다. debug build에는 B-011 실패 주입 명령도 포함된다. 메뉴바 앱은 등록·전환·수동 복구·재로그인·시작 자동 복구·잔존 프로세스 2차 확인 wiring과 ad-hoc 소스 앱 build/install까지 구현됐다. 번들·설치 실행파일의 random synthetic Keychain CRUD와 cleanup은 통과했지만 실제 재부팅 복구, 잔존 프로세스 확인 UI, 실계정 제품 service Keychain flow, ad-hoc 재빌드 ACL, B-017 실계정 재로그인은 미실행이다.
+현재 구현된 명령은 `inspect`, `profiles list`, `profile capture`, `profile sync-active`, `switch`, `recovery status`, `recovery restore`다. debug build에는 B-011 실패 주입 명령도 포함된다. 메뉴바 앱은 private JSON credential, 등록·전환·복구·재로그인·삭제, 계정 한도, 잠자기 방지와 ad-hoc build/install까지 구현됐다. B 삭제·재등록과 A→B→C→A는 통과했으며 실제 재부팅 복구, 잔존 프로세스 확인 UI, B-017 exact 재로그인은 미실행이다.
 
 ## 1. 핵심 판정
 
@@ -54,7 +54,7 @@ Spike의 제품 가설은 다음 하나다.
 - 프로필 ID: `profile-a`, `profile-b` 같은 비밀이 아닌 내부 식별자
 - 기대 이메일: 등록 시 App Server `account/read`가 반환한 이메일. 사용자가 입력한 별칭이 아니다.
 - active auth: 현재 `~/.codex/auth.json`
-- profile auth: Spike 전용 private credential store의 계정별 인증 blob. 제품 MVP에서는 같은 추상화의 backend가 macOS Keychain으로 바뀐다.
+- profile auth: repo 밖 `0700` private credential store의 계정별 `0600` JSON 인증 blob. CLI와 제품이 같은 구현을 사용한다.
 - source: 전환 전 계정
 - target: 전환할 계정
 
@@ -70,7 +70,7 @@ Spike의 제품 가설은 다음 하나다.
 6. target 이메일 검증 전에는 전환 성공으로 표시하지 않는다.
 7. 실패하면 source 인증을 복원하고 source 이메일까지 다시 검증해야 롤백 성공이다.
 8. 인증 내용, 토큰, 쿠키, JWT, 전체 `auth.json`, 원문 명령줄은 로그에 기록하지 않는다.
-9. Spike 비활성 profile auth는 repo 밖 전용 `0700` 디렉터리의 `0600` 파일로만 저장하고 종료 후 명시적으로 정리한다. 제품 MVP에서는 비활성 profile auth를 Keychain에 저장하며, 그때 persistent 평문은 active `~/.codex/auth.json` 하나뿐이다.
+9. 저장 profile auth는 repo 밖 전용 `0700` 디렉터리의 `0600` JSON으로만 저장한다. 공용 `~/.codex`에는 선택된 active auth 하나만 materialize한다.
 10. verifier용 auth 복사본은 helper가 만든 격리 임시 홈에 `0600`으로 잠깐 materialize하고 verifier 종료 직후 제거한다. 이를 두 번째 persistent active auth로 사용하지 않는다.
 11. journal과 registry의 모든 write는 다음 side effect 전에 durable해야 한다.
 12. journal이 malformed, torn 또는 schema 불일치이면 자동 삭제·추정하지 않고 STOP한다.
@@ -207,7 +207,7 @@ JWT를 디코딩하거나 token field를 로그에 출력해 신원을 추정하
 - working directory(사용자에게만 표시; 진단 로그에는 민감 경로를 남기지 않음)
 - helper가 직접 띄운 verifier PID
 
-앱 검사 시 `Versions/Current`를 해석한 canonical 경로가 bundle 내부의 regular executable이고 정적 서명이 공식 Team ID와 일치해야 한다. 실행 중인 `browser_crashpad_handler`도 그 exact path·name·signing identifier·Team ID가 모두 맞을 때만 `approvedNonAuthResident`로 **blocker 집합 계산 전에** 제외한다. version/build 번호 자체는 판정에 쓰지 않으며 하나라도 다르면 차단한다. helper 소유의 단기 verifier가 있다면 명시적으로 닫고 PID 종료를 확인한다.
+앱 검사 시 `Versions/Current`를 해석한 canonical 경로가 bundle 내부의 regular executable이고 정적 서명이 공식 Team ID와 일치해야 한다. 실행 중인 `browser_crashpad_handler`는 exact path·name·signing identifier·Team ID가 모두 맞을 때 `approvedNonAuthResident`로 **blocker 집합 계산 전에** 제외한다. updater가 이전 executable을 삭제해 path가 없으면 PPID 1이며 커널 기준 valid·signed·hardened runtime·Developer ID, 비 ad-hoc·비 debugged, exact signing identifier·Team ID를 모두 만족할 때만 같은 분류를 적용한다. version/build 번호 자체는 판정에 쓰지 않으며 하나라도 다르면 차단한다. helper 소유의 단기 verifier가 있다면 명시적으로 닫고 PID 종료를 확인한다.
 
 ### 독립 CLI/task
 
@@ -570,7 +570,7 @@ journal은 §9의 고정 7필드만 가진다: `schemaVersion`, `transactionId`,
 - [ ] default `~/.codex`만 사용
 - [ ] `auth.json` 일반 파일·소유자·권한 확인
 - [ ] App Server `account/read` preflight 성공
-- [ ] Spike profile은 repo 밖 `0700` directory의 `0600` file이며 제품 backend는 Keychain으로 분리됨
+- [ ] CLI와 제품 profile은 repo 밖 `0700` directory의 `0600` JSON file을 사용함
 - [ ] metadata directory `0700`, journal/registry/temp `0600`
 - [ ] journal 고정 7필드와 atomic durability 확인
 - [ ] A 백업과 자동 복구 가능성 확인

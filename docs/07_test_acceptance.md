@@ -2,7 +2,7 @@
 
 ## 0. 문서 상태
 
-- 상태: 메뉴바 MVP 개발 GO, 엄격한 MVP 완료·배포 GO 판정 전
+- 상태: 메뉴바 주요 기능 구현·일부 실계정 검증 완료, 엄격한 배포 GO 판정 전
 - 대상: Swift CLI core Spike와 후속 Swift 메뉴바 앱
 - 실제 계정, 실제 이메일, 인증값 포함 금지
 - 이 문서의 helper 명령 표기는 설계 당시 **예정 인터페이스**다. 실제 CLI 명령은 `README.md`, 현재 실행 결과는 `04_spike_runbook.md` §18을 따른다.
@@ -88,13 +88,13 @@ Unit/Integration test는 실제 `~/.codex/auth.json`을 읽거나 쓰지 않는�
 - 일반 switch의 target active-ID commit은 target 이메일 일치와 `targetVerified` durability 전 없음. 새 격리 재로그인은 journal·active-ID mutation 없이 target credential과 marker만 갱신
 - 성공 registry가 durable한 뒤 journal unlink→parent fsync
 - auth mutation 전 취소/차단은 journal unlink→parent fsync로 durable cleanup
-- 프로필 삭제는 inactive exact target만 허용하고 `profile-removal` marker→Keychain→registry→marker 순서를 유지하며 active auth는 쓰지 않음
+- 프로필 삭제는 inactive exact target만 허용하고 `profile-removal` marker→JSON credential→registry→marker 순서를 유지하며 active auth는 쓰지 않음
 - 실행 중 일반 switch 실패 후 롤백은 source auth 복원→source 이메일 검증→registry previous durable commit→journal durable delete→source 앱 재실행 순서. 시작 자동 복구는 앱 미실행
 - 종료 전 확인한 exact 앱 소유 잔존도 1초 유예와 별도 승인 뒤에만 `SIGTERM` 1회
 - `SIGKILL` 없음
 - 독립 CLI/task 자동 종료 없음
 - 전환된 기본 auth는 이후 새로 시작하는 기본 Codex CLI에도 적용됨
-- CLI Spike 비활성 auth는 repo 밖 `0700` private directory의 `0600` file; 제품 MVP 비활성 auth는 사용자 기본 file-based Keychain
+- CLI와 제품 저장 프로필 auth는 repo 밖 `0700` private directory의 `0600` JSON file
 - 제품의 persistent 평문 active auth file은 `~/.codex/auth.json` 하나
 - 격리 verifier auth copy는 `0600` 임시 파일이며 verifier 종료 후 제거
 - 로그/journal에 token, cookie, JWT, 전체 auth, 실제 이메일, raw command line 없음
@@ -203,7 +203,7 @@ Unit/Integration test는 실제 `~/.codex/auth.json`을 읽거나 쓰지 않는�
 | I-037 | malformed/torn/unknown journal | 자동 삭제·복구 없이 STOP | 예 |
 | I-038 | 두 process가 같은 transaction 재개 | 단일 lock, 중복 rename/launch 없음 | 예 |
 | I-039 | 진단 error에 auth blob 포함 | persisted log에 민감값 0건 | 예 |
-| I-040 | credential backend 검사 | Spike는 private `0600` file store, 제품은 사용자 기본 file-based Keychain; backend 혼용 없음 | 예 |
+| I-040 | credential backend 검사 | CLI와 제품이 `0700`/`0600` `FileCredentialStore`를 공유하고 다른 backend fallback 없음 | 예 |
 | I-041 | current true refresh 도중 실패 | `rollbackStarted` durable→마지막 검증 source 복원·이메일 확인 | 예 |
 | I-042 | `currentSaved` 뒤 target validation 실패 | active source 유지 확인→registry previous→journal durable cleanup | 예 |
 | I-043 | `SIGTERM` 뒤 앱 소유 process 잔존 또는 identity 변경 | switch 차단, active auth unchanged | 예 |
@@ -225,10 +225,10 @@ Unit/Integration test는 실제 `~/.codex/auth.json`을 읽거나 쓰지 않는�
 | I-059 | `targetVerified` target mismatch와 불확실성 | typed `target-unverified`만 A rollback, process·registry race·verifier 종료 미확인은 STOP·unsafe write 0회 | 예 |
 | I-060 | phase/registry/marker 모순과 `rollbackFailed` | 모순은 상태 보존 STOP, terminal phase는 locator·workspace·auth·registry side effect 0회 | 예 |
 | I-061 | `refreshingCurrent` 복구 실패 | `rollbackStarted→rollbackFailed` 내구 기록, 다음 자동 복구는 terminal STOP | 예 |
-| I-062 | 번들 Keychain host smoke | exact ad-hoc bundled executable이 random service/profile의 synthetic blob을 create→read→update→read→delete→notFound; cleanup 성공, 제품 service·실제 auth 접근 0회 | 예 |
+| I-062 | legacy Keychain host smoke | 이전 backend의 exact ad-hoc bundled executable synthetic CRUD·cleanup; 현 제품 런타임은 Keychain 미사용 | 아니오 |
 | I-063 | 비활성 프로필 정상 삭제 | 삭제 marker→target credential 삭제→registry 삭제→marker 삭제, active credential·auth 불변 | 예 |
 | I-064 | 활성 프로필 삭제 요청 | typed 거부, credential·registry·active auth mutation 0회 | 예 |
-| I-065 | Keychain 삭제 거부·중단 뒤 재시작 | marker와 registry 보존, 다음 복구가 credential·registry 정리를 멱등 완료 | 예 |
+| I-065 | credential 삭제 실패·중단 뒤 재시작 | marker와 registry 보존, 다음 복구가 JSON credential·registry 정리를 멱등 완료 | 예 |
 | I-066 | 삭제 marker와 switch journal 공존 | 명시·자동 switch 복구 mutation 0회, 두 artifact 보존 STOP | 예 |
 | I-067 | 추가 등록 registry commit 직후 `targetValidated`/`targetVerified` 중단 | exact target auth·registry target·capture marker 확인 뒤 forward finalization, A/B 저장본 불변, 앱 launch 0회 | 예 |
 | I-068 | 추가 등록 `targetVerified` 뒤 journal unlink 실패 | generic abort가 source rollback하지 않고 target commit·evidence 보존, 재시작에서 finalization 완료 | 예 |
@@ -349,6 +349,7 @@ ID를 신뢰성 있게 관측할 수 없으면 실행하지 않고 INCONCLUSIVE/
 | P-006 | 분류 불가능한 `codex` process | 안전 차단 | 예 |
 | P-007 | Codex와 무관한 유사 이름 process | false positive 없이 진행 | 예 |
 | P-008 | PPID 1의 bundle 내부 `browser_crashpad_handler`만 잔존 | `Versions/Current`의 canonical bundle 내부 regular executable 및 정적 서명이 유효하고 실행 process의 exact path·name·signing identifier·Team ID가 모두 맞으면 진행, 아니면 STOP | 예 |
+| P-009 | Codex 업데이트가 이전 Crashpad executable을 제거했지만 PPID 1 process는 잔존 | 현재 설치 descriptor 정적 검증과 커널의 valid·signed·hardened runtime·Developer ID·비 ad-hoc·비 debugged·exact identity·Team ID가 모두 맞으면 진행, 하나라도 다르면 STOP | 예 |
 
 어떤 case에서도 `kill -9`, 독립 process, 분류 불명 process 자동 종료를 PASS 방법으로 사용하지 않는다.
 
@@ -432,8 +433,8 @@ current refresh crash window에서는 refresh 실행 여부를 phase만으로 �
 | A-007 | C 등록 | C inactive 저장, 기존 active/auth와 A/B 저장본 보존 |
 | A-008 | 네 번째 계정 등록 | 무변경 거부, 기존 A/B/C 불변 |
 | A-009 | 3계정 model fixture | profile array가 세 항목을 안전하게 round-trip |
-| A-010 | 비활성 B 삭제 취소 | B profile·Keychain item 유지, A active·현재 로그인 불변 |
-| A-011 | 비활성 B 삭제 승인 | B profile·Keychain item 제거, A active·현재 로그인·OpenAI 계정 불변 |
+| A-010 | 비활성 B 삭제 취소 | B profile·JSON credential 유지, A active·현재 로그인 불변 |
+| A-011 | 비활성 B 삭제 승인 | B profile·JSON credential 제거, A active·현재 로그인·OpenAI 계정 불변 |
 | A-012 | 삭제한 B 재등록 | 격리 로그인 후 같은 라벨·이메일 등록 성공, 새 profile ID, 기존 active 유지 |
 
 2026-08-02 실제 설치본에서 A-011 PASS를 확인했다. 비활성 B 삭제 뒤 B 카드가 사라졌고 A가 단일 active로 유지됐으며 현재 Codex 로그인과 recovery 오류가 바뀌지 않았다. A-010과 A-012는 미검증이다.
@@ -475,7 +476,7 @@ MVP는 최대 3개 계정을 노출하며 `personalAuth`, `workAuth` 같은 고�
 | S-008 | journal snapshot | 고정 7필드만 존재; build/email/secret 없음 |
 | S-009 | UI error | 실제 token·auth JSON 미노출 |
 | S-010 | screenshot evidence | 이메일/다른 task/sidebar 내용 마스킹 |
-| S-011 | credential storage | Spike private store는 `0700`/`0600`; 제품 inactive auth는 사용자 기본 file-based Keychain이고 persistent active 평문은 하나 |
+| S-011 | credential storage | 제품 private store는 `0700`/`0600`; 공용 `~/.codex`에는 선택된 active auth 하나만 materialize |
 | S-012 | working directory 표시 | UI에는 필요 범위만, persisted log에는 민감 경로 없음 |
 | S-013 | journal/registry atomic temp | same directory, mode `0600`, file·parent fsync 계약 준수 |
 | S-014 | isolated verifier cleanup | transient auth copy와 임시 홈 제거, private IPC 사용 0회 |
@@ -516,12 +517,12 @@ MVP는 최대 3개 계정을 노출하며 `personalAuth`, `workAuth` 같은 고�
 
 - 공식 앱 Black-box B-001~B-017 PASS
 - process gate와 독립 CLI P-001~P-008 PASS 또는 P-008의 명시적 안전 조건 충족
-- Integration I-001~I-062 PASS
+- 전체 필수 Integration case PASS
 - 동일 task B-010: A→B→A 3회 연속 실제 메시지 PASS
 - 모든 전환에서 이메일 검증 PASS
 - secret exposure 0건
 
-기존 A/B CLI 실증에서 남은 형식 항목은 B-010의 §16 증거다. 3계정·재로그인 MVP는 메뉴바 구현 뒤 B-015~B-017도 통과해야 한다. 개발 중 구조적 same-task 실패가 확인되면 아래 NO-GO를 즉시 적용한다. 현재 A/B 결과는 `04_spike_runbook.md` §18에 기록한다.
+기존 A/B CLI 실증에서 남은 형식 항목은 B-010의 §16 증거다. 2026-08-04 사용자 실검증에서 B-015·B-016은 통과했고 B-017 exact 재로그인은 남아 있다. 개발 중 구조적 same-task 실패가 확인되면 아래 NO-GO를 즉시 적용한다. 기존 A/B 결과는 `04_spike_runbook.md` §18에 기록한다.
 
 ### NO-GO — 제품 구현 중단
 
@@ -569,9 +570,27 @@ MVP는 최대 3개 계정을 노출하며 `personalAuth`, `workAuth` 같은 고�
 - 현재 Codex build의 update compatibility case PASS
 - A/B/C 최대 3계정 등록과 수동 switch UX PASS
 - 이미 활성 계정 클릭 시 no-op+창 활성화 PASS
-- `needsRelogin` 비활성 계정의 exact-ID 수동 재로그인 반영과 B 활성화 PASS
+- `needsRelogin` 비활성 계정의 exact-ID 수동 재로그인 반영·기존 active 유지와 이후 별도 B 전환 PASS
 - 앱 종료 확인 취소 시 mutation 0회
-- 제품 inactive profile auth가 Keychain에만 존재하고 persistent active auth file은 하나
+- 제품 저장 프로필 auth가 `0700`/`0600` private JSON store에 있고 공용 `~/.codex/auth.json`은 선택된 활성 인증 하나
 - 실제 인증정보가 저장소·로그·crash report에 0건
 - clean install과 재부팅 후 미완료 journal 복구 PASS
 - 동일 task 3회 왕복 black-box를 릴리스 build로 재통과
+
+## 19. 메뉴바 읽기 전용·시스템 기능 인수
+
+| ID | 시나리오 | PASS 기준 |
+|---|---|---|
+| MBU-001 | 계정별 한도 decode | `rateLimitsByLimitId["codex"]`만 표시, Spark 제외, 서버 기간을 `Nm`·`Nh`·`Nd`로 변환 |
+| MBU-002 | 초기·수동 조회 | 모든 저장 프로필을 순차 조회하고 활성·비활성 카드에 plan·남은 비율·초기화 시각 표시 |
+| MBU-003 | 자동 조회 주기 | 2분 tick에서 활성만 조회, 마지막 전체 조회 후 30분이면 모든 프로필 조회 |
+| MBU-004 | 조회와 mutation 경쟁 | 전환·등록·삭제·재로그인·수동 조회가 자동 조회를 취소하고 동일 Core lock 경계 적용 |
+| MBU-005 | 부분 실패 | 실패한 계정 때문에 인증·registry·active ID가 바뀌지 않고 자동 조회는 기존 정상 수치 유지 |
+| MBU-006 | 메뉴바 상태 | 활성 계정 최소 잔여율을 링·숫자로 표시하고 자동 조회 중 맥동·접근성 문구 제공 |
+| PWR-001 | `pmset` parse | `SleepDisabled 1`→ON, `0`→OFF, 누락·기타 값→unknown |
+| PWR-002 | 설정 변경 | 관리자 인증 뒤 고정 `disablesleep 0|1` 실행, 실제 상태 재조회가 요청과 일치해야 성공 |
+| PWR-003 | 실패 조정 | 변경 실패 뒤 실제 상태를 재조회하고 끝내 알 수 없으면 ON fail-safe와 오류 표시 |
+| PWR-004 | 상태 표시 | ON일 때만 커피 배지, 도움말에 시스템 지속성·발열·배터리 경고 |
+| PWR-005 | 재시작 지속성 | OFF 상태 앱 재시작 후 OFF, ON 상태 앱 재시작 후 ON과 실제 `pmset` 값 일치 |
+
+2026-08-04 사용자 실검증에서 B 삭제·재등록, B 전환·A 복귀, C 등록, A→B→C→A 전환과 PWR-005의 OFF/ON 재시작을 통과했다. B-010 형식 증거, 재부팅 recovery, 잔존 프로세스 2차 확인, 릴리스 build 재검증은 남아 있다.

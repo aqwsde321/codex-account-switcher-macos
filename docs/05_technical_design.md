@@ -1,7 +1,7 @@
 # 기술 설계
 
-- 상태: Swift CLI Spike 구현·실계정 기능 검증 완료, 메뉴바 재로그인·시작 자동 복구·잔존 프로세스 2차 확인·ad-hoc 소스 앱 설치·synthetic Keychain smoke 완료
-- 기준일: 2026-07-31
+- 상태: Swift CLI·메뉴바 전환/복구, private JSON credential, 계정별 한도, 잠자기 방지 구현 완료
+- 기준일: 2026-08-04
 - 구현 순서: 검증된 Core 재사용 → SwiftUI 메뉴바 앱 → 엄격한 릴리스 인수
 
 ## 1. 설계 목표
@@ -38,7 +38,7 @@ Swift CLI와 `MenuBarExtra` 소스 앱은 현재 환경에서 SwiftPM과 Command
 | bundle identifier | `local.codex.account-switcher` |
 | LaunchAgent label | `local.codex.account-switcher` |
 
-ad-hoc designated requirement는 현재 build의 cdhash에 묶인다. 코드 변경 뒤 기존 Keychain item 접근 확인 또는 거부가 발생할 수 있으므로 현재 경로는 update-safe signing identity를 보장하지 않는다.
+현재 제품 credential은 private JSON이므로 ad-hoc 재빌드의 Keychain ACL에 의존하지 않는다. 공개 바이너리 배포의 Developer ID 서명·공증은 별도 릴리스 게이트다.
 
 ### 공식 앱
 
@@ -106,8 +106,7 @@ flowchart TB
     SC --> AF["AtomicAuthFile"]
     SC --> JR["SwitchJournal"]
     SC --> DG["SafeDiagnostics"]
-    CR --> FS["SpikePrivateFileStore"]
-    CR --> KC["ProductionKeychainStore"]
+    CR --> FS["FileCredentialStore"]
 ```
 
 ### `CodexAppLocator`
@@ -150,6 +149,7 @@ path만 같다고 공식 앱으로 신뢰하지 않는다. bundle id와 서명 �
 - stdio JSONL framing
 - initialize handshake
 - `account/read` 요청
+- `account/rateLimits/read` 요청
 - 이메일·plan·auth type의 제한된 결과 반환
 - timeout과 자식 process 정리
 - 격리 `CODEX_HOME`의 갱신된 `auth.json` 회수
@@ -165,10 +165,7 @@ path만 같다고 공식 앱으로 신뢰하지 않는다. bundle id와 서명 �
 - secret-free metadata 저장
 - registry metadata는 destination과 같은 디렉터리의 `0600` temp에 전체 write하고 file `fsync`, POSIX `rename`, parent directory `fsync` 순서로 durable commit
 
-구현:
-
-- Spike: private file store
-- 제품: 사용자 기본 file-based macOS Keychain generic-password item. 일반 구성에서는 login Keychain이며 Data Protection Keychain을 사용하지 않는다.
+구현은 CLI와 제품 모두 `FileCredentialStore`를 사용한다. 저장 위치는 제품 metadata 아래 `credentials/<profile-UUID>.json`, directory `0700`, file `0600`이다. JSON은 토큰 원문이며 같은 macOS 사용자 권한 프로세스에 대한 비밀 격리를 제공하지 않는다.
 
 ### `AtomicAuthFile`
 
@@ -370,7 +367,7 @@ process argument나 environment는 읽거나 기록하지 않는다.
 
 분류 순서는 안전 판정의 일부다.
 
-1. `approvedNonAuthResident`: 별도 실증으로 auth 비관여가 입증됐고 exact signed bundle path와 executable name이 allow-list에 모두 일치하는 process. blocker 집합을 만들기 전에 먼저 분류한다.
+1. `approvedNonAuthResident`: 별도 실증으로 auth 비관여가 입증됐고 exact signed bundle path tuple 또는 아래 pathless Crashpad 조건을 만족하는 process. blocker 집합을 만들기 전에 먼저 분류한다.
 2. `appRoot`: `com.openai.codex`의 `NSRunningApplication` PID
 3. `appOwned`: root의 descendant 또는 공식 bundle 내부 executable path
 4. `bundledAppServer`: bundle 내부 `Resources/codex`이며 app root ancestry가 있음
@@ -378,7 +375,7 @@ process argument나 environment는 읽거나 기록하지 않는다.
 6. `independentCodex`: basename `codex`이면서 앱 ancestry/helper-owned가 아님
 7. `unclassifiedRelevant`: Codex bundle path 또는 알려진 관련 이름이지만 안전 분류 불가
 
-blocker 집합은 `approvedNonAuthResident`를 제외한 `appRoot`, `appOwned`, `bundledAppServer`, `independentCodex`, `unclassifiedRelevant`다. 앱 검사 시 `Versions/Current`를 canonicalize한 bundle 내부 regular executable의 정적 서명을 검증해 경로를 고정한다. 실행 중인 crashpad가 그 exact path·name·signing identifier·Team ID와 일치할 때만 `approvedNonAuthResident`다. version/build 번호는 판정에 쓰지 않는다.
+blocker 집합은 `approvedNonAuthResident`를 제외한 `appRoot`, `appOwned`, `bundledAppServer`, `independentCodex`, `unclassifiedRelevant`다. 앱 검사 시 `Versions/Current`를 canonicalize한 bundle 내부 regular executable의 정적 서명을 검증해 경로를 고정한다. 실행 중인 Crashpad는 그 exact path tuple이 일치하거나, updater가 executable을 제거해 `proc_pidpath`가 비어 있는 PPID 1 process가 커널 기준 `VALID`, `SIGNED`, hardened runtime, Developer ID, signing identifier, Team ID 검증을 모두 통과할 때만 `approvedNonAuthResident`다. version/build 번호는 판정에 쓰지 않는다.
 
 ### 종료 알고리즘
 
@@ -401,7 +398,7 @@ Spike에서 다음을 확인했다.
 - auth 파일 open/write 여부
 - 앱 재실행과 무관한 crash reporter인지
 
-현재 공식 bundle에서 canonicalize하고 정적 서명을 검증한 Crashpad의 exact path·executable name·signing identifier·Team ID 조합만 `approvedNonAuthResident` allow-list에 포함한다. 이 분류는 blocker 집합 계산 전에 적용하며 bundle 밖으로 나가는 symlink, 다른 crashpad 경로, 서명 불일치, 다른 reparent process에는 적용하지 않는다.
+기본 규칙은 현재 공식 bundle에서 canonicalize하고 정적 서명을 검증한 Crashpad의 exact path·executable name·signing identifier·Team ID 조합이다. Codex 업데이트 뒤 이전 Crashpad executable이 삭제되면 실행 PID는 남아도 `proc_pidpath`와 Security.framework guest 검증이 `ENOENT`를 반환할 수 있다. 이때만 커널 `csops`의 동적 상태가 `CS_VALID | CS_SIGNED | CS_RUNTIME`, 비 ad-hoc·비 debugged, Developer ID 범주이고 identity=`browser_crashpad_handler`, Team ID=`2DC432GLL2`, PPID=1인 process를 pathless resident로 허용한다. 하나라도 다르거나 현재 설치 descriptor의 기존 정적 검증이 실패하면 차단한다.
 
 ## 8. 전환 transaction
 
@@ -423,7 +420,7 @@ Spike에서 다음을 확인했다.
 | `verifyingTarget` | active auth 사본을 격리 홈에서 `account/read(refreshToken: false)`로 검증 | 대상 이메일 완전 일치 후 `targetVerified` |
 | `targetVerified` | `registry.activeProfileId`를 target으로 durable commit | registry parent `fsync` 완료 후 journal `unlink`, journal parent `fsync`, lock 해제 |
 
-표의 credential store는 backend 추상화다. CLI Spike는 repo 밖 `0700` directory의 `0600` private file store, 제품은 Keychain을 사용하되 같은 phase 순서와 durable-save 완료 조건을 적용한다.
+표의 credential store는 CLI와 제품이 공유하는 repo 밖 `0700` directory의 `0600` private JSON store다. 같은 phase 순서와 durable-save 완료 조건을 적용한다.
 
 대상 사전 검증은 active `auth.json`을 변경하지 않는다. `false` identity 확인, `true` refresh, 동일 이메일 재확인, refreshed blob의 durable credential-store 저장이 모두 성공해야 `targetValidated`가 된다. 중간 실패 시 active source는 그대로 두고 대상 profile과 기존 credential을 보존한다. 명시적인 인증 만료·폐기·refresh 거부·identity 불일치는 `needsRelogin`으로 분류한다. network/timeout/DNS 실패나 credential-store write 실패는 token 폐기 또는 계정 revocation으로 단정하지 않으며 `needsRelogin`을 바꾸지 않는다.
 
@@ -462,7 +459,7 @@ Spike에서 다음을 확인했다.
 - 독립·새·분류 불명 프로세스는 signal 없이 차단
 - 현재 활성 auth를 격리 probe로 검증·refresh
 - 이메일 존재와 ChatGPT type 확인
-- Spike store/Keychain 저장
+- private JSON credential 저장
 - registry 생성, active 지정, 공식 앱 재실행
 
 ### 추가 프로필
@@ -553,15 +550,34 @@ ADR-027의 개발 승인에 따라 다음 최소 기능만 추가한다.
 
 전환 진행 표시는 `SwitchCoordinator`가 각 journal create/update의 내구 성공 직후 내보내는 `SwitchPhase` callback만 사용한다. UI는 이를 현재 단계 문구로 매핑하며 퍼센트·예상 시간·실행 중 취소를 추정하지 않는다. 이미 활성인 프로필의 무변경 경로는 journal phase를 만들지 않으므로 진행 callback도 내보내지 않는다.
 
-재로그인은 추가 등록과 같은 격리 로그인 helper를 사용한다. exact inactive profile ID와 active source를 확인하고, 별도 `CODEX_HOME`의 브라우저 로그인에서 대상 이메일을 false→true→false로 검증한 뒤 대상 Keychain item과 marker만 교체한다. 공용 auth, active ID, source credential, 공식 앱 process는 전후 exact 상태를 유지한다.
+재로그인은 추가 등록과 같은 격리 로그인 helper를 사용한다. exact inactive profile ID와 active source를 확인하고, 별도 `CODEX_HOME`의 브라우저 로그인에서 대상 이메일을 false→true→false로 검증한 뒤 대상 JSON credential과 marker만 교체한다. 공용 auth, active ID, source credential, 공식 앱 process는 전후 exact 상태를 유지한다.
 
 메뉴바는 재로그인 확인을 일반 전환 pending과 분리하고 `presenting` snapshot의 opaque ID를 Core에 한 번만 전달한다. 호출 직전과 반환·throw 뒤 profile/recovery를 다시 읽는다. `recovery=none`, 기존 source 단일 active, 대상 `needsRelogin=false`일 때만 성공이다. wrong-ID outcome, pending·blocked, 반환 뒤 상태 불일치는 STOP이다.
 
 잔존 프로세스 2차 확인은 기존 Core confirmation 경계를 async로 연결한다. 취소가 기본 동작이며, 승인해도 정상 종료 요청 전에 캡처한 PID·시작 시각·실행 경로가 signal 직전까지 모두 같은 앱 소유 대상에만 `SIGTERM`을 한 번 보낸다. 새 process, identity가 바뀐 process, 독립 CLI, 분류 불명 process는 확인 후보로 넓히지 않고 STOP한다.
 
+### 계정 한도 조회
+
+`LocalCLIDataProvider.profileUsage`는 transaction lock과 recovery gate 아래 저장 프로필을 순차 조회한다. 각 프로필은 private 검증 workspace의 임시 인증으로 `account/read` identity 확인 뒤 `account/rateLimits/read`를 호출한다. 공용 `auth.json`, registry, 저장 credential은 변경하지 않는다.
+
+- 앱 시작·수동 새로고침: 모든 프로필
+- 자동 조회 tick: 2분
+- 마지막 전체 조회 후 30분 미만: 활성 프로필만
+- 마지막 전체 조회 후 30분 이상: 모든 프로필
+- 계정 mutation 시작: 진행 중 자동 조회 취소 후 기존 Core lock 적용
+- 표시: `rateLimitsByLimitId["codex"]`, 서버 기간 `Nm`·`Nh`·`Nd`, 각 카드 plan·남은 비율·초기화 시각
+- 메뉴바: 활성 프로필 창 중 최소 잔여율, 링·숫자, 자동 조회 중 맥동
+
+자동 조회 실패는 마지막 정상 수치를 유지한다. 수동/초기 전체 조회 실패는 해당 프로필 실패 상태로 표시하며 어떤 조회 실패도 계정 전환 결과나 인증 상태를 바꾸지 않는다.
+
+### 잠자기 방지
+
+`SleepPreventionSystem`은 `/usr/bin/pmset -g` 출력을 읽고 `SleepDisabled 0|1`만 허용한다. 변경은 `NSAppleScript`의 관리자 인증으로 고정 명령 `/usr/bin/pmset -a disablesleep 0|1`을 실행하며, 반환 뒤 다시 읽은 실제 값이 요청과 같아야 성공한다.
+
+초기 읽기 실패는 `SleepPreventionViewModel`이 켜짐 fail-safe와 오류를 표시한다. 변경·사후 검증 실패 뒤에는 실제 상태를 다시 조회하고, 끝내 알 수 없으면 켜짐으로 표시한다. 켜짐은 메뉴바 커피 배지로 표시한다. 설정은 앱 수명과 무관한 시스템 전체 상태이므로 UI에 발열·배터리·지속성 경고를 둔다.
+
 후속 범위:
 
-- `account/rateLimits/read` 기반 5시간·주간 사용량
 - 4개 이상 계정 UI
 - Developer ID 서명·공증·업데이트
 
@@ -621,7 +637,7 @@ Core protocol로 다음 실패를 결정적으로 주입할 수 있어야 한다
 - 이전 이메일 검증 실패
 - journal write/delete 실패
 - lock 경쟁
-- crashpad allow-list 선분류와 기본 blocker 동작
+- crashpad exact-path·pathless kernel-signature 선분류와 기본 blocker 동작
 
 실제 프로세스·App Server test는 임시 `CODEX_HOME`과 가짜 auth fixture만 사용한다. 실제 두 계정 테스트는 별도 black-box Runbook에서만 수행한다.
 
@@ -654,7 +670,7 @@ Core protocol로 다음 실패를 결정적으로 주입할 수 있어야 한다
 - `SIGKILL`
 - 독립 CLI 자동 kill
 - repo 내부 실제 auth 저장
-- Keychain 실패 시 plaintext fallback
+- credential store 실패 시 다른 저장소 fallback
 - 동일 task 실패 시 새 task 자동 복제
 - 명시적 개발 승인 전 메뉴바 UI 구현
 

@@ -1,9 +1,9 @@
 # 구현 인수인계
 
-- 상태: CLI Spike 검증 완료, 메뉴바 등록·전환·복구·재로그인·비활성 계정 삭제 구현과 최신 앱 설치 완료
-- 기준일: 2026-08-02
+- 상태: CLI·메뉴바 전환/복구, private JSON credential, 계정 한도, 잠자기 방지 구현·최신 앱 설치 완료
+- 기준일: 2026-08-04
 - 코드: 저장소 루트 `.`
-- 중요: 외부 Terminal에서 A↔B 기능 왕복 3회, 수동 A 복구 2회, B-011 자동 롤백을 완료했다. B-010 형식 증거는 보존하지 않았으며 ADR-027에 따라 개발에는 수용하고 MVP 완료·배포 전 게이트로 유지한다.
+- 중요: 외부 Terminal에서 A↔B 기능 왕복 3회, B 삭제·재등록, A→B→C→A 전환, 수동 A 복구 2회, B-011 자동 롤백을 완료했다. B-010 형식 증거는 보존하지 않았으며 배포 전 게이트로 유지한다.
 
 ## 0. 2026-08-02 복구 완료 상태
 
@@ -18,7 +18,7 @@
 
 `./Scripts/dev.sh test`는 140개를 통과했다. 수정 앱 설치 뒤 A→B→A 왕복을 완료했고, 각 단계에서 native 전환 확인창·앱 재실행·registry active·journal 부재를 확인했다. 현재 registry는 A active이며 사용자는 공식 Codex의 A 로그인을 확인했다. 다음 task는 [10_incident_2026-08-02_switch_rollback_race.md](10_incident_2026-08-02_switch_rollback_race.md)를 먼저 읽고 작업을 이어간다.
 
-비활성 삭제 구현 뒤 최신 설치본에서 A-011을 실제 확인했다. B 로컬 저장본 삭제 성공 문구와 B 카드 제거, A 단일 active, 현재 Codex A 로그인 유지, recovery 오류 부재를 확인했다. 삭제 취소 A-010과 같은 계정 재등록 A-012는 아직 확인하지 않았다.
+비활성 삭제 구현 뒤 최신 설치본에서 A-011을 실제 확인했다. B 로컬 저장본 삭제 성공 문구와 B 카드 제거, A 단일 active, 현재 Codex A 로그인 유지, recovery 오류 부재를 확인했다. 같은 계정 재등록 A-012와 이후 B 전환·A 복귀도 통과했으며 삭제 취소 A-010은 아직 확인하지 않았다.
 
 ## 1. 새 task에서 시작하는 방법
 
@@ -36,7 +36,7 @@
 
 ```text
 `docs/00_README.md`부터 문서 세트를 읽고,
-ADR-027·ADR-029·ADR-030과 기존 안전 결정을 유지한 채 Step 9 메뉴바 MVP의 B-015~B-017 실계정·재부팅 복구와 잔존 프로세스 2차 확인 Black-box 검증을 진행해줘.
+ADR-027·ADR-034·ADR-035·ADR-036과 기존 안전 결정을 유지한 채 Step 9의 B-017·재부팅 복구·잔존 프로세스 2차 확인·릴리스 build Black-box 검증을 진행해줘.
 검증된 CodexAccountCore를 재사용하고 먼저 배포 검증 성공 기준을 대조해.
 실제 auth.json 교체와 Codex 앱 종료는 외부 Terminal 실행 게이트 전까지 하지 마.
 ```
@@ -60,21 +60,23 @@ ADR-027·ADR-029·ADR-030과 기존 안전 결정을 유지한 채 Step 9 메뉴
 - 추가 계정 격리 로그인·inactive 저장, 중복 계정 차단, 기존 active·공용 auth 보존, 최대 3개 허용·네 번째 무변경 거부 구현
 - 저장 프로필 일반 switch의 정상 종료·격리 검증·원자 교체·재실행·검증·rollback adapter 구현
 - `CodexAccountMenuBar` target, fake 3계정 카드와 active/inactive 선택 모델 구현
-- credential backend 경계, CLI private file store 명시 연결, Keychain generic-password CRUD와 plaintext fallback 금지 구현
-- 메뉴바 앱의 fake provider 제거, 실제 `LocalCLIDataProvider`·Keychain 주입, Spike와 분리된 제품 metadata 경로 연결
+- CLI와 메뉴바의 공통 `FileCredentialStore` 구현·분리된 metadata root, `0700` directory·`0600` private JSON, 기존 Keychain 자동 이전 금지 구현
+- 메뉴바 앱의 fake provider 제거, 실제 `LocalCLIDataProvider`·제품 metadata·credential 경로 연결
 - 메뉴바 현재 로그인 등록, 추가 등록 상태 재조회, startup/실패 recovery gate 구현
-- 메뉴바 현재 활성 인증의 명시적 수동 동기화와 성공·복구 차단 상태 구현
+- Core/CLI와 ViewModel의 활성 인증 수동 동기화 경계 구현; 현재 메뉴바 버튼은 제거됨
 - 메뉴바 recovery pending phase·journal previous profile·blocked STOP 표시 구현
 - 수동 복구 완전 성공·앱 실행 미확인·journal 완료 불확실 typed outcome과 phase/expected-active finalization evidence 공통 재개 gate 구현
 - 메뉴바 exact transaction/previous-profile 수동 복구, 명시 확인, typed outcome별 성공·launch 미확인·STOP 처리 구현
 - durable journal 성공 직후 `SwitchPhase` callback과 메뉴바 실시간 전환 진행 문구 구현
-- inactive `needsRelogin` exact-ID 확인, B credential 갱신·marker 해제·B 활성화, 불확실 결과 재조정, 앱 수동 실행 안내 구현
+- inactive `needsRelogin` exact-ID 확인, B credential 갱신·marker 해제·기존 active 유지, B 재선택 시 별도 전환 구현
 - 메뉴바 상태 조회 전 production startup recovery, STOP/terminal guard, 앱 자동 실행 금지 구현
 - 메뉴바 native 비동기 잔존 앱 프로세스 2차 확인, 취소 기본, 종료 전 exact snapshot 대상의 `SIGTERM` 1회 제한 구현
 - inactive-only 로컬 계정 삭제, exact snapshot 재검증, 내구 삭제 marker와 시작 자동 복구, native destructive 확인 UI 구현
 - Command Line Tools 기반 release `.app` build, strict ad-hoc 서명, 고정 bundle ID와 LaunchAgent install/update/uninstall 구현
-- 번들·설치 실행파일의 random synthetic Keychain create/read/update/read/delete/notFound와 cleanup 통과; 제품 service·실제 auth 접근 0회
-- fake credential만 사용하는 164개 debug 테스트와 release 앱 서명 검증 통과
+- B 삭제·재등록 뒤 B 전환·A 복귀, C 등록 뒤 A→B→C→A 실계정 전환 통과
+- 계정별 동적 Codex 한도, 활성 2분·전체 30분 자동 조회, 메뉴바 최소 잔여율 링·숫자·자동 조회 맥동 구현
+- 실제 `pmset` 상태 기반 잠자기 방지 토글, 관리자 인증, 변경 뒤 재검증, 커피 배지, OFF/ON 앱 재시작 유지 통과
+- fake credential만 사용하는 174개 debug 테스트와 release 앱 서명 검증 통과
 - 실제 read-only inspect에서 사용자 auth와 helper store 무변경 확인
 - `rollbackFailed` 수동 복구 CLI와 실환경 A 복구 2회 완료
 - debug 전용 B-011 실패 주입에서 source 자동 롤백과 최종 A 복귀 확인
@@ -83,12 +85,13 @@ ADR-027·ADR-029·ADR-030과 기존 안전 결정을 유지한 채 Step 9 메뉴
 
 - 실제 재부팅 뒤 production startup recovery Black-box 검증
 - 실제 잔존 앱 프로세스 2차 확인 Black-box 검증
-- 실계정 제품 service Keychain flow, ad-hoc 재빌드 뒤 기존 item ACL, 잠금·접근 거부 정책 검증
-- B-015~B-017 세 프로필 전환·재로그인 실계정 Black-box 검증
-- 비활성 계정 삭제 취소·승인과 같은 라벨·이메일 재등록 실계정 Black-box 검증
+- B-017 `needsRelogin` exact-ID 재로그인 실계정 Black-box 검증
+- 비활성 계정 삭제 취소 실계정 Black-box 검증
 - MVP 완료·배포 전 `07_test_acceptance.md` §16 형식의 동일 task 왕복 증거 보존
 
 version/build 번호는 호환성 hard gate가 아니다. 앱 검사 시 `Versions/Current` Crashpad를 canonicalize해 bundle 내부 regular executable과 정적 OpenAI 서명을 확인하고, 실행 process의 exact path·서명도 다시 확인한다. 현재 설치된 `26.727.51351`/`6119`는 이 검사, read-only process 검증, 빈 임시 홈의 App Server `initialize`·`account/read(false)`, 첫 계정 등록을 통과했다. 실제 A→B 시도에서 rollback 경합을 재현했고, 수정 앱으로 A 복구 후 수정된 native 전환 확인창을 통해 A→B→A 왕복을 완료했다.
+
+2026-08-05에는 업데이트 캐시의 이전 Crashpad executable이 삭제된 채 process 두 개가 남아 `proc_pidpath`와 Security.framework 검증이 `ENOENT`가 되는 전환 차단을 재현했다. 커널에 보존된 valid Developer ID identity·Team ID를 검증하는 pathless 예외와 회귀 테스트를 추가했고, 설치본 `26.730.61639`/`6234` 대상 read-only 검사에서 `process.unclassified_relevant=2`가 `0`이 됐다. 이 수정 앱의 실제 계정 왕복은 아직 확인 필요다.
 
 재개 명령과 구현 범위는 루트 `README.md`를 먼저 읽는다.
 
@@ -124,12 +127,13 @@ version/build 번호는 호환성 hard gate가 아니다. 앱 검사 시 `Versio
 - 독립 CLI는 자동 종료하지 않고 전환 차단
 - 대상 실패 시 이전 계정 자동 롤백
 - 롤백 검증 실패 시 공식 앱 미실행
-- Spike credential은 private `0600` 파일
-- 제품의 비활성·저장 프로필 credential은 macOS Keychain이며, 제품 평문 예외는 활성 `~/.codex/auth.json` 하나뿐
+- CLI와 제품 credential은 repo 밖 `0700` directory의 `0600` private JSON
+- 공용 `~/.codex`에는 선택된 활성 인증 하나만 `auth.json`으로 materialize
 - UI보다 Swift CLI Spike 우선
 - 새 소형 Swift 앱; Mobius는 참고만
-- MVP UI는 활성 이메일·수동 전환만
-- 사용량은 후속
+- 메뉴바는 계정별 동적 Codex 한도와 활성 계정 최소 잔여율을 표시
+- 한도 자동 조회는 활성 2분·전체 30분이며 계정 mutation과 분리
+- 잠자기 방지는 실제 `pmset` 상태를 권위로 하고 변경 뒤 재검증
 - 올바른 인증 전환 뒤 account/task ownership 구조 때문에 동일 task를 B에서 재개하지 못하면 제품 중단; Helper 결함은 수정 후 전체 재검증
 - A→B→A 실제 메시지 왕복 3회 연속 성공 필요
 
@@ -347,13 +351,13 @@ cd codex-account-switcher-spike
 
 ADR-027의 개발 승인에 따라 시작한다. B-010 정식 증거 공백은 릴리스 게이트로 남긴다.
 
-현재 1~6과 실제 provider 주입·등록·활성 인증 동기화·durable phase 진행 표시·inactive target 재로그인·inactive-only 로컬 삭제, recovery mutation gate·시작 자동 복구·상세 표시·exact transaction/previous-profile 수동 복구, ad-hoc 소스 앱 설치와 synthetic Keychain host smoke까지 완료됐다. 삭제·재등록을 포함한 실계정 제품 flow, 재부팅, 잔존 프로세스 2차 확인, ad-hoc 재빌드 ACL Black-box 검증이 다음 작업이다.
+현재 1~6과 실제 provider 주입·등록·전환·복구·재로그인·inactive-only 삭제, private JSON 전환, 계정 한도, 잠자기 방지까지 완료됐다. B 삭제·재등록과 A→B→C→A 실계정 flow도 통과했다. B-017 exact 재로그인, 재부팅 recovery, 잔존 프로세스 2차 확인, 릴리스 build Black-box 검증이 다음 작업이다.
 
 구현 순서:
 
 1. `CodexAccountMenuBar` executable target과 `MenuBarExtra` shell을 추가한다.
 2. fake provider로 세 프로필 카드와 활성 표시를 검증한다. 이미 활성인 카드는 auth write/restart 없이, 앱 실행 중이면 activate 1회, 닫혀 있으면 verify 후 launch한다.
-3. Core의 credential backend 경계를 연결해 CLI는 기존 private file store, 제품은 Keychain을 사용하게 한다. plaintext fallback은 금지한다.
+3. Core의 `FileCredentialStore`를 CLI와 제품이 공유하고 `0700`/`0600` private JSON 외 fallback은 두지 않는다.
 4. view model은 문자열 CLI 출력이 아닌 typed Core API를 호출하고 quit 확인·단계·안전한 오류를 연결한다. UI에 전환 로직을 복제하지 않는다.
 5. 완료: 상태 조회 전 journal 자동 복구와 `needsRelogin` 표시를 연결한다.
 6. 완료: 잔존 앱 프로세스 native 비동기 2차 확인 UI를 연결한다.
@@ -365,33 +369,33 @@ ADR-027의 개발 승인에 따라 시작한다. B-010 정식 증거 공백은 �
 - 실행 중인 활성 카드 선택은 auth write/restart 0회, activate 1회다.
 - 닫힌 상태의 활성 카드 선택은 auth write 0회, verify 후 launch 1회다.
 - 비활성 카드 선택은 확인 전 mutation 0회다.
-- 테스트에서 실제 `~/.codex/auth.json`, Keychain, 공식 앱을 건드리지 않는다.
+- 테스트에서 실제 `~/.codex/auth.json`, 제품 credential store, 공식 앱을 건드리지 않는다.
 
 credential backend slice의 완료 기준:
 
-- CLI는 `FileCredentialStore`를 명시적으로 사용하고 기존 `0700`/`0600` 저장 계약을 유지한다.
-- 제품 backend는 profile UUID를 account key로 쓰는 Keychain generic-password item만 사용한다.
-- 제품 item은 사용자 기본 file-based Keychain을 사용한다. 일반 구성에서는 login Keychain이며 Data Protection Keychain과 명시적 accessibility option을 사용하지 않는다.
-- Keychain 접근 실패는 안전한 typed error로 중단되며 plaintext fallback이 없다.
+- CLI와 제품은 `FileCredentialStore`를 사용하고 `0700` directory·`0600` file 계약을 유지한다.
+- 제품 credential은 `~/Library/Application Support/CodexAccountSwitcher/credentials/<profile-UUID>.json`에 둔다.
+- JSON은 토큰 원문이므로 같은 macOS 사용자 권한 프로세스에 대한 비밀 격리를 제공하지 않는다.
+- 파일 접근·권한·round-trip 실패는 안전한 typed error로 중단되며 다른 저장소 fallback이 없다.
 - credential load 실패 시 active auth, registry, capture marker가 바뀌지 않는다.
-- 현재 ad-hoc bundle과 설치 실행파일은 random synthetic item CRUD·cleanup을 검증했다. 제품 service·실제 auth와 update-safe signing identity는 아직 검증하지 않았다.
+- 이전 `CodexAccountSwitcher.credentials.v1` Keychain item은 자동 이전·삭제하지 않는다.
 
 source app packaging slice의 완료 기준:
 
 - `Scripts/build-app.sh`가 release executable을 `.build/CodexAccountSwitcher.app`으로 묶고 plist lint와 strict ad-hoc codesign을 통과한다.
 - `Scripts/install-app.sh`는 소유권이 확인된 `~/Applications/CodexAccountSwitcher.app`과 `~/Library/LaunchAgents/local.codex.account-switcher.plist`만 교체하고 exact process 실행을 확인한다.
-- `Scripts/uninstall-app.sh`는 앱과 LaunchAgent만 제거하며 Application Support, Keychain, logs를 보존한다.
-- ad-hoc 재빌드는 cdhash가 바뀔 수 있으므로 기존 Keychain item 접근을 update-safe로 과장하지 않는다.
+- `Scripts/uninstall-app.sh`는 앱과 LaunchAgent만 제거하며 Application Support, legacy Keychain item, logs를 보존한다.
+- ad-hoc 재빌드는 private JSON 접근에 Keychain ACL을 요구하지 않는다.
 
 provider wiring slice의 완료 기준:
 
 - 메뉴바 executable에서 preview provider를 제거하고 `LocalCLIDataProvider`를 직접 주입한다.
-- 제품 metadata는 `~/Library/Application Support/CodexAccountSwitcher`, Keychain service는 `CodexAccountSwitcher.credentials.v1`을 사용한다.
-- Spike private store의 registry·평문 credential을 자동 migration하거나 읽지 않는다.
-- Keychain 구성 실패는 file fallback 없이 계정 로드 실패로 닫힌다.
+- 제품 metadata와 private JSON credential은 `~/Library/Application Support/CodexAccountSwitcher` 아래에 둔다.
+- 이전 Keychain item은 자동 migration하거나 읽지 않는다.
+- private JSON store 구성 실패는 계정 로드 실패로 닫힌다.
 - 잔존 앱 프로세스의 `SIGTERM`은 native 2차 확인 승인 전까지 보내지 않는다.
 - 새 제품 store는 처음에 빈 목록이며 명시적 등록 UI로만 채운다.
-- 테스트는 실제 홈·Keychain·공식 앱을 건드리지 않으며 executable build로 wiring을 검증한다.
+- 테스트는 실제 홈·제품 credential store·공식 앱을 건드리지 않으며 executable build로 wiring을 검증한다.
 
 menu bar residual process confirmation slice의 완료 기준:
 
@@ -413,26 +417,26 @@ registration slice의 완료 기준:
 - 새 credential 저장 전에 같은 UUID의 inactive·`needsRelogin` metadata를 내구 기록한다. 중단 상태는 재로그인·삭제 가능하다.
 - 시작 시와 mutation 실패 뒤 자동 복구→profile 조회→read-only recovery status 조회 순서를 지킨다. pending/blocked면 등록·전환을 중단하고 STOP 오류를 표시한다.
 - Core가 성공 결과를 반환한 뒤 profile reload만 실패한 경우에만 목록 재조회로 완료를 조정한다. Core 자체가 throw한 추가 등록은 durable 상태가 완성돼 보여도 성공으로 추정하지 않는다.
-- 테스트는 fake provider만 사용하며 실제 홈·Keychain·공식 앱을 건드리지 않는다.
+- 테스트는 fake provider만 사용하며 실제 홈·제품 credential store·공식 앱을 건드리지 않는다.
 
 inactive profile removal slice의 완료 기준:
 
 - 활성 카드에는 삭제 UI를 노출하지 않고 Core도 활성 profile ID를 거부한다.
 - 비활성 카드의 휴지통은 메뉴 팝오버와 독립된 native modal을 열며 취소가 첫/default 동작, 삭제가 destructive action이다.
-- 확인문은 로컬 registry와 해당 Keychain item만 삭제하고 OpenAI 계정·현재 Codex 로그인은 바뀌지 않음을 알린다.
+- 확인문은 로컬 registry와 해당 JSON credential만 삭제하고 OpenAI 계정·현재 Codex 로그인은 바뀌지 않음을 알린다.
 - ViewModel은 exact snapshot을 보존하고 호출 직전 profile·recovery를 재조회한다. 취소·활성·stale·recovery 상태는 Core 호출 0회다.
-- Core는 transaction lock 아래 secret-free 삭제 marker를 먼저 내구 기록하고 Keychain item→registry profile→marker 순서로 멱등 삭제한다. active auth는 쓰지 않는다.
-- Keychain 거부·중단은 marker와 registry를 보존하고 시작 자동 복구가 재개한다. switch journal과 공존하면 둘 다 보존하고 STOP한다.
-- 삭제 뒤 같은 라벨·이메일로 재등록할 수 있고 새 profile ID가 발급된다. 이 실제 Keychain 삭제·재등록 흐름은 Black-box 검증 전까지 미확인이다.
+- Core는 transaction lock 아래 secret-free 삭제 marker를 먼저 내구 기록하고 JSON credential→registry profile→marker 순서로 멱등 삭제한다. active auth는 쓰지 않는다.
+- 파일 삭제 실패·중단은 marker와 registry를 보존하고 시작 자동 복구가 재개한다. switch journal과 공존하면 둘 다 보존하고 STOP한다.
+- 삭제 뒤 같은 라벨·이메일로 재등록할 수 있고 새 profile ID가 발급된다. B 삭제·재등록 실계정 flow는 2026-08-04 통과했다.
 
-active credential sync slice의 완료 기준:
+active credential sync slice의 완료 기준(현재 메뉴바 버튼은 제거되고 Core/CLI 경계만 유지):
 
 - active 프로필과 recovery none 상태에서만 명시적 확인 뒤 Core `syncActiveProfile()`을 호출한다.
 - 공식 앱과 독립 Codex 프로세스를 사용자가 먼저 종료해야 하며 자동 종료·앱 재실행은 하지 않는다.
-- 현재 `auth.json` 이메일이 active 프로필과 완전 일치할 때만 해당 Keychain 저장본을 교체한다.
+- 현재 `auth.json` 이메일이 active 프로필과 완전 일치할 때만 해당 JSON 저장본을 교체한다.
 - 성공을 token refresh나 재로그인 완료로 표시하지 않고 현재 인증 저장 완료로만 알린다.
 - 성공·실패 뒤 profile과 recovery를 다시 읽으며 pending/blocked면 sync·등록·전환을 모두 중단한다.
-- 테스트는 fake provider로 명시 호출·성공 재조회·recovery 차단만 검증하고 실제 Keychain 동기화는 배포 검증에 남긴다.
+- 테스트는 fake provider로 명시 호출·성공 재조회·recovery 차단을 검증한다.
 
 read-only recovery status slice의 완료 기준:
 
@@ -468,7 +472,7 @@ menu bar manual recovery slice의 완료 기준:
 - 성공 뒤 profile/recovery를 다시 읽어 previous 하나만 active이고 recovery none인지 확인한다.
 - launch 미확인은 복구 완료를 유지하고 restore 재시도를 금지하며 앱만 직접 열도록 안내한다.
 - journal finalization 불확실은 재조회가 none일 때만 복구 재확인으로 표시한다. blocked/pending이면 모든 mutation과 앱 실행을 금지한다.
-- 테스트는 fake provider만 사용하고 실제 auth, Keychain, 공식 앱을 건드리지 않는다.
+- 테스트는 fake provider만 사용하고 실제 auth, 제품 credential store, 공식 앱을 건드리지 않는다.
 
 menu bar switch progress slice의 완료 기준:
 
@@ -485,7 +489,21 @@ menu bar relogin slice의 완료 기준:
 - A active·공용 auth·A credential을 유지한 registry에서 대상 marker만 해제하고 앱 종료·실행을 호출하지 않는다.
 - UI는 호출 직전과 outcome/throw 뒤 profile·recovery를 재조회한다. recovery none·기존 source 단일 active·대상 marker 해제일 때만 성공이며 wrong-ID outcome과 상태 불일치는 blocked다.
 - 취소·identity mismatch·저장 실패는 수동 재시도를 허용하지만 pending·blocked·상태 불명확에서는 자동 재시도하지 않는다.
-- fake provider와 임시 file/credential fixture만 사용하며 실제 Keychain·공식 앱 재로그인은 릴리스 검증에 남긴다.
+- fake provider와 임시 file/credential fixture만 사용하며 실제 공식 앱 재로그인은 릴리스 검증에 남긴다.
+
+usage status slice의 완료 기준:
+
+- `account/read` identity 확인 뒤 `account/rateLimits/read`의 `codex` 한도만 순차 조회하고 공용 auth·registry·credential을 바꾸지 않는다.
+- 앱 시작·수동 새로고침은 전체, 자동 조회는 활성 2분·전체 30분이며 계정 mutation 시작 시 자동 조회를 취소한다.
+- 활성·비활성 카드에 서버 기간·plan·남은 비율·초기화 시각을 표시하고 메뉴바에는 활성 계정 최소 잔여율 링·숫자를 표시한다.
+- 자동 조회는 메뉴바 링 맥동과 접근성 문구로 구분하며 일시적 실패는 마지막 정상 수치를 유지한다.
+
+sleep prevention slice의 완료 기준:
+
+- `/usr/bin/pmset -g`의 `SleepDisabled 0|1`만 실제 상태로 인정한다.
+- 관리자 인증 뒤 고정 `disablesleep 0|1`만 실행하고 실제 상태 재조회가 요청값과 일치해야 성공한다.
+- 상태를 알 수 없으면 ON fail-safe와 오류를 표시하고, ON일 때만 커피 배지를 표시한다.
+- 시스템 전체 지속성·발열·배터리 경고를 제공하며 OFF/ON 각각 앱 재시작 뒤 실제 상태 일치를 확인한다.
 
 ## 8. 실제 switch를 이 task 안에서 실행하면 안 되는 이유
 

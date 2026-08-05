@@ -1,199 +1,111 @@
-# Codex Account Switcher Spike
+# Codex Account Switcher
 
-개인·회사 ChatGPT 로그인의 Codex 인증 전환 가능성을 검증하기 위한 macOS Swift CLI Core와 메뉴바 앱이다.
+개인·회사 Codex 계정을 macOS 메뉴바에서 안전하게 전환하고, 계정별 사용 한도까지 한눈에 보는 앱이다.
 
-> 비공식 개인 Spike다. OpenAI의 공식 제품이나 지원 도구가 아니다.
+> OpenAI 공식 제품이 아닌 개인 프로젝트다. 현재는 소스 빌드로 사용하는 검증 단계다.
 
-현재 CLI Spike와 실환경 기능 검증은 완료됐고 ADR-027에 따라 `MenuBarExtra` MVP 개발이 승인됐다. B-010 정식 증거는 MVP 완료·배포 전 인수 게이트로 남아 있다.
+<p align="center">
+  <img src="docs/assets/account-switcher-overview.png" width="380" alt="가상 계정 세 개와 사용 한도, 잠자기 방지 토글을 보여주는 Codex Account Switcher 화면">
+</p>
 
-## 현재 범위
+<p align="center"><sub>실제 UI 기반 데모이며 계정 정보는 모두 가상 데이터다.</sub></p>
 
-구현됨:
+## 주요 기능
 
-- opaque `auth.json` 검증과 redacted secret 타입
-- 최대 3개 프로필 registry와 exact 7-field recovery journal
-- `0600` 파일, `0700` store, `flock`, `fsync` + same-directory atomic rename
-- 공식 Codex App Server JSONL handshake와 `account/read`
-- 공식 앱 signature/Team ID 검사, 정상 종료·실행 adapter
-- libproc 기반 process 분류
-- switch/rollback/recovery 상태 머신
-- 진단 CLI: `inspect`, `profiles list`, `recovery status`
-- 첫 활성 계정 A capture: TTY 확인, process gate, refresh 전 private backup, 이메일 검증, rollback
-- 추가 계정 B/C 격리 로그인·비활성 저장, 중복·네 번째 계정 차단, 기존 활성 계정 보존
-- 수동 재로그인 뒤 현재 활성 인증을 같은 이메일의 저장 프로필에 동기화
-- 저장 프로필 `switch --target`, 정상 종료, 격리 검증·refresh, 원자 교체, 재실행·검증, 실패 rollback
-- debug build의 post-launch 검증 실패 주입과 source 자동 롤백 실검증
-- `rollbackFailed` journal의 이전 프로필을 명시적으로 복구하는 `recovery restore`
-- 수동 복구의 완전 성공·앱 실행 미확인·journal 완료 불확실 typed outcome과 phase/expected-active finalization evidence gate
-- fake 3계정 카드와 확인 흐름을 가진 `MenuBarExtra` UI 프로토타입
-- CLI와 메뉴바가 동일 구현을 쓰는 계정별 `0600` JSON credential store
-- `MenuBarExtra`의 실제 `LocalCLIDataProvider`·`FileCredentialStore` 주입과 제품 metadata store
-- 메뉴바의 종료 확인 뒤 첫 로그인 등록·재실행, 추가 계정 격리 로그인·비활성 저장, recovery 상태의 mutation 차단
-- 메뉴바의 명시적 현재 활성 인증 저장, 실행 전 수동 종료 확인, 성공·복구 차단 상태 표시
-- 메뉴바 recovery pending phase와 journal의 정확한 이전 프로필 표시, blocked 상태의 fail-closed 안내
-- 메뉴바 `rollbackFailed` transaction+이전 프로필에 묶인 수동 복구, 명시 확인, launch 미확인 재시도 금지, journal 불확실 STOP
-- 메뉴바 전환의 durable journal phase 기반 실시간 진행 문구와 완료·실패 후 상태 정리
-- 메뉴바 `needsRelogin` 비활성 카드의 exact-ID 격리 재로그인, 기존 활성 계정 보존, 불확실 상태 재시도 차단
-- 메뉴바 상태 조회 전 미완료 journal 자동 복구, 불확실 상태 STOP, 복구 중 앱 자동 실행 금지
-- 비종결 recovery pending을 exact transaction에 묶어 공식 앱 정상 종료 뒤 다시 처리하는 메뉴바 복구 재시도
-- 메뉴바의 native 비동기 잔존 앱 프로세스 2차 확인, 취소 기본, 종료 전 exact snapshot 대상에만 `SIGTERM` 1회
-- 메뉴바 비활성 계정의 로컬 profile·JSON credential 삭제, 중단 자동 복구, 같은 계정 재등록 허용
-- B 삭제·재등록 뒤 A↔B 및 A→B→C→A 실계정 전환 검증
-- 공식 `account/rateLimits/read` 기반 계정별 Codex 한도·초기화 시각·plan 표시, 활성 계정 최소 잔여율 메뉴바 표시
-- Command Line Tools만으로 만드는 ad-hoc 서명 `.app`, 고정 경로 설치·LaunchAgent 자동 실행·보존형 제거
+- 최대 3개 ChatGPT 계정 등록·전환
+- 공식 Codex 앱을 정상 종료한 뒤 인증 전환·재실행·계정 검증
+- 활성·비활성 계정의 plan, 남은 한도, 초기화 시각 표시
+- 메뉴바 아이콘에 활성 계정의 최소 잔여율 표시
+- 비활성 계정 삭제·재등록과 만료 계정 재로그인
+- 전환 실패 시 이전 계정 자동 복구
+- Mac 덮개를 닫아도 작업을 유지하는 잠자기 방지 토글
 
-첫 capture는 명시 확인 뒤 공식 앱을 정상 종료하고 현재 인증을 갱신·저장해 활성 프로필로 확정한 뒤 앱을 다시 연다. 추가 capture는 별도 `CODEX_HOME`의 공식 브라우저 로그인을 사용해 새 프로필을 비활성으로 저장하며, 실행 중인 공식 앱·공용 `auth.json`·기존 활성 프로필은 바꾸지 않는다.
+공식 Codex에서 직접 로그아웃할 필요 없다. 계정별 task·history·설정은 분리하지 않고 하나의 `~/.codex`를 공유한다.
 
-계정별 JSON에는 토큰이 원문으로 들어간다. directory `0700`·file `0600`으로 제한하지만 Keychain 암호화가 아니며 같은 macOS 사용자 권한의 프로세스는 읽을 수 있다.
+## 설치
 
-## 빌드와 테스트
+필요 환경:
 
-현재 개발 Mac에서는 Swift 6.2.3과 기본 macOS 26.2 SDK 조합에 module mismatch가 있어, 설치돼 있다면 검증된 macOS 15.4 SDK를 우선 사용한다. 다른 Mac에서는 활성 Xcode SDK를 자동 탐색한다. 필요하면 `SWITCHER_SDKROOT`로 SDK 경로를 지정할 수 있다.
+- macOS
+- 공식 Codex 앱
+- Xcode Command Line Tools 또는 Xcode
 
 ```sh
-./Scripts/dev.sh build
-./Scripts/dev.sh test
-./Scripts/build-app.sh
+git clone https://github.com/aqwsde321/codex-account-switcher-spike.git
+cd codex-account-switcher-spike
 ./Scripts/install-app.sh
 ```
 
-`install-app.sh`는 `~/Applications/CodexAccountSwitcher.app`과 `~/Library/LaunchAgents/local.codex.account-switcher.plist`만 소유권 확인 후 교체한다. 제거는 `./Scripts/uninstall-app.sh`이며 Application Support, 이전 버전의 Keychain item, 로그는 보존한다. 현재 앱은 이전 Keychain item을 읽거나 삭제하지 않는다.
+설치 후 메뉴바에 앱이 실행되며 로그인할 때 자동 시작한다.
 
-다른 Mac에서 SDK를 직접 지정하는 예:
+## 사용법
+
+### 1. 첫 계정 등록
+
+1. 공식 Codex 앱에 사용할 첫 계정으로 로그인한다.
+2. 메뉴바에서 Codex Account Switcher를 열고 `계정 등록`을 누른다.
+3. 라벨을 입력하고 `현재 로그인 등록`을 누른다.
+4. 안내를 승인하면 Codex가 정상 종료·재실행되고 첫 계정이 활성 상태로 저장된다.
+
+### 2. B/C 계정 추가
+
+1. `계정 등록`을 누르고 라벨 입력 후 `새 계정 등록`을 누른다.
+2. 열린 브라우저에서 추가할 계정으로 로그인한다.
+3. 새 계정은 비활성으로 저장되고 기존 활성 계정은 그대로 유지된다.
+
+공식 Codex 앱에서 로그아웃하거나 계정을 바꾸지 않는다.
+
+### 3. 계정 전환
+
+<p align="center">
+  <img src="docs/assets/account-switch-demo.gif" width="380" alt="개인 계정에서 회사 계정으로 확인, 검증, 완료되는 전환 과정">
+</p>
+
+1. 전환할 계정 카드를 누른다.
+2. Codex 종료·전환을 승인한다.
+3. 앱이 인증을 교체하고 대상 계정을 검증한 뒤 Codex를 다시 연다.
+
+독립 Codex CLI나 IDE 작업이 실행 중이면 안전을 위해 전환이 차단된다. 해당 작업을 직접 종료한 뒤 다시 시도한다.
+
+### 한도 표시
+
+- 각 카드에서 서버가 제공한 기간별 남은 한도와 초기화 시각을 확인한다.
+- 자동 조회는 활성 계정 2분, 전체 계정 30분 주기다.
+- 메뉴바의 숫자와 링은 활성 계정에서 가장 적게 남은 한도다.
+- 새로고침 버튼은 모든 계정을 즉시 조회한다.
+
+### 잠자기 방지
+
+메뉴 하단의 `잠자기 방지`를 켜면 macOS 관리자 인증 후 시스템 설정을 변경한다. 켜진 동안 메뉴바에 커피 배지가 표시된다.
+
+이 설정은 앱을 종료하거나 제거해도 유지될 수 있다. 발열·배터리 소모에 주의하고 필요 없을 때 끈다.
+
+## 제거
 
 ```sh
-SWITCHER_SDKROOT="$(xcrun --sdk macosx --show-sdk-path)" ./Scripts/dev.sh test
+./Scripts/uninstall-app.sh
 ```
 
-표준 `swift test` 대신 custom async executable harness를 사용한다. 현재 Command Line Tools에서 `XCTest`/`Testing` module을 사용할 수 없기 때문이다. 정상 Xcode toolchain이 설치되면 `.testTarget` 복귀를 재검토한다.
+앱과 자동 시작 항목만 제거한다. 저장 계정, 로그, 잠자기 방지 시스템 설정은 자동 삭제·해제하지 않는다.
 
-## 다른 Mac에서 이어서 작업
+## 보안과 제한
 
-GitHub CLI와 Xcode 또는 Command Line Tools를 설치한 뒤:
+- 계정 인증은 `~/Library/Application Support/CodexAccountSwitcher/credentials/`에 저장한다.
+- 디렉터리는 `0700`, JSON 파일은 `0600`이지만 Keychain 암호화는 아니다.
+- 같은 macOS 사용자 권한의 다른 프로세스는 인증 파일을 읽을 수 있다.
+- 이 앱은 계정별 데이터 격리 도구가 아니다. task, history, 설정, skills 등은 공유된다.
+- 실제 인증값을 repo, 로그, screenshot에 넣지 않는다.
+
+## 개발과 상세 문서
 
 ```sh
-gh auth login -h github.com
-gh repo clone aqwsde321/codex-account-switcher-spike
-cd codex-account-switcher-spike
 ./Scripts/dev.sh test
 ```
 
-실제 `auth.json`과 로컬 프로필 저장소는 Git으로 이동하지 않는다. 새 Mac에서는 실제 Spike 단계에서 계정을 다시 안전하게 등록해야 한다.
+현재 174개 테스트와 B 삭제·재등록, A→B→C→A 실계정 전환을 통과했다. 배포 전 Black-box 검증은 아직 남아 있다.
 
-## CLI
-
-```sh
-./Scripts/dev.sh run inspect
-./Scripts/dev.sh run profiles list
-./Scripts/dev.sh run recovery status
-```
-
-### 첫 계정 A 저장
-
-독립 Codex CLI·IDE 작업을 종료한 뒤 외부 Terminal에서 실행한다. `CAPTURE` 확인 후 실행 중인 공식 앱은 helper가 정상 종료한다.
-
-```sh
-./Scripts/dev.sh run profile capture --label A
-```
-
-### 추가 계정 B/C 격리 등록
-
-1. `profiles list`에서 활성 프로필이 하나이고 `recovery status`가 `recovery=none`인지 확인한다.
-2. 외부 Terminal에서 새 계정을 capture하고 `CAPTURE`를 입력한다.
-3. 열린 브라우저에서 아직 등록하지 않은 B 또는 C로 로그인한다. 공식 ChatGPT 앱에서 로그아웃하거나 계정을 바꾸지 않는다.
-
-```sh
-./Scripts/dev.sh run inspect
-./Scripts/dev.sh run profile capture --label B
-# 세 번째 계정이면 --label C
-./Scripts/dev.sh run profiles list
-./Scripts/dev.sh run recovery status
-```
-
-성공 결과는 기존 프로필 `active=true`, 새 프로필 `active=false`, `recovery=none`이다. 공식 ChatGPT 앱과 공용 인증은 기존 계정을 유지한다. 새 계정으로 바꾸려면 메뉴바 카드나 `switch --target`을 사용한다.
-
-프롬프트에 `CAPTURE`를 입력해야 진행한다. 앱 version/build 변경 자체는 hard gate가 아니다. 공식 bundle과 app·bundled CLI·현재 Crashpad의 정적 서명, 번들 내부 canonical 경로, 실행 중 Crashpad의 exact path·서명이 모두 맞아야 진행한다. `application=incompatible`, `process_blocked`면 중단한다. `account_already_registered`면 미등록 계정 로그인부터 다시 한다. `profile_already_exists`면 3개 상한에 도달한 상태다. `rollback_failed`, `recovery=pending`, `recovery=blocked`면 재실행하지 말고 상태를 보존한다.
-
-### 수동 A 재로그인 후 저장본 동기화
-
-앱과 독립 Codex CLI를 종료하고 `inspect`의 세 process count가 모두 `0`인지 확인한 뒤 실행한다.
-
-```sh
-./Scripts/dev.sh run profile sync-active
-```
-
-`SYNC`를 입력해야 진행한다. 현재 `auth.json`의 이메일이 registry 활성 프로필과 정확히 일치할 때만 해당 저장본을 교체한다. 현재 `auth.json`, 다른 프로필 저장본, registry는 변경하지 않는다. 저장 후 검사가 실패하면 기존 활성 저장본을 복구한다. verifier 종료를 확인하지 못하면 private store의 격리 workspace를 보존하고 `recovery=blocked`로 표시한다.
-
-### 메뉴바에서 비활성 계정 재로그인 반영
-
-`재로그인 필요`인 비활성 B 카드를 누르고 확인한 뒤 열린 브라우저에서 exact B로 로그인한다. 메뉴바는 격리된 인증을 검증·저장하고 기존 활성 계정과 공식 앱을 그대로 둔다. 완료 문구 뒤 B 카드 선택을 다시 하면 일반 전환을 실행한다.
-
-확인 전이나 finalization이 불명확한 상태에서 자동 재시도하지 않는다. 메뉴바가 복구 필요 또는 상태 불명확을 표시하면 앱을 열거나 다른 계정 작업을 하지 않는다. Core가 A로 안전 롤백하고 recovery가 없을 때만 사용자가 B 로그인 상태를 고친 뒤 다시 시도할 수 있다.
-
-메뉴바는 시작과 mutation 실패 뒤 상태를 새로 읽을 때 자동 복구를 먼저 한 번 시도하고, 그 다음 profile과 recovery 상태를 읽는다. 자동 복구는 공식 앱을 실행하지 않는다. CLI `recovery status`는 일반 auth/registry 복구를 시작하지 않는 관찰 명령이며, 이미 증명된 journal finalization 정리만 재개할 수 있다.
-
-자동 복구가 실행 중인 공식 앱 때문에 멈춘 비종결 phase에서는 `Codex 종료하고 복구 재시도`를 누른다. 메뉴바는 표시 당시 transaction ID가 그대로인지 lock 안에서 확인하고 공식 앱에 정상 종료를 요청한 뒤 기존 복구를 다시 실행한다. 종료 후에도 남은 exact 앱 소유 프로세스만 별도 확인 뒤 `SIGTERM`하며, 새·독립·분류 불명 프로세스가 나타나면 쓰기 없이 STOP한다. 복구 성공 뒤 Codex는 자동 실행하지 않는다. `rollbackFailed`는 이 버튼 대신 기존 이전 계정 수동 복구만 사용한다.
-
-### 메뉴바에서 비활성 계정 삭제·재등록
-
-비활성 카드 오른쪽 휴지통을 누르면 독립 확인창이 열린다. `취소`가 기본 동작이며 `삭제`를 승인하면 이 앱의 profile과 해당 JSON credential만 제거한다. OpenAI 계정, 현재 `auth.json`, 현재 Codex 로그인은 바뀌지 않으므로 삭제를 위해 Codex를 종료하거나 로그아웃할 필요가 없다. 활성 카드에는 휴지통이 없고 Core도 활성 profile 삭제를 거부한다.
-
-이전 Keychain 버전에서 처음 전환할 때는 현재 공식 Codex가 registry의 활성 A인지 먼저 확인하고 비활성 B를 삭제한다. 이어서 `계정 등록`을 누르면 메뉴바가 현재 A를 기존 이메일 검증 뒤 JSON으로 저장하고, 열린 브라우저의 B를 새 비활성 JSON credential로 등록한다. 이전 Keychain item은 건드리지 않는다.
-
-삭제한 계정을 다시 등록하면 같은 라벨·이메일을 쓸 수 있지만 새 profile ID가 발급되며, 기존 활성 계정은 유지된다.
-
-### 저장된 계정으로 전환
-
-독립 Codex CLI를 종료한 뒤 외부 Terminal에서 실행한다. 실행 중인 ChatGPT 앱은 정상 종료를 요청한다. 1초 뒤에도 종료 전 확인된 앱 소유 프로세스가 남으면 추가 확인을 표시하고, 사용자가 `TERMINATE`를 입력한 경우에만 `SIGTERM`을 한 번 보낸다.
-
-```sh
-./Scripts/dev.sh run switch --target B
-```
-
-`SWITCH`를 입력해야 진행한다. 1초 뒤 앱 소유 프로세스가 남으면 `TERMINATE`를 추가로 입력해야 한다. 현재 계정 저장본 갱신 → 대상 저장본 격리 검증·갱신 → `auth.json` 원자 교체 → 앱 재실행 → 대상 이메일 검증 순서로 처리한다. `recovery_required` 또는 `rollback_failed`면 재실행하지 말고 `recovery status`를 확인한다.
-
-### Post-launch 자동 롤백 실검증
-
-debug build에서만 B-011 검증 실패를 1회 주입할 수 있다. 일반 전환처럼 실제 target 인증을 설치하고 앱을 실행하지만, target PID 확인 직후 검증 실패를 발생시켜 기존 source rollback 경로를 실행한다. 실제 `auth.json`을 수동 훼손하지 않는다.
-
-현재 A가 활성이라면 외부 Terminal에서 실행한다.
-
-```sh
-./Scripts/dev.sh run switch --target B --test-post-launch-rollback
-```
-
-`ROLLBACK_TEST`를 입력해야 진행한다. 잔존 앱 프로세스가 있으면 forward와 rollback 종료에서 각각 `TERMINATE` 확인이 나올 수 있다. 성공 출력은 `rollback_test=passed`와 A `active=true`다. 이어서 다음을 확인한다.
-
-```sh
-./Scripts/dev.sh run inspect
-./Scripts/dev.sh run profiles list
-./Scripts/dev.sh run recovery status
-```
-
-A 활성, B 비활성, `recovery=none`이어야 한다. `rollback_failed`, `recovery=pending`, `recovery=blocked`면 다시 실행하지 말고 상태를 보존한다. release build에는 실패 주입 명령이 포함되지 않는다.
-
-### rollbackFailed 수동 복구
-
-`recovery status`가 `phase=rollbackFailed`일 때만 journal의 이전 프로필을 명시적으로 복구한다. 새 전환이나 수동 파일 복사를 먼저 하지 않는다.
-
-```sh
-./Scripts/dev.sh run recovery restore --profile A
-```
-
-`RESTORE`를 입력하고, 잔존 앱 소유 프로세스 확인이 나오면 `TERMINATE`를 입력한다. process gate → stale verifier를 private `recovery-evidence`로 격리 → 저장된 A 검증 → 공용 auth 원자 복구 → A 이메일 검증 → registry A commit → capture 임시 artifact 정리 → journal 삭제 → 앱 실행 순서다. 등록된 B 프로필·저장본과 stale verifier 증거는 보존한다.
-
-- `recovery=restored`: 복구와 앱 PID 확인 완료. A `active=true`, `recovery status`는 `recovery=none`이어야 한다.
-- `error=application_launch_unconfirmed`: auth·registry 복구와 journal 내구 삭제는 완료됐다. restore를 재실행하지 말고 `recovery status`가 `none`인지 확인한 뒤 앱 실행만 별도로 처리한다.
-- `error=recovery_uncertain`: journal unlink/parent `fsync` 완료를 단정할 수 없어 앱을 실행하지 않는다. 공통 mutation gate가 finalization evidence의 journal phase/expected active 조합·registry·검증 당시 active auth digest·잔존 artifact를 재검증한다. journal이 남았으면 내구 삭제하고, 없으면 store directory를 `fsync`한 뒤 상태를 다시 확인해 evidence를 제거한다. 이 절차가 끝나 `recovery status=none`일 때만 계속한다.
-
-## 안전 규칙
-
-- 실제 credential, token, cookie를 repo·로그·테스트 fixture에 넣지 않는다.
-- `auth.json` 원문, raw App Server stderr, 전체 process argv/environment를 출력하지 않는다.
-- 공식 앱과 관련 writer가 완전히 종료되기 전 auth를 쓰지 않는다.
-- 독립 Codex CLI를 자동 종료하지 않는다.
-- 종료 대기 중 확인한 exact 앱 소유 프로세스만 1초 유예와 별도 사용자 확인 뒤 `SIGTERM`한다.
-- `SIGKILL`, `kill -9`, 독립·분류 불명 프로세스 자동 종료는 사용하지 않는다.
-- 실제 앱 종료·계정 전환은 Codex 앱 내부 task가 아니라 외부 Terminal에서 수행한다.
-
-전체 제품 결정과 Runbook은 [`docs/00_README.md`](docs/00_README.md)를 따른다.
+- [전체 문서 인덱스](docs/00_README.md)
+- [제품 요구사항](docs/01_product_requirements.md)
+- [아키텍처 결정](docs/02_decision_record.md)
+- [테스트·인수 기준](docs/07_test_acceptance.md)
+- [CLI·복구 Runbook](docs/04_spike_runbook.md)
