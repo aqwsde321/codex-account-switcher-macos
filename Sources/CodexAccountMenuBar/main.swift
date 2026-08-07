@@ -27,6 +27,11 @@ struct CodexAccountMenuBarApp: App {
                 await MainActor.run {
                     confirmAppOwnedTermination(count: count)
                 }
+            },
+            reportAppOwnedTermination: { before, remaining in
+                await MainActor.run {
+                    showAppOwnedTerminationResult(before: before, remaining: remaining)
+                }
             }
         )
         _model = StateObject(
@@ -91,7 +96,7 @@ struct CodexAccountMenuBarApp: App {
 
     var body: some Scene {
         MenuBarExtra {
-            AccountMenuView(model: model, sleepPrevention: sleepPrevention)
+            AccountMenuView(model: model, sleepPrevention: sleepPrevention, now: menuBarNow)
         } label: {
             HStack(spacing: 4) {
                 Image(
@@ -272,6 +277,7 @@ private enum SleepPreventionSystemError: Error {
 private struct AccountMenuView: View {
     @ObservedObject var model: MenuBarViewModel
     @ObservedObject var sleepPrevention: SleepPreventionViewModel
+    let now: Date
     @State private var isRegistering = false
     @State private var registrationLabel = ""
 
@@ -324,7 +330,8 @@ private struct AccountMenuView: View {
                             ProfileCard(
                                 profile: profile,
                                 usage: model.usageByProfileID[profile.id],
-                                usageFailed: model.usageFailedProfileIDs.contains(profile.id)
+                                usageFailed: model.usageFailedProfileIDs.contains(profile.id),
+                                now: now
                             )
                         }
                         .buttonStyle(.plain)
@@ -505,6 +512,7 @@ private struct ProfileCard: View {
     let profile: ProfileListItem
     let usage: AppServerRateLimitsRead?
     let usageFailed: Bool
+    let now: Date
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -549,7 +557,7 @@ private struct ProfileCard: View {
                 } else {
                     ForEach(Array(usage.windows.sorted(by: windowOrder).enumerated()), id: \.offset) {
                         _, window in
-                        UsageWindowRow(window: window)
+                        UsageWindowRow(window: window, now: now)
                     }
                 }
             } else if usageFailed {
@@ -591,6 +599,7 @@ private struct ProfileCard: View {
 
 private struct UsageWindowRow: View {
     let window: AppServerRateLimitWindow
+    let now: Date
 
     private var remaining: Int {
         MenuBarViewModel.remainingPercent(window)
@@ -614,6 +623,9 @@ private struct UsageWindowRow: View {
                 HStack(spacing: 3) {
                     Text(resetsAt, format: .dateTime.month().day().hour().minute())
                     Text("초기화")
+                    if let countdown = MenuBarViewModel.resetCountdownLabel(resetAt: resetsAt, now: now) {
+                        Text("· " + countdown + " 후")
+                    }
                 }
                 .font(.caption2)
                 .foregroundStyle(.secondary)
@@ -633,6 +645,35 @@ private func confirmAppOwnedTermination(count: Int) -> Bool {
     let terminate = alert.addButton(withTitle: "SIGTERM 전송")
     terminate.hasDestructiveAction = true
     return alert.runModal() == .alertSecondButtonReturn
+}
+
+@MainActor
+private func showAppOwnedTerminationResult(before: [ProcessRecord], remaining: [ProcessRecord]) {
+    let alert = NSAlert()
+    alert.alertStyle = remaining.isEmpty ? .informational : .warning
+    alert.messageText = remaining.isEmpty ? "잔존 프로세스를 종료했습니다." : "종료하지 못한 프로세스가 남았습니다."
+    alert.informativeText = """
+    종료 전 (\(before.count)개)
+    \(processList(before))
+
+    종료 후 (\(remaining.count)개)
+    \(processList(remaining))
+
+    승인된 Crashpad 프로세스는 종료 대상에서 제외됩니다.
+    """
+    alert.addButton(withTitle: "확인")
+    NSApp.activate(ignoringOtherApps: true)
+    alert.runModal()
+}
+
+private func processList(_ processes: [ProcessRecord]) -> String {
+    guard !processes.isEmpty else { return "없음" }
+    return processes.map { process in
+        let name = process.nameHint
+            ?? process.executablePath?.split(separator: "/").last.map(String.init)
+            ?? "알 수 없는 프로세스"
+        return "• \(name) (PID \(process.identity.pid))"
+    }.joined(separator: "\n")
 }
 
 @MainActor

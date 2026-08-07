@@ -724,6 +724,7 @@ func cliApplicationTests() -> [TestCase] {
                 let launches = await MainActor.run { AppLaunchRecorder() }
                 let lingeringProcesses = TerminableProcessSnapshotProvider()
                 let lingeringConfirmations = TerminationConfirmationRecorder()
+                let lingeringReports = TerminationReportRecorder()
                 let appRootIdentity = ProcessIdentity(pid: 76, startSeconds: 99, startMicroseconds: 1)
                 let lingeringIdentity = ProcessIdentity(pid: 77, startSeconds: 100, startMicroseconds: 1)
                 let appRoot = ProcessRecord(
@@ -776,6 +777,7 @@ func cliApplicationTests() -> [TestCase] {
                         return []
                     },
                     confirmAppOwnedTermination: lingeringConfirmations.confirm,
+                    reportAppOwnedTermination: lingeringReports.record,
                     requestProcessTermination: { lingeringProcesses.terminate($0) },
                     normalTerminationGracePolls: 0,
                     quiescenceSleep: { _ in },
@@ -1177,6 +1179,16 @@ func cliApplicationTests() -> [TestCase] {
                 try expect(
                     lingeringConfirmations.counts == [1],
                     "round-trip confirmation counts changed"
+                )
+                let terminationReports = lingeringReports.snapshots
+                try expect(terminationReports.count == 1, "round-trip termination result was not reported once")
+                try expect(
+                    terminationReports.first?.before.map(\.identity) == [lingeringIdentity],
+                    "round-trip termination result changed the original process"
+                )
+                try expect(
+                    terminationReports.first?.remaining.isEmpty == true,
+                    "round-trip termination result did not report an empty survivor list"
                 )
                 try expect(blockedSwitch.standardError == "error=process_blocked\n", "independent Codex was not blocked")
                 try expect(independentConfirmations.counts.isEmpty, "independent Codex requested SIGTERM approval")
@@ -4421,6 +4433,24 @@ private final class TerminationConfirmationRecorder: @unchecked Sendable {
     func confirm(_ count: Int) -> Bool {
         lock.withLock { recordedCounts.append(count) }
         return true
+    }
+}
+
+private struct TerminationReportSnapshot: Equatable {
+    let before: [ProcessRecord]
+    let remaining: [ProcessRecord]
+}
+
+private final class TerminationReportRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recordedSnapshots = [TerminationReportSnapshot]()
+
+    var snapshots: [TerminationReportSnapshot] { lock.withLock { recordedSnapshots } }
+
+    func record(before: [ProcessRecord], remaining: [ProcessRecord]) {
+        lock.withLock {
+            recordedSnapshots.append(TerminationReportSnapshot(before: before, remaining: remaining))
+        }
     }
 }
 

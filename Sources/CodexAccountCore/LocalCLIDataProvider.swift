@@ -82,6 +82,7 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
     private let runningApplicationPIDs: @MainActor @Sendable (CodexAppDescriptor) throws -> [Int32]
     private let requestApplicationTermination: @MainActor @Sendable (CodexAppDescriptor) throws -> [Int32]
     private let confirmAppOwnedTermination: @Sendable (Int) async -> Bool
+    private let reportAppOwnedTermination: @Sendable ([ProcessRecord], [ProcessRecord]) async -> Void
     private let requestProcessTermination: @Sendable (ProcessRecord) throws -> Void
     private let normalTerminationGracePolls: Int
     private let quiescenceSleep: @Sendable (Duration) async throws -> Void
@@ -126,7 +127,8 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
         activeAuthURL: URL,
         credentialStore: any CredentialStoring,
         processProvider: any ProcessSnapshotProviding = LibprocSnapshotProvider(),
-        confirmAppOwnedTermination: @escaping @Sendable (Int) async -> Bool = { _ in false }
+        confirmAppOwnedTermination: @escaping @Sendable (Int) async -> Bool = { _ in false },
+        reportAppOwnedTermination: @escaping @Sendable ([ProcessRecord], [ProcessRecord]) async -> Void = { _, _ in }
     ) {
         self.storeURL = storeURL
         self.credentialStore = credentialStore
@@ -140,6 +142,7 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
             try CodexAppLifecycle().requestNormalTermination(descriptor)
         }
         self.confirmAppOwnedTermination = confirmAppOwnedTermination
+        self.reportAppOwnedTermination = reportAppOwnedTermination
         requestProcessTermination = sendSIGTERM
         normalTerminationGracePolls = 4
         quiescenceSleep = { try await Task.sleep(for: $0) }
@@ -170,6 +173,7 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
             try CodexAppLifecycle().requestNormalTermination(descriptor)
         },
         confirmAppOwnedTermination: @escaping @Sendable (Int) async -> Bool = { _ in false },
+        reportAppOwnedTermination: @escaping @Sendable ([ProcessRecord], [ProcessRecord]) async -> Void = { _, _ in },
         requestProcessTermination: @escaping @Sendable (ProcessRecord) throws -> Void = sendSIGTERM,
         normalTerminationGracePolls: Int = 4,
         quiescenceSleep: @escaping @Sendable (Duration) async throws -> Void = {
@@ -195,6 +199,7 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
         self.runningApplicationPIDs = runningApplicationPIDs
         self.requestApplicationTermination = requestApplicationTermination
         self.confirmAppOwnedTermination = confirmAppOwnedTermination
+        self.reportAppOwnedTermination = reportAppOwnedTermination
         self.requestProcessTermination = requestProcessTermination
         self.normalTerminationGracePolls = min(max(normalTerminationGracePolls, 0), 119)
         self.quiescenceSleep = quiescenceSleep
@@ -1657,6 +1662,8 @@ extension LocalCLIDataProvider: SwitchTransactionDriving {
         terminationCandidates: [ProcessIdentity: ProcessRecord]
     ) async throws {
         var sentSIGTERM = false
+        var terminationAttempt = [ProcessRecord]()
+        var lastSurvivors = [ProcessRecord]()
         for poll in 0..<120 {
             let inventory: ProcessInventory
             do {
@@ -1681,16 +1688,29 @@ extension LocalCLIDataProvider: SwitchTransactionDriving {
                 terminationCandidates: terminationCandidates
             )
             if survivors.isEmpty {
+                if sentSIGTERM {
+                    await reportAppOwnedTermination(terminationAttempt, [])
+                }
                 return
             }
+            lastSurvivors = survivors
             if poll >= normalTerminationGracePolls, !sentSIGTERM {
                 guard await confirmAppOwnedTermination(survivors.count) else {
                     throw ApplicationQuiescenceFailure.processBlocked
                 }
-                try terminateCapturedAppOwnedProcesses(survivors)
+                terminationAttempt = survivors
+                do {
+                    try terminateCapturedAppOwnedProcesses(survivors)
+                } catch {
+                    await reportAppOwnedTermination(terminationAttempt, survivors)
+                    throw error
+                }
                 sentSIGTERM = true
             }
             try await quiescenceSleep(.milliseconds(250))
+        }
+        if sentSIGTERM {
+            await reportAppOwnedTermination(terminationAttempt, lastSurvivors)
         }
         throw ApplicationQuiescenceFailure.processBlocked
     }
