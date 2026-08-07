@@ -159,12 +159,26 @@ public final class MenuBarViewModel: ObservableObject {
         loadProfileUsage != nil && !profiles.isEmpty && !recoveryRequired
     }
 
-    public var activeRemainingPercent: Int? {
+    public var activeRateLimitWindow: AppServerRateLimitWindow? {
         guard let activeID = profiles.first(where: \.active)?.id,
               let usage = usageByProfileID[activeID] else {
             return nil
         }
-        return usage.windows.map(Self.remainingPercent).min()
+        return Self.limitingWindow(in: usage.windows)
+    }
+
+    public var activeResetAt: Date? {
+        activeRateLimitWindow?.resetsAt
+    }
+
+    public var activeRemainingPercent: Int? {
+        activeRateLimitWindow.map(Self.remainingPercent)
+    }
+
+    public nonisolated static func limitingWindow(
+        in windows: [AppServerRateLimitWindow]
+    ) -> AppServerRateLimitWindow? {
+        windows.min { remainingPercent($0) < remainingPercent($1) }
     }
 
     public nonisolated static func remainingPercent(_ window: AppServerRateLimitWindow) -> Int {
@@ -175,6 +189,17 @@ public final class MenuBarViewModel: ObservableObject {
         if minutes.isMultiple(of: 1_440) { return "\(minutes / 1_440)d" }
         if minutes.isMultiple(of: 60) { return "\(minutes / 60)h" }
         return "\(minutes)m"
+    }
+
+    public nonisolated static func resetCountdownLabel(
+        resetAt: Date?,
+        now: Date
+    ) -> String? {
+        guard let resetAt else { return nil }
+        let seconds = max(0, resetAt.timeIntervalSince(now))
+        if seconds > 86_400 { return "\(Int(seconds / 86_400))d" }
+        if seconds >= 3_600 { return "\(Int(seconds / 3_600))h" }
+        return "\(Int(seconds / 60))m"
     }
 
     public func select(_ profile: ProfileListItem) async {

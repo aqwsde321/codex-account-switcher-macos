@@ -143,6 +143,47 @@ func menuBarViewModelTests() -> [TestCase] {
                 "credential changes did not reload usage"
             )
         },
+        TestCase("MenuBarViewModel selects the limiting reset and formats its countdown") {
+            let now = Date(timeIntervalSince1970: 1_000_000)
+            let windows = [
+                AppServerRateLimitWindow(
+                    usedPercent: 20,
+                    windowDurationMinutes: 300,
+                    resetsAt: now.addingTimeInterval(10 * 3_600)
+                ),
+                AppServerRateLimitWindow(
+                    usedPercent: 90,
+                    windowDurationMinutes: 10_080,
+                    resetsAt: now.addingTimeInterval(59 * 60)
+                ),
+            ]
+            let limitingWindow = MenuBarViewModel.limitingWindow(in: windows)
+            try expect(
+                limitingWindow?.windowDurationMinutes == 10_080
+                    && MenuBarViewModel.resetCountdownLabel(
+                        resetAt: now.addingTimeInterval(4 * 86_400 + 1),
+                        now: now
+                    ) == "4d"
+                    && MenuBarViewModel.resetCountdownLabel(
+                        resetAt: now.addingTimeInterval(23 * 3_600),
+                        now: now
+                    ) == "23h"
+                    && MenuBarViewModel.resetCountdownLabel(
+                        resetAt: now.addingTimeInterval(24 * 3_600),
+                        now: now
+                    ) == "24h"
+                    && MenuBarViewModel.resetCountdownLabel(
+                        resetAt: now.addingTimeInterval(3_600),
+                        now: now
+                    ) == "1h"
+                    && MenuBarViewModel.resetCountdownLabel(
+                        resetAt: now.addingTimeInterval(59 * 60),
+                        now: now
+                    ) == "59m"
+                    && MenuBarViewModel.resetCountdownLabel(resetAt: nil, now: now) == nil,
+                "menu bar did not select or format the active reset countdown"
+            )
+        },
         TestCase("MenuBarViewModel refreshes active usage at two minutes and all usage at thirty") {
             let profiles = menuBarProfiles()
             let activeID = profiles[0].id

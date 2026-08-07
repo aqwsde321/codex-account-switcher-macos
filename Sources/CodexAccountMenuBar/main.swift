@@ -9,6 +9,7 @@ struct CodexAccountMenuBarApp: App {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @StateObject private var model: MenuBarViewModel
     @StateObject private var sleepPrevention: SleepPreventionViewModel
+    @State private var menuBarNow = Date.now
 
     init() {
         let home = FileManager.default.homeDirectoryForCurrentUser
@@ -103,7 +104,8 @@ struct CodexAccountMenuBarApp: App {
                     .opacity(model.isAutomaticallyRefreshing ? 0.55 : 1)
                     .animation(refreshAnimation, value: model.isAutomaticallyRefreshing)
                 if let remaining = model.activeRemainingPercent {
-                    Text("\(remaining)%")
+                    let resetCountdown = activeResetCountdown.map { " · \($0)" } ?? ""
+                    Text("\(remaining)%\(resetCountdown)")
                         .monospacedDigit()
                 }
             }
@@ -121,15 +123,34 @@ struct CodexAccountMenuBarApp: App {
                     await model.refreshUsageAutomatically()
                 }
             }
+            .task {
+                while !Task.isCancelled {
+                    menuBarNow = .now
+                    do {
+                        try await Task.sleep(for: .seconds(60))
+                    } catch {
+                        return
+                    }
+                }
+            }
         }
         .menuBarExtraStyle(.window)
     }
 
+    private var activeResetCountdown: String? {
+        let resetCountdown = MenuBarViewModel.resetCountdownLabel(
+            resetAt: model.activeResetAt,
+            now: menuBarNow
+        )
+        return resetCountdown
+    }
+
     private var statusAccessibilityLabel: String {
+        let resetCountdown = activeResetCountdown.map { ", \($0) 후 초기화" } ?? ""
         let usage = model.activeRemainingPercent.map {
             model.isAutomaticallyRefreshing
-                ? "Codex 계정 한도 자동 조회 중, \($0)% 남음"
-                : "Codex 계정 \($0)% 남음"
+                ? "Codex 계정 한도 자동 조회 중, \($0)% 남음\(resetCountdown)"
+                : "Codex 계정 \($0)% 남음\(resetCountdown)"
         } ?? (model.isAutomaticallyRefreshing
             ? "Codex 계정 한도 자동 조회 중"
             : "Codex 계정")
