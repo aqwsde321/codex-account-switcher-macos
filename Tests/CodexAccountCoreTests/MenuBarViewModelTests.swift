@@ -143,7 +143,7 @@ func menuBarViewModelTests() -> [TestCase] {
                 "credential changes did not reload usage"
             )
         },
-        TestCase("MenuBarViewModel selects the limiting reset and formats its countdown") {
+        TestCase("MenuBarViewModel selects the limiting reset and rounds its countdown up") {
             let now = Date(timeIntervalSince1970: 1_000_000)
             let windows = [
                 AppServerRateLimitWindow(
@@ -161,11 +161,11 @@ func menuBarViewModelTests() -> [TestCase] {
             try expect(
                 limitingWindow?.windowDurationMinutes == 10_080
                     && MenuBarViewModel.resetCountdownLabel(
-                        resetAt: now.addingTimeInterval(4 * 86_400 + 1),
+                        resetAt: now.addingTimeInterval(243_480),
                         now: now
-                    ) == "4d"
+                    ) == "3d"
                     && MenuBarViewModel.resetCountdownLabel(
-                        resetAt: now.addingTimeInterval(23 * 3_600),
+                        resetAt: now.addingTimeInterval(81_000),
                         now: now
                     ) == "23h"
                     && MenuBarViewModel.resetCountdownLabel(
@@ -177,7 +177,7 @@ func menuBarViewModelTests() -> [TestCase] {
                         now: now
                     ) == "1h"
                     && MenuBarViewModel.resetCountdownLabel(
-                        resetAt: now.addingTimeInterval(59 * 60),
+                        resetAt: now.addingTimeInterval(3_510),
                         now: now
                     ) == "59m"
                     && MenuBarViewModel.resetCountdownLabel(resetAt: nil, now: now) == nil,

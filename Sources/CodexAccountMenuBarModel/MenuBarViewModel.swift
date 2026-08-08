@@ -197,9 +197,9 @@ public final class MenuBarViewModel: ObservableObject {
     ) -> String? {
         guard let resetAt else { return nil }
         let seconds = max(0, resetAt.timeIntervalSince(now))
-        if seconds > 86_400 { return "\(Int(seconds / 86_400))d" }
-        if seconds >= 3_600 { return "\(Int(seconds / 3_600))h" }
-        return "\(Int(seconds / 60))m"
+        if seconds > 86_400 { return "\(Int((seconds / 86_400).rounded(.up)))d" }
+        if seconds >= 3_600 { return "\(Int((seconds / 3_600).rounded(.up)))h" }
+        return "\(Int((seconds / 60).rounded(.up)))m"
     }
 
     public func select(_ profile: ProfileListItem) async {
