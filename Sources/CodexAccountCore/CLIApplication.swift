@@ -370,7 +370,8 @@ private extension CLIApplication {
             "incompatible_application"
         case LocalCLIDataProviderFailure.processBlocked,
              LocalCLIDataProviderFailure.processSnapshotUnstable,
-             SwitchCoordinatorFailure.processBlocked:
+             SwitchCoordinatorFailure.processBlocked,
+             SwitchCoordinatorFailure.independentCodexBlocked:
             "process_blocked"
         case LocalCLIDataProviderFailure.activeAuthChanged:
             "active_auth_changed"

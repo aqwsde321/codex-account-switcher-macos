@@ -27,6 +27,7 @@ public enum SwitchCoordinatorFailure: Error, Equatable, Sendable {
     case lockBusy
     case operationFailed
     case processBlocked
+    case independentCodexBlocked
     case recoveryRequired
     case rollbackFailed
 }
@@ -366,11 +367,15 @@ private extension SwitchCoordinator {
     }
 
     func operationFailure(from error: Error) -> SwitchCoordinatorFailure {
-        guard let failure = error as? SwitchCoordinatorFailure,
-              failure == .processBlocked else {
+        guard let failure = error as? SwitchCoordinatorFailure else {
             return .operationFailed
         }
-        return .processBlocked
+        switch failure {
+        case .processBlocked, .independentCodexBlocked:
+            return failure
+        default:
+            return .operationFailed
+        }
     }
 
     func rollback(

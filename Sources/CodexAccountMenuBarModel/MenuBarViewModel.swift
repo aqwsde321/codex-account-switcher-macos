@@ -725,6 +725,9 @@ public final class MenuBarViewModel: ObservableObject {
             await refreshAfterMutationFailure()
             if recoveryRequired {
                 errorMessage = recoveryErrorMessage
+            } else if let failure = error as? SwitchCoordinatorFailure,
+                      failure == .independentCodexBlocked {
+                errorMessage = "Codex CLI 또는 IDE 작업이 실행 중입니다. 해당 작업을 종료한 뒤 다시 시도하세요."
             } else if profiles.contains(where: { $0.id == profile.id && $0.needsRelogin }) {
                 errorMessage = "\(profile.label) 계정은 재로그인이 필요합니다."
             } else {

@@ -450,6 +450,30 @@ func menuBarViewModelTests() -> [TestCase] {
                 "failed switch did not replace progress with a safe error"
             )
         },
+        TestCase("MenuBarViewModel explains an independent CLI switch blocker") {
+            let provider = MenuBarProviderSpy(profiles: menuBarProfiles())
+            let model = await makeMenuBarModel(
+                provider: provider,
+                switchProfile: { _, _ in
+                    throw SwitchCoordinatorFailure.independentCodexBlocked
+                }
+            )
+            await model.load()
+            guard let target = await MainActor.run(body: {
+                model.profiles.first(where: { !$0.active })
+            }) else {
+                throw TestFailure(description: "switch blocker fixture has no inactive profile")
+            }
+
+            await model.select(target)
+            await model.confirmSwitch()
+            let message = await MainActor.run { model.errorMessage }
+
+            try expect(
+                message == "Codex CLI 또는 IDE 작업이 실행 중입니다. 해당 작업을 종료한 뒤 다시 시도하세요.",
+                "independent CLI switch blocker was reported as a generic failure"
+            )
+        },
         TestCase("MenuBarViewModel maps durable switch phases to safe progress text") {
             let messages = await MainActor.run {
                 SwitchPhase.allCases.map(MenuBarViewModel.switchProgressMessage(for:))
@@ -1611,6 +1635,7 @@ private func makeMenuBarModel(
     captureProfile: MenuBarViewModel.CaptureProfile? = nil,
     removeProfile: MenuBarViewModel.RemoveProfile? = nil,
     retryPendingRecovery: MenuBarViewModel.RetryPendingRecovery? = nil,
+    switchProfile: MenuBarViewModel.SwitchProfile? = nil,
     reloginProfile: MenuBarViewModel.ReloginProfile? = nil,
     cancelProfileLogin: @escaping MenuBarViewModel.CancelProfileLogin = {}
 ) async -> MenuBarViewModel {
@@ -1627,7 +1652,9 @@ private func makeMenuBarModel(
             captureProfile: captureProfile ?? { try await provider.captureProfile(label: $0) },
             removeProfile: removeProfile ?? { try await provider.removeProfile($0) },
             syncActiveProfile: { try await provider.syncActiveProfile() },
-            switchProfile: { try await provider.switchProfile(target: $0, onPhaseChange: $1) },
+            switchProfile: switchProfile ?? {
+                try await provider.switchProfile(target: $0, onPhaseChange: $1)
+            },
             reloginProfile: reloginProfile ?? { try await provider.reloginProfile(target: $0) },
             cancelProfileLogin: cancelProfileLogin,
             restoreRecoveryProfile: {

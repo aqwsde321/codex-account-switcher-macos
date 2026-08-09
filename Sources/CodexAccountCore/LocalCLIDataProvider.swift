@@ -14,6 +14,7 @@ private enum ProcessTerminationFailure: Error {
 
 private enum ApplicationQuiescenceFailure: Error {
     case processBlocked
+    case independentCodexBlocked
 }
 
 private func sendSIGTERM(to expected: ProcessRecord) throws {
@@ -1256,7 +1257,7 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
                 terminationCandidates = try appOwnedTerminationCandidates(
                     in: try await processInventory(for: descriptor)
                 )
-            } catch ApplicationQuiescenceFailure.processBlocked {
+            } catch is ApplicationQuiescenceFailure {
                 throw LocalCLIDataProviderFailure.processBlocked
             }
             if !terminationCandidates.isEmpty {
@@ -1267,7 +1268,7 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
                     descriptor: descriptor,
                     terminationCandidates: terminationCandidates
                 )
-            } catch ApplicationQuiescenceFailure.processBlocked {
+            } catch is ApplicationQuiescenceFailure {
                 throw LocalCLIDataProviderFailure.processBlocked
             }
             let previous: ProfileMetadata?
@@ -1639,6 +1640,8 @@ extension LocalCLIDataProvider: SwitchTransactionDriving {
             switchAppOwnedTerminationCandidates = try appOwnedTerminationCandidates(
                 in: try await switchProcessInventory(for: descriptor)
             )
+        } catch ApplicationQuiescenceFailure.independentCodexBlocked {
+            throw SwitchCoordinatorFailure.independentCodexBlocked
         } catch ApplicationQuiescenceFailure.processBlocked {
             throw SwitchCoordinatorFailure.processBlocked
         }
@@ -1652,6 +1655,8 @@ extension LocalCLIDataProvider: SwitchTransactionDriving {
                 descriptor: descriptor,
                 terminationCandidates: switchAppOwnedTerminationCandidates
             )
+        } catch ApplicationQuiescenceFailure.independentCodexBlocked {
+            throw SwitchCoordinatorFailure.independentCodexBlocked
         } catch ApplicationQuiescenceFailure.processBlocked {
             throw SwitchCoordinatorFailure.processBlocked
         }
@@ -1675,6 +1680,9 @@ extension LocalCLIDataProvider: SwitchTransactionDriving {
             let newlyDiscovered = inventory.processes.filter {
                 $0.disposition.blocksAuthMutation
                     && terminationCandidates[$0.record.identity] == nil
+            }
+            if newlyDiscovered.contains(where: { $0.disposition == .independentCodexBlocker }) {
+                throw ApplicationQuiescenceFailure.independentCodexBlocked
             }
             guard newlyDiscovered.allSatisfy({ $0.disposition == .appOwnedBlocker }) else {
                 throw ApplicationQuiescenceFailure.processBlocked
@@ -1720,11 +1728,11 @@ extension LocalCLIDataProvider: SwitchTransactionDriving {
         guard try context.store.loadRegistry() == context.registry else {
             throw LocalCLIDataProviderFailure.invalidSwitchState
         }
-        do {
-            try await requireMutationGate(for: context.descriptor)
-        } catch let failure as LocalCLIDataProviderFailure
-            where failure == .processBlocked || failure == .processSnapshotUnstable
-        {
+        let inventory = try await switchProcessInventory(for: context.descriptor)
+        if inventory.processes.contains(where: { $0.disposition == .independentCodexBlocker }) {
+            throw SwitchCoordinatorFailure.independentCodexBlocked
+        }
+        guard inventory.authMutationAllowed else {
             throw SwitchCoordinatorFailure.processBlocked
         }
         guard try context.store.loadRegistry() == context.registry else {
@@ -2586,6 +2594,9 @@ private extension LocalCLIDataProvider {
         in inventory: ProcessInventory
     ) throws -> [ProcessIdentity: ProcessRecord] {
         let blockers = inventory.processes.filter { $0.disposition.blocksAuthMutation }
+        if blockers.contains(where: { $0.disposition == .independentCodexBlocker }) {
+            throw ApplicationQuiescenceFailure.independentCodexBlocked
+        }
         guard blockers.allSatisfy({
             $0.disposition == .appOwnedBlocker && $0.record.executablePath != nil
         }) else {
