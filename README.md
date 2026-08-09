@@ -3,6 +3,12 @@
 Codex Account Switcher는 개인·회사 Codex 계정 전환과 계정별 사용 한도 조회를 제공하는 macOS 메뉴바 앱이다.
 
 <p align="center">
+  <img src="docs/assets/menu-bar-status.png" width="222" alt="활성 계정 한도 100%, 초기화까지 7일, 잠자기 방지 상태를 표시하는 메뉴바 아이콘">
+</p>
+
+<p align="center"><sub>메뉴를 열지 않고 활성 계정의 최소 잔여 한도와 초기화까지 남은 시간을 확인한다. 커피 배지는 잠자기 방지 활성 상태다.</sub></p>
+
+<p align="center">
   <img src="docs/assets/account-switcher-overview.png" width="380" alt="가상 계정 세 개의 사용 한도와 잠자기 방지 토글을 보여주는 Codex Account Switcher 메뉴">
 </p>
 
