@@ -27,8 +27,6 @@ Codex Account Switcher는 개인·회사 Codex 계정 전환과 계정별 사용
 
 ## 설치
 
-> **배포 상태:** 원격 설치는 GitHub `v0.1.0` 태그 게시 후 사용할 수 있다.
-
 필요 환경:
 
 - macOS 13 Ventura 이상
