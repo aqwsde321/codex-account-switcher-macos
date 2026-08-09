@@ -5,7 +5,7 @@ Codex Account Switcher는 macOS용 Codex 데스크톱 앱 계정을 메뉴바에
 **계정 전환을 한 번 승인하면 Codex 앱 정상 종료 → 인증 교체 → 대상 검증 → 앱 재실행을 자동 처리한다.** 실행 중인 CLI·IDE 작업은 인증 보호를 위해 전환 전에 종료해야 한다.
 
 <p align="center">
-  <img src="docs/assets/menu-bar-status.png" width="206" alt="김이 나는 채운 커피잔, 활성 계정 한도 97%, 초기화까지 7일을 표시하는 메뉴바 상태">
+  <img src="docs/assets/menu-bar-status.png" width="206" alt="김이 나는 채운 커피잔, 활성 계정 한도 50%, 초기화까지 7일을 표시하는 메뉴바 상태">
 </p>
 
 <p align="center"><sub>가상 상태 예시. 잠자기 방지가 켜지면 채운 커피잔 위로 김 세 줄이 오르고, 꺼지면 빈 커피잔을 표시한다.</sub></p>
