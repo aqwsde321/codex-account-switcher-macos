@@ -1,5 +1,6 @@
 import Foundation
 import CodexAccountCore
+import CodexSleepGuardCore
 
 func spikeStoreTests() -> [TestCase] {
     [
@@ -211,6 +212,41 @@ func spikeStoreTests() -> [TestCase] {
                 let next = try store.createCaptureProfileID()
                 try expect(removed == nil, "capture marker remains")
                 try expect(next != first, "completed capture reused its removed profile ID")
+            }
+        },
+        TestCase("SpikeStore durably stores a strict sleep guard threshold") {
+            guard let threshold = SleepGuardThreshold(rawValue: 99) else {
+                throw TestFailure(description: "valid sleep guard threshold was rejected")
+            }
+            try withStoreTemporaryDirectory { parent in
+                let root = parent.appendingPathComponent("store", isDirectory: true)
+                let store = try SpikeStore.create(at: root)
+
+                let missing = try store.loadSleepGuardThresholdIfPresent()
+                try expect(
+                    missing == nil,
+                    "missing sleep guard threshold did not use the default path"
+                )
+                _ = try store.saveSleepGuardThreshold(threshold)
+                let loaded = try store.loadSleepGuardThresholdIfPresent()
+                try expect(
+                    loaded == threshold,
+                    "sleep guard threshold changed in storage"
+                )
+                let thresholdURL = root.appendingPathComponent("sleep-guard-threshold")
+                let thresholdMode = try storeMode(at: thresholdURL)
+                try expect(
+                    thresholdMode == 0o600,
+                    "sleep guard threshold mode is not 0600"
+                )
+
+                try Data("01\n".utf8).write(to: thresholdURL)
+                try expectError(
+                    SpikeStoreError.invalidSleepGuardThreshold,
+                    "unsupported sleep guard threshold was accepted"
+                ) {
+                    _ = try store.loadSleepGuardThresholdIfPresent()
+                }
             }
         },
     ]

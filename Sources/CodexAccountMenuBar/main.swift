@@ -1,7 +1,9 @@
 import AppKit
 import CodexAccountCore
 import CodexAccountMenuBarModel
+import CodexSleepGuardCore
 import SwiftUI
+import notify
 
 @main
 struct CodexAccountMenuBarApp: App {
@@ -19,6 +21,9 @@ struct CodexAccountMenuBarApp: App {
         let authURL = home
             .appendingPathComponent(".codex", isDirectory: true)
             .appendingPathComponent("auth.json", isDirectory: false)
+        let initialAutoDisableThreshold = (
+            try? SpikeStore.create(at: storeURL).loadSleepGuardThresholdIfPresent()
+        ) ?? .defaultValue
         let provider = LocalCLIDataProvider(
             storeURL: storeURL,
             activeAuthURL: authURL,
@@ -89,6 +94,13 @@ struct CodexAccountMenuBarApp: App {
                 },
                 setEnabled: { enabled in
                     try await SleepPreventionSystem.setEnabled(enabled)
+                    SleepGuardSystem.postReevaluation()
+                },
+                initialAutoDisableThreshold: initialAutoDisableThreshold,
+                saveAutoDisableThreshold: { threshold in
+                    let store = try SpikeStore.create(at: storeURL)
+                    _ = try store.saveSleepGuardThreshold(threshold)
+                    SleepGuardSystem.postReevaluation()
                 }
             )
         )
@@ -280,12 +292,20 @@ private enum SleepPreventionSystemError: Error {
     case commandFailed
 }
 
+private enum SleepGuardSystem {
+    static func postReevaluation() {
+        _ = sleepGuardReevaluationNotification.withCString { notify_post($0) }
+    }
+}
+
 private struct AccountMenuView: View {
     @ObservedObject var model: MenuBarViewModel
     @ObservedObject var sleepPrevention: SleepPreventionViewModel
     let now: Date
     @State private var isRegistering = false
     @State private var registrationLabel = ""
+    @State private var sleepGuardThresholdDraft =
+        Double(SleepGuardThreshold.defaultValue.rawValue)
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -473,6 +493,75 @@ private struct AccountMenuView: View {
                     )
                     .help("덮개를 닫아도 계속 동작해 발열과 배터리 소모가 증가할 수 있습니다. 앱 종료 후에도 유지됩니다.")
             }
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text("배터리 자동 해제")
+                    Spacer()
+                    Text(sleepGuardThresholdDraftLabel)
+                        .monospacedDigit()
+                }
+                ZStack {
+                    GeometryReader { geometry in
+                        let thumbDiameter: CGFloat = 16
+                        let trackWidth = max(0, geometry.size.width - thumbDiameter)
+                        let progress = CGFloat(
+                            min(max(sleepGuardThresholdDraft / 99, 0), 1)
+                        )
+                        ZStack {
+                            ProgressView(value: sleepGuardThresholdDraft, total: 99)
+                                .controlSize(.small)
+                                .padding(.horizontal, thumbDiameter / 2)
+                            Circle()
+                                .fill(Color.accentColor)
+                                .overlay {
+                                    Circle().stroke(Color.white.opacity(0.9), lineWidth: 1)
+                                }
+                                .shadow(color: Color.black.opacity(0.18), radius: 1, y: 1)
+                                .frame(width: thumbDiameter, height: thumbDiameter)
+                                .position(
+                                    x: thumbDiameter / 2 + trackWidth * progress,
+                                    y: geometry.size.height / 2
+                                )
+                        }
+                        .frame(width: geometry.size.width, height: geometry.size.height)
+                        .contentShape(Rectangle())
+                        .gesture(
+                            DragGesture(minimumDistance: 0)
+                                .onChanged { drag in
+                                    sleepGuardThresholdDraft = thresholdDraft(
+                                        at: drag.location.x,
+                                        width: geometry.size.width
+                                    )
+                                }
+                                .onEnded { drag in
+                                    sleepGuardThresholdDraft = thresholdDraft(
+                                        at: drag.location.x,
+                                        width: geometry.size.width
+                                    )
+                                    saveSleepGuardThresholdDraft()
+                                }
+                        )
+                        .allowsHitTesting(!sleepPrevention.isWorking)
+                    }
+                    Slider(
+                        value: $sleepGuardThresholdDraft,
+                        in: 0...99,
+                        step: 1,
+                        onEditingChanged: { editing in
+                            if !editing {
+                                saveSleepGuardThresholdDraft()
+                            }
+                        }
+                    )
+                    .opacity(0.001)
+                    .allowsHitTesting(false)
+                    .disabled(sleepPrevention.isWorking)
+                    .accessibilityLabel("배터리 자동 해제 기준")
+                    .accessibilityValue(sleepGuardThresholdDraftLabel)
+                }
+                .frame(height: 22)
+            }
+            .help("0은 끔입니다. 충전 중이 아닐 때 선택한 배터리 잔량 이하에서 잠자기 방지를 자동으로 끕니다.")
             if let errorMessage = sleepPrevention.errorMessage {
                 Text(errorMessage)
                     .font(.caption)
@@ -488,7 +577,13 @@ private struct AccountMenuView: View {
         }
         .padding(14)
         .frame(width: 320)
-        .task { await sleepPrevention.load() }
+        .task {
+            sleepGuardThresholdDraft = Double(sleepPrevention.autoDisableThreshold.rawValue)
+            await sleepPrevention.load()
+        }
+        .onChange(of: sleepPrevention.autoDisableThreshold) { threshold in
+            sleepGuardThresholdDraft = Double(threshold.rawValue)
+        }
     }
 
     private var sleepPreventionBinding: Binding<Bool> {
@@ -499,6 +594,31 @@ private struct AccountMenuView: View {
                 Task { await sleepPrevention.setEnabled(enabled) }
             }
         )
+    }
+
+    private var sleepGuardThresholdDraftLabel: String {
+        let value = Int(sleepGuardThresholdDraft.rounded())
+        return value == 0 ? "끔" : "\(value)%"
+    }
+
+    private func thresholdDraft(at locationX: CGFloat, width: CGFloat) -> Double {
+        let thumbDiameter: CGFloat = 16
+        let trackWidth = max(width - thumbDiameter, 1)
+        let progress = min(max((locationX - thumbDiameter / 2) / trackWidth, 0), 1)
+        return Double(progress * 99).rounded()
+    }
+
+    private func saveSleepGuardThresholdDraft() {
+        guard let threshold = SleepGuardThreshold(
+            rawValue: Int(sleepGuardThresholdDraft.rounded())
+        ) else {
+            sleepGuardThresholdDraft = Double(sleepPrevention.autoDisableThreshold.rawValue)
+            return
+        }
+        Task {
+            await sleepPrevention.setAutoDisableThreshold(threshold)
+            sleepGuardThresholdDraft = Double(sleepPrevention.autoDisableThreshold.rawValue)
+        }
     }
 
     private var registrationLabelIsValid: Bool {

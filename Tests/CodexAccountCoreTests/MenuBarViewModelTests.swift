@@ -1,6 +1,7 @@
 import Foundation
 import CodexAccountCore
 import CodexAccountMenuBarModel
+import CodexSleepGuardCore
 
 func menuBarViewModelTests() -> [TestCase] {
     [
@@ -38,6 +39,37 @@ func menuBarViewModelTests() -> [TestCase] {
                     && SleepPreventionViewModel.parsePMSetOutput("SleepDisabled unknown") == nil
                     && SleepPreventionViewModel.parsePMSetOutput("sleep 1") == nil,
                 "sleep prevention state was not parsed or verified fail-closed"
+            )
+        },
+        TestCase("SleepPreventionViewModel persists only a successful auto-disable threshold") {
+            guard let initialThreshold = SleepGuardThreshold(rawValue: 15),
+                  let savedThreshold = SleepGuardThreshold(rawValue: 99),
+                  let failedThreshold = SleepGuardThreshold(rawValue: 1) else {
+                throw TestFailure(description: "valid sleep guard threshold was rejected")
+            }
+            let probe = SleepGuardSettingProbe()
+            let model = await MainActor.run {
+                SleepPreventionViewModel(
+                    readEnabled: { false },
+                    setEnabled: { _ in },
+                    initialAutoDisableThreshold: initialThreshold,
+                    saveAutoDisableThreshold: { try await probe.save($0) }
+                )
+            }
+
+            await model.setAutoDisableThreshold(savedThreshold)
+            await probe.failWrites()
+            await model.setAutoDisableThreshold(failedThreshold)
+            let state = await MainActor.run {
+                (model.autoDisableThreshold, model.errorMessage)
+            }
+            let requests = await probe.requests
+
+            try expect(
+                state.0 == savedThreshold
+                    && state.1?.contains("저장하지 못했습니다") == true
+                    && requests == [savedThreshold, failedThreshold],
+                "sleep guard threshold changed after a failed persistence"
             )
         },
         TestCase("MenuBarViewModel attempts recovery before loading state") {
@@ -1706,6 +1738,24 @@ private actor SleepPreventionProbe {
 
 private enum SleepPreventionProbeError: Error {
     case readFailed
+}
+
+private actor SleepGuardSettingProbe {
+    private var writesFail = false
+    private(set) var requests = [SleepGuardThreshold]()
+
+    func save(_ threshold: SleepGuardThreshold) throws {
+        requests.append(threshold)
+        if writesFail { throw SleepGuardSettingProbeError.writeFailed }
+    }
+
+    func failWrites() {
+        writesFail = true
+    }
+}
+
+private enum SleepGuardSettingProbeError: Error {
+    case writeFailed
 }
 
 private actor MenuBarProviderSpy {

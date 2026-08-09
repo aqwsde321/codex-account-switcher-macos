@@ -25,6 +25,7 @@
 |---|---|---|
 | 프로필 목록·active ID | `~/Library/Application Support/CodexAccountSwitcher/profiles.json` | `0600` |
 | 계정별 credential | `~/Library/Application Support/CodexAccountSwitcher/credentials/<UUID>.json` | `0600` |
+| 배터리 자동 해제 기준 | `~/Library/Application Support/CodexAccountSwitcher/sleep-guard-threshold` | `0600` |
 | 현재 활성 인증 | `~/.codex/auth.json` | `0600` |
 | 상위 private 디렉터리 | `~/Library/Application Support/CodexAccountSwitcher/` | `0700` |
 
@@ -60,6 +61,16 @@
 
 복구 중 `auth.json`을 직접 편집하거나 다른 계정으로 로그인하면 증거가 바뀔 수 있다. 앱의 수동 복구 UI 또는 개발 문서의 복구 CLI를 사용한다.
 
+## 배터리 자동 해제
+
+- root LaunchDaemon은 `/Library/PrivilegedHelperTools/local.codex.account-switcher.sleep-guard`에서 실행한다.
+- 자동 해제 서비스 설치·갱신·제거에는 관리자 인증이 필요하다. 서비스의 평상시 자동 해제에는 암호를 요청하지 않는다.
+- macOS IOKit 전원 소스 변경 알림과 서비스 시작 시점에만 상태를 확인하며 주기 polling은 하지 않는다.
+- 내부 배터리 사용 중이고 충전 중이 아니며 설정 임계값 이하일 때만 고정 명령 `/usr/bin/pmset -a disablesleep 0`을 실행한다.
+- 잠자기 방지를 자동으로 켜거나 임의 명령·인자를 실행하는 경로는 없다.
+- 설정 파일은 regular file, 설치 사용자 소유, group/world 쓰기 불가, 최대 3바이트 조건을 확인한다. 없거나 잘못되면 안전 기본값 `30%`를 쓴다.
+- 다른 프로세스가 재평가 알림을 보내도 같은 고정 조건만 다시 검사한다.
+
 ## 원격 설치
 
 README의 한 줄 설치는 다음을 신뢰한다.
@@ -69,7 +80,7 @@ README의 한 줄 설치는 다음을 신뢰한다.
 - 고정 릴리스 태그의 bootstrap과 소스 압축본
 - 사용자 Mac의 Xcode toolchain
 
-스크립트는 고정 태그 소스를 임시 폴더에 받고 기존 로컬 설치 스크립트에 위임한다. `main`, `sudo`, 시스템 trust 변경은 사용하지 않는다.
+스크립트는 고정 태그 소스를 임시 폴더에 받고 기존 로컬 설치 스크립트에 위임한다. `main`과 시스템 trust 변경은 사용하지 않는다. macOS 표준 관리자 인증은 root 소유 LaunchDaemon 설치·갱신·제거에만 사용한다.
 
 고정 태그는 checksum, Developer ID 서명, Apple 공증을 대체하지 않는다. 실행 전에 README에 연결된 스크립트를 확인해야 한다.
 
@@ -96,5 +107,6 @@ README의 한 줄 설치는 다음을 신뢰한다.
 
 - 공식 Codex 업데이트로 bundle, App Server, 프로세스 계약이 바뀌면 전환이 차단될 수 있다.
 - 잠자기 방지는 시스템 전체 설정이며 앱 종료·제거 후에도 유지될 수 있다.
+- 배터리 자동 해제 서비스는 설치한 macOS 사용자 한 명의 설정만 읽는다.
 - 앱 삭제만으로 저장 credential이 제거되지 않는다.
 - Developer ID 서명·공증과 별도 checksum은 공개 릴리스 범위 밖이다.

@@ -1,3 +1,4 @@
+import CodexSleepGuardCore
 import Darwin
 import Foundation
 
@@ -77,6 +78,23 @@ public struct SpikeStore {
             return nil
         }
         return try loadRegistry()
+    }
+
+    public func saveSleepGuardThreshold(
+        _ threshold: SleepGuardThreshold
+    ) throws -> FileIdentity {
+        try replace(contents: SensitiveBytes(threshold.storedData), at: sleepGuardThresholdURL)
+    }
+
+    public func loadSleepGuardThresholdIfPresent() throws -> SleepGuardThreshold? {
+        guard try files.snapshot(at: sleepGuardThresholdURL) != .absent else {
+            return nil
+        }
+        let result = try files.read(at: sleepGuardThresholdURL, maximumBytes: 3)
+        guard let threshold = SleepGuardThreshold(storedData: result.contents.data) else {
+            throw SpikeStoreError.invalidSleepGuardThreshold
+        }
+        return threshold
     }
 
     public func createCaptureProfileID() throws -> ProfileID {
@@ -273,6 +291,10 @@ public struct SpikeStore {
         rootURL.appendingPathComponent("capture-profile-id", isDirectory: false)
     }
 
+    private var sleepGuardThresholdURL: URL {
+        rootURL.appendingPathComponent("sleep-guard-threshold", isDirectory: false)
+    }
+
     private var profileRemovalURL: URL {
         rootURL.appendingPathComponent("profile-removal.json", isDirectory: false)
     }
@@ -358,6 +380,7 @@ public enum SpikeStoreError: Error, Equatable, Sendable {
     case missingJournal
     case invalidJournalUpdate
     case invalidCaptureProfileID
+    case invalidSleepGuardThreshold
     case invalidJournalFinalizationEvidence
 }
 

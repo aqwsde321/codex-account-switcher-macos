@@ -1,24 +1,33 @@
 import Combine
+import CodexSleepGuardCore
 import Foundation
 
 @MainActor
 public final class SleepPreventionViewModel: ObservableObject {
     public typealias ReadEnabled = @Sendable () async throws -> Bool
     public typealias SetEnabled = @Sendable (Bool) async throws -> Void
+    public typealias SaveAutoDisableThreshold =
+        @Sendable (SleepGuardThreshold) async throws -> Void
 
     @Published public private(set) var isEnabled: Bool?
+    @Published public private(set) var autoDisableThreshold: SleepGuardThreshold
     @Published public private(set) var isWorking = false
     @Published public private(set) var errorMessage: String?
 
     private let readEnabled: ReadEnabled
     private let setEnabledOperation: SetEnabled
+    private let saveAutoDisableThreshold: SaveAutoDisableThreshold
 
     public init(
         readEnabled: @escaping ReadEnabled,
-        setEnabled: @escaping SetEnabled
+        setEnabled: @escaping SetEnabled,
+        initialAutoDisableThreshold: SleepGuardThreshold = .defaultValue,
+        saveAutoDisableThreshold: @escaping SaveAutoDisableThreshold = { _ in }
     ) {
         self.readEnabled = readEnabled
         setEnabledOperation = setEnabled
+        autoDisableThreshold = initialAutoDisableThreshold
+        self.saveAutoDisableThreshold = saveAutoDisableThreshold
     }
 
     public func load() async {
@@ -55,18 +64,21 @@ public final class SleepPreventionViewModel: ObservableObject {
         }
     }
 
-    public nonisolated static func parsePMSetOutput(_ output: String) -> Bool? {
-        for line in output.split(whereSeparator: \.isNewline) {
-            let fields = line.split(whereSeparator: \.isWhitespace)
-            guard fields.count >= 2,
-                  fields[0].lowercased() == "sleepdisabled" else {
-                continue
-            }
-            if fields[1] == "1" { return true }
-            if fields[1] == "0" { return false }
-            return nil
+    public func setAutoDisableThreshold(_ threshold: SleepGuardThreshold) async {
+        guard !isWorking, autoDisableThreshold != threshold else { return }
+        isWorking = true
+        defer { isWorking = false }
+        do {
+            try await saveAutoDisableThreshold(threshold)
+            autoDisableThreshold = threshold
+            errorMessage = nil
+        } catch {
+            errorMessage = "배터리 자동 해제 설정을 저장하지 못했습니다."
         }
-        return nil
+    }
+
+    public nonisolated static func parsePMSetOutput(_ output: String) -> Bool? {
+        SleepGuardPolicy.parsePMSetOutput(output)
     }
 }
 

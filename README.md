@@ -24,7 +24,7 @@ Codex Account Switcher는 macOS용 Codex 데스크톱 앱 계정을 메뉴바에
 - 계정별 plan, 남은 한도, 초기화 시각·카운트다운 표시
 - 비활성 계정 삭제·재등록과 만료 계정 재로그인
 - 전환 실패 시 이전 계정 자동 롤백, 복구 실패 시 수동 복구
-- Mac 덮개를 닫아도 작업을 유지하는 잠자기 방지
+- Mac 덮개를 닫아도 작업을 유지하는 잠자기 방지와 배터리 임계값 자동 해제
 
 계정별 task·history·설정은 분리하지 않고 하나의 `~/.codex`를 공유한다.
 
@@ -42,7 +42,7 @@ Codex Account Switcher는 macOS용 Codex 데스크톱 앱 계정을 메뉴바에
 (set -o pipefail && curl -fsSL https://raw.githubusercontent.com/aqwsde321/codex-account-switcher-macos/v0.1.0/Scripts/install-remote.sh | /bin/zsh)
 ```
 
-고정된 `v0.1.0` 소스를 임시 폴더에 받아 로컬에서 빌드하고 `~/Applications`에 설치한다. `sudo`는 사용하지 않는다. 설치 후 앱을 실행하고 로그인 시 자동 시작한다.
+고정된 `v0.1.0` 소스를 임시 폴더에 받아 로컬에서 빌드하고 `~/Applications`에 설치한다. 배터리 자동 해제용 시스템 서비스 설치 때문에 관리자 암호를 한 번 요청한다. 설치 후 앱과 시스템 서비스가 자동 시작한다.
 
 ## 사용
 
@@ -95,6 +95,10 @@ Codex Account Switcher는 macOS용 Codex 데스크톱 앱 계정을 메뉴바에
 - 남은 시간은 올림한다. 예: `2일 19시간` → `3d`.
 - 자동 조회는 활성 계정 2분, 전체 계정 30분 주기다.
 - `잠자기 방지`는 관리자 인증 후 macOS 시스템 설정을 바꾸며 앱을 종료해도 유지될 수 있다.
+- `배터리 자동 해제` Slider는 `0...99%`를 1% 단위로 선택한다. `0`은 끔이며 기본값은 `30%`다.
+- 전원 어댑터가 분리된 상태에서 배터리가 임계값 이하가 되면 잠자기 방지를 끈다. 다시 켜지는 동작은 자동화하지 않는다.
+- 60초 주기 조회는 사용하지 않는다. macOS 전원 소스 변경 알림과 서비스 시작 시점에만 상태를 확인한다.
+- 자동 해제는 설치된 시스템 서비스가 실행하므로 매번 관리자 암호를 묻지 않는다.
 
 ### 계정 삭제
 
@@ -106,12 +110,13 @@ Codex Account Switcher는 macOS용 Codex 데스크톱 앱 계정을 메뉴바에
 (set -o pipefail && curl -fsSL https://raw.githubusercontent.com/aqwsde321/codex-account-switcher-macos/v0.1.0/Scripts/install-remote.sh | /bin/zsh -s -- --uninstall)
 ```
 
-앱과 자동 시작 항목만 제거한다. 저장 계정, 로그, 잠자기 방지 설정은 보존한다.
+앱, 자동 시작 항목, 배터리 자동 해제 시스템 서비스를 제거한다. 시스템 서비스 제거 때문에 관리자 암호를 요청할 수 있다. 저장 계정, 로그, 현재 잠자기 방지 설정은 보존한다.
 
 ## 데이터와 제한
 
 - 계정 목록: `~/Library/Application Support/CodexAccountSwitcher/profiles.json`
 - 계정별 인증: `~/Library/Application Support/CodexAccountSwitcher/credentials/`
+- 배터리 자동 해제 기준: `~/Library/Application Support/CodexAccountSwitcher/sleep-guard-threshold`
 - 현재 활성 인증: `~/.codex/auth.json`
 - 저장 인증은 Keychain 암호화가 아니며 같은 macOS 사용자 권한의 다른 프로세스가 읽을 수 있다.
 - 실제 인증값은 저장소, 로그, screenshot에 포함하지 않는다.

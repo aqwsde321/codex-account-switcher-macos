@@ -13,11 +13,14 @@ let package = Package(
         .library(name: "CodexAccountCore", targets: ["CodexAccountCore"]),
         .executable(name: "codex-account-spike", targets: ["CodexAccountSpike"]),
         .executable(name: "CodexAccountMenuBar", targets: ["CodexAccountMenuBar"]),
+        .executable(name: "CodexSleepGuard", targets: ["CodexSleepGuard"]),
         .executable(name: "codex-account-core-tests", targets: ["CodexAccountCoreTests"]),
     ],
     targets: [
+        .target(name: "CodexSleepGuardCore"),
         .target(
             name: "CodexAccountCore",
+            dependencies: ["CodexSleepGuardCore"],
             swiftSettings: faultInjectionSettings
         ),
         .executableTarget(
@@ -27,15 +30,28 @@ let package = Package(
         ),
         .target(
             name: "CodexAccountMenuBarModel",
-            dependencies: ["CodexAccountCore"]
+            dependencies: ["CodexAccountCore", "CodexSleepGuardCore"]
         ),
         .executableTarget(
             name: "CodexAccountMenuBar",
-            dependencies: ["CodexAccountCore", "CodexAccountMenuBarModel"]
+            dependencies: [
+                "CodexAccountCore",
+                "CodexAccountMenuBarModel",
+                "CodexSleepGuardCore",
+            ]
+        ),
+        .executableTarget(
+            name: "CodexSleepGuard",
+            dependencies: ["CodexSleepGuardCore"],
+            linkerSettings: [.linkedFramework("IOKit")]
         ),
         .executableTarget(
             name: "CodexAccountCoreTests",
-            dependencies: ["CodexAccountCore", "CodexAccountMenuBarModel"],
+            dependencies: [
+                "CodexAccountCore",
+                "CodexAccountMenuBarModel",
+                "CodexSleepGuardCore",
+            ],
             path: "Tests/CodexAccountCoreTests",
             swiftSettings: faultInjectionSettings
         ),
