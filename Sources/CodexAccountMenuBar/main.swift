@@ -641,8 +641,15 @@ private struct UsageWindowRow: View {
 }
 
 @MainActor
-private func confirmAppOwnedTermination(count: Int) -> Bool {
+private func accountSwitcherAlert() -> NSAlert {
     let alert = NSAlert()
+    alert.icon = NSApp.applicationIconImage
+    return alert
+}
+
+@MainActor
+private func confirmAppOwnedTermination(count: Int) -> Bool {
+    let alert = accountSwitcherAlert()
     alert.alertStyle = .warning
     alert.messageText = "잔존 앱 프로세스를 종료할까요?"
     alert.informativeText = "정상 종료 뒤에도 ChatGPT 앱 소유 프로세스 \(count)개가 남았습니다. 종료 전 확인한 동일 프로세스에만 SIGTERM을 한 번 보냅니다. 독립 Codex 프로세스는 종료하지 않습니다."
@@ -655,7 +662,7 @@ private func confirmAppOwnedTermination(count: Int) -> Bool {
 
 @MainActor
 private func showAppOwnedTerminationResult(before: [ProcessRecord], remaining: [ProcessRecord]) {
-    let alert = NSAlert()
+    let alert = accountSwitcherAlert()
     alert.alertStyle = remaining.isEmpty ? .informational : .warning
     alert.messageText = remaining.isEmpty ? "잔존 프로세스를 종료했습니다." : "종료하지 못한 프로세스가 남았습니다."
     alert.informativeText = """
@@ -684,7 +691,7 @@ private func processList(_ processes: [ProcessRecord]) -> String {
 
 @MainActor
 private func confirmRegistration(additional: Bool) -> Bool {
-    let alert = NSAlert()
+    let alert = accountSwitcherAlert()
     alert.alertStyle = .warning
     if additional {
         alert.messageText = "새 계정을 등록할까요?"
@@ -703,7 +710,7 @@ private func confirmRegistration(additional: Bool) -> Bool {
 
 @MainActor
 private func confirmAccountSwitch(_ profile: ProfileListItem) -> Bool {
-    let alert = NSAlert()
+    let alert = accountSwitcherAlert()
     alert.alertStyle = .warning
     alert.messageText = "계정을 전환할까요?"
     alert.informativeText = "\(profile.label) 계정으로 전환합니다."
@@ -716,7 +723,7 @@ private func confirmAccountSwitch(_ profile: ProfileListItem) -> Bool {
 
 @MainActor
 private func confirmProfileRelogin(_ profile: ProfileListItem) -> Bool {
-    let alert = NSAlert()
+    let alert = accountSwitcherAlert()
     alert.alertStyle = .warning
     alert.messageText = "\(profile.label) 계정 인증을 갱신할까요?"
     alert.informativeText = "현재 활성 계정은 유지됩니다. 브라우저에서 \(profile.email) 계정으로 로그인하세요. 인증만 갱신하며 자동 전환하지 않습니다."
@@ -729,7 +736,7 @@ private func confirmProfileRelogin(_ profile: ProfileListItem) -> Bool {
 
 @MainActor
 private func confirmProfileRemoval(_ profile: ProfileListItem) -> Bool {
-    let alert = NSAlert()
+    let alert = accountSwitcherAlert()
     alert.alertStyle = .warning
     alert.messageText = "\(profile.label) 계정을 삭제할까요?"
     alert.informativeText = "이 앱에 저장된 계정 정보와 로컬 JSON 자격증명만 삭제합니다. OpenAI 계정은 삭제되지 않고 현재 Codex 로그인도 바뀌지 않습니다. 나중에 같은 계정으로 로그인해 다시 등록할 수 있습니다."
@@ -743,7 +750,7 @@ private func confirmProfileRemoval(_ profile: ProfileListItem) -> Bool {
 
 @MainActor
 private func confirmRecovery(_ confirmation: MenuBarViewModel.RecoveryConfirmation) -> Bool {
-    let alert = NSAlert()
+    let alert = accountSwitcherAlert()
     alert.alertStyle = .warning
     alert.messageText = "\(confirmation.profile.label) 계정을 복구할까요?"
     alert.informativeText = "공식 앱을 정상 종료하고 저장된 이전 인증으로 복구합니다. 독립 Codex CLI와 IDE 작업은 먼저 직접 종료하세요."
@@ -757,7 +764,7 @@ private func confirmRecovery(_ confirmation: MenuBarViewModel.RecoveryConfirmati
 
 @MainActor
 private func showRegistrationError(_ message: String) {
-    let alert = NSAlert()
+    let alert = accountSwitcherAlert()
     alert.alertStyle = .warning
     alert.messageText = "계정 등록 문제"
     alert.informativeText = message
