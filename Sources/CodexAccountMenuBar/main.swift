@@ -227,6 +227,12 @@ struct CodexAccountMenuBarApp: App {
 private final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        if let url = Bundle.main.url(
+            forResource: "CodexAccountSwitcher",
+            withExtension: "png"
+        ), let icon = NSImage(contentsOf: url) {
+            NSApp.applicationIconImage = icon
+        }
     }
 }
 

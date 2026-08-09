@@ -11,10 +11,10 @@ Codex Account Switcher는 macOS용 Codex 데스크톱 앱 계정을 메뉴바에
 <p align="center"><sub>메뉴를 열지 않고 활성 계정의 최소 잔여 한도와 초기화까지 남은 시간을 확인한다. 커피 배지는 잠자기 방지 활성 상태다.</sub></p>
 
 <p align="center">
-  <img src="docs/assets/account-switcher-overview.png" width="380" alt="가상 계정 세 개의 사용 한도와 잠자기 방지 토글을 보여주는 Codex Account Switcher 메뉴">
+  <img src="docs/assets/account-switch-confirmation.png" width="760" alt="개인정보를 제거한 메뉴바 상태, 계정 전환 확인창, 계정별 사용 한도 메뉴 예시">
 </p>
 
-<p align="center"><sub>가상 데이터 예시다. 현재 앱은 초기화 시각 뒤에 남은 시간도 표시한다.</sub></p>
+<p align="center"><sub>가상 데이터 예시: 메뉴바 상태 확인 → 대상 계정 선택 → 전환 승인.</sub></p>
 
 ## 기능
 
@@ -87,7 +87,7 @@ Codex Account Switcher는 macOS용 Codex 데스크톱 앱 계정을 메뉴바에
 
 독립 Codex CLI나 IDE 작업이 실행 중이면 인증 보호를 위해 전환을 차단한다. 해당 작업을 직접 종료한 뒤 다시 시도한다.
 
-공식 앱 프로세스가 정상 종료 후에도 남은 예외 상황에서만 별도 `SIGTERM 전송` 승인을 요청한다. 자동 강제 종료는 하지 않는다.
+정상 종료 요청 후 약 1초가 지나도 종료 전에 확인한 동일 공식 앱 프로세스가 남은 경우에만 `SIGTERM 전송` 승인을 요청한다. 독립 CLI·IDE 프로세스는 종료하지 않고 전환을 차단한다.
 
 ### 한도와 잠자기 방지
 
