@@ -1,9 +1,11 @@
 # Codex Account Switcher for macOS
 
-Codex Account Switcher는 개인·회사 Codex 계정 전환과 계정별 사용 한도 조회를 제공하는 macOS 메뉴바 앱이다.
+Codex Account Switcher는 macOS용 Codex 데스크톱 앱 계정을 메뉴바에서 전환하고 계정별 사용 한도를 보여준다. 전환 결과는 같은 `~/.codex` 인증을 사용하는 Codex CLI에도 적용된다.
+
+**계정 전환을 한 번 승인하면 Codex 앱 정상 종료 → 인증 교체 → 대상 검증 → 앱 재실행을 자동 처리한다.** 실행 중인 CLI·IDE 작업은 인증 보호를 위해 전환 전에 종료해야 한다.
 
 <p align="center">
-  <img src="docs/assets/menu-bar-status.png" width="222" alt="활성 계정 한도 100%, 초기화까지 7일, 잠자기 방지 상태를 표시하는 메뉴바 아이콘">
+  <img src="docs/assets/menu-bar-status.png" width="206" alt="활성 계정 한도 97%, 초기화까지 7일, 잠자기 방지 상태를 표시하는 메뉴바 아이콘">
 </p>
 
 <p align="center"><sub>메뉴를 열지 않고 활성 계정의 최소 잔여 한도와 초기화까지 남은 시간을 확인한다. 커피 배지는 잠자기 방지 활성 상태다.</sub></p>
@@ -17,7 +19,8 @@ Codex Account Switcher는 개인·회사 Codex 계정 전환과 계정별 사용
 ## 기능
 
 - 최대 3개 ChatGPT 계정 등록·전환
-- 공식 Codex 정상 종료 → 인증 교체 → 대상 검증 → 재실행 자동 처리
+- Codex 데스크톱 앱 정상 종료 → 인증 교체 → 대상 검증 → 재실행 자동 처리
+- 같은 `~/.codex` 인증을 사용하는 Codex CLI에도 전환 결과 적용
 - 계정별 plan, 남은 한도, 초기화 시각·카운트다운 표시
 - 비활성 계정 삭제·재등록과 만료 계정 재로그인
 - 전환 실패 시 이전 계정 자동 롤백, 복구 실패 시 수동 복구
@@ -73,10 +76,10 @@ Codex Account Switcher는 개인·회사 Codex 계정 전환과 계정별 사용
 ### 계정 전환
 
 <p align="center">
-  <img src="docs/assets/account-switch-demo.gif" width="380" alt="계정 선택, 전환 승인, 자동 검증, 활성 계정 변경 과정을 보여주는 GIF">
+  <img src="docs/assets/account-switch-demo.gif" width="380" alt="계정 선택, 전환 승인, Codex 앱 정상 종료, 인증 교체와 검증, 앱 자동 재실행, 활성 계정 변경 과정을 보여주는 GIF">
 </p>
 
-<p align="center"><sub>가상 데이터 GIF: 대상 선택 → 한 번 승인 → 자동 검증 → 활성 계정 변경.</sub></p>
+<p align="center"><sub>가상 데이터 GIF: 대상 선택 → 한 번 승인 → Codex 정상 종료 → 인증 교체·대상 검증 → 앱 자동 재실행 → 활성 계정 변경.</sub></p>
 
 1. 전환할 계정 카드를 선택한다.
 2. 확인창에서 `전환`을 한 번 승인한다.
