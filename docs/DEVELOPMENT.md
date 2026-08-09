@@ -28,6 +28,7 @@ cd codex-account-switcher-macos
 | `Sources/CodexAccountSpike` | 진단·복구 CLI |
 | `Tests/CodexAccountCoreTests` | fake credential 기반 자동 테스트 |
 | `Scripts` | 빌드, 설치, 제거, 원격 bootstrap |
+| `CHANGELOG.md` | 배포 버전별 사용자 영향 변경 |
 
 UI는 전환 로직을 구현하지 않고 `CodexAccountCore`의 typed API를 호출한다.
 
@@ -82,6 +83,13 @@ UI는 전환 로직을 구현하지 않고 `CodexAccountCore`의 typed API를 �
 
 root LaunchDaemon을 설치·갱신·제거할 때만 관리자 인증을 요청한다. helper와 plist가 동일한 앱-only 갱신, 임계값 변경, 자동 해제에는 요청하지 않는다.
 
+## 버전 관리
+
+- 앱 표시 버전과 빌드 번호는 `Scripts/CodexAccountSwitcher-Info.plist`의 `CFBundleShortVersionString`, `CFBundleVersion`이 기준이다.
+- 배포 소스는 같은 버전의 `vX.Y.Z` Git 태그로 고정한다.
+- 사용자 영향 변경은 `CHANGELOG.md`의 `배포 예정`에 먼저 기록한다.
+- 릴리스할 때 `배포 예정`을 버전·날짜로 바꾸고 plist, README 설치 URL, Git 태그를 같은 버전으로 맞춘다.
+
 ## 검증 상태
 
 자동 검증:
@@ -110,9 +118,9 @@ root LaunchDaemon을 설치·갱신·제거할 때만 관리자 인증을 요청
 
 ## 공개 릴리스
 
-1. 저장소 이름과 공개 URL을 확정한다.
-2. LICENSE를 추가한다.
-3. README와 `Scripts/install-remote.sh`의 저장소 경로를 맞춘다.
+1. `CHANGELOG.md`의 `배포 예정`을 릴리스 버전과 날짜로 확정한다.
+2. plist 버전·빌드 번호, README 설치 URL, Git 태그를 같은 버전으로 맞춘다.
+3. LICENSE, 저장소 이름, 공개 URL, `Scripts/install-remote.sh` 경로를 확인한다.
 4. 다음 검증을 통과한다.
 
 ```sh
@@ -122,7 +130,7 @@ root LaunchDaemon을 설치·갱신·제거할 때만 관리자 인증을 요청
 git diff --check
 ```
 
-5. `v0.1.0` 태그를 만들고 GitHub에 푸시한다.
+5. 버전 태그를 만들고 GitHub에 푸시한다.
 6. README 설치·제거 명령을 빈 환경에서 다시 확인한다.
 
-`v0.1.0` 태그가 공개되기 전 README의 원격 설치 명령은 동작하지 않는다.
+README 설치 URL에 적힌 버전 태그가 공개되기 전에는 원격 설치 명령이 동작하지 않는다.

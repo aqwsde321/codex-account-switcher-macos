@@ -5,10 +5,10 @@ Codex Account Switcher는 macOS용 Codex 데스크톱 앱 계정을 메뉴바에
 **계정 전환을 한 번 승인하면 Codex 앱 정상 종료 → 인증 교체 → 대상 검증 → 앱 재실행을 자동 처리한다.** 실행 중인 CLI·IDE 작업은 인증 보호를 위해 전환 전에 종료해야 한다.
 
 <p align="center">
-  <img src="docs/assets/menu-bar-status.png" width="206" alt="활성 계정 한도 97%, 초기화까지 7일, 잠자기 방지 상태를 표시하는 메뉴바 아이콘">
+  <img src="docs/assets/menu-bar-status.png" width="206" alt="김이 나는 채운 커피잔, 활성 계정 한도 97%, 초기화까지 7일을 표시하는 메뉴바 상태">
 </p>
 
-<p align="center"><sub>메뉴를 열지 않고 활성 계정의 최소 잔여 한도와 초기화까지 남은 시간을 확인한다. 커피 배지는 잠자기 방지 활성 상태다.</sub></p>
+<p align="center"><sub>가상 상태 예시. 잠자기 방지가 켜지면 채운 커피잔 위로 김 세 줄이 오르고, 꺼지면 빈 커피잔을 표시한다.</sub></p>
 
 <p align="center">
   <img src="docs/assets/account-switch-confirmation.png" width="760" alt="개인정보를 제거한 메뉴바 상태, 계정 전환 확인창, 계정별 사용 한도 메뉴 예시">
@@ -95,6 +95,7 @@ Codex Account Switcher는 macOS용 Codex 데스크톱 앱 계정을 메뉴바에
 - 남은 시간은 올림한다. 예: `2일 19시간` → `3d`.
 - 자동 조회는 활성 계정 2분, 전체 계정 30분 주기다.
 - `잠자기 방지`는 관리자 인증 후 macOS 시스템 설정을 바꾸며 앱을 종료해도 유지될 수 있다.
+- 메뉴바와 설정 행의 커피잔은 잠자기 방지 OFF일 때 윤곽선, ON일 때 채움과 아래에서 위로 선명해지는 김 세 줄로 표시한다. macOS `동작 줄이기`가 켜져 있으면 정지한다.
 - `배터리 자동 해제` Slider는 `0...99%`를 1% 단위로 선택한다. `0`은 끔이며 기본값은 `30%`다.
 - 전원 어댑터가 분리된 상태에서 배터리가 임계값 이하가 되면 잠자기 방지를 끈다. 다시 켜지는 동작은 자동화하지 않는다.
 - 60초 주기 조회는 사용하지 않는다. macOS 전원 소스 변경 알림과 서비스 시작 시점에만 상태를 확인한다.
@@ -121,7 +122,7 @@ Codex Account Switcher는 macOS용 Codex 데스크톱 앱 계정을 메뉴바에
 - 저장 인증은 Keychain 암호화가 아니며 같은 macOS 사용자 권한의 다른 프로세스가 읽을 수 있다.
 - 실제 인증값은 저장소, 로그, screenshot에 포함하지 않는다.
 
-자세한 내용은 [보안 문서](docs/SECURITY.md)를 따른다.
+자세한 변경 내용은 [변경 이력](CHANGELOG.md), 보안 제약은 [보안 문서](docs/SECURITY.md)를 따른다.
 
 <details>
 <summary>개발자용 문서</summary>

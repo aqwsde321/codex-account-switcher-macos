@@ -12,8 +12,13 @@ struct CodexAccountMenuBarApp: App {
     @StateObject private var model: MenuBarViewModel
     @StateObject private var sleepPrevention: SleepPreventionViewModel
     @State private var menuBarNow = Date.now
+    @State private var steamFrame = 0
+    private let menuBarSteamFrames: [NSImage]
+
+    private static let steamFrameCount = 15
 
     init() {
+        menuBarSteamFrames = Self.makeMenuBarSteamFrames()
         let home = FileManager.default.homeDirectoryForCurrentUser
         let storeURL = home
             .appendingPathComponent("Library/Application Support", isDirectory: true)
@@ -108,15 +113,27 @@ struct CodexAccountMenuBarApp: App {
 
     var body: some Scene {
         MenuBarExtra {
-            AccountMenuView(model: model, sleepPrevention: sleepPrevention, now: menuBarNow)
+            AccountMenuView(
+                model: model,
+                sleepPrevention: sleepPrevention,
+                now: menuBarNow,
+                steamProgress: steamProgress
+            )
         } label: {
             HStack(spacing: 4) {
-                Image(
-                    nsImage: usageStatusImage(
-                        model.activeRemainingPercent,
-                        sleepPreventionEnabled: sleepPrevention.isEnabled == true
-                    )
-                )
+                Group {
+                    if steamAnimationIsActive,
+                       menuBarSteamFrames.count == Self.steamFrameCount {
+                        Image(nsImage: menuBarSteamFrames[steamFrame])
+                    } else {
+                        SleepPreventionStatusIcon(
+                            isEnabled: sleepPrevention.isEnabled == true,
+                            reduceMotion: reduceMotion,
+                            steamProgress: steamProgress
+                        )
+                    }
+                }
+                    .frame(width: 23, height: 22)
                     .scaleEffect(model.isAutomaticallyRefreshing && !reduceMotion ? 1.06 : 1)
                     .opacity(model.isAutomaticallyRefreshing ? 0.55 : 1)
                     .animation(refreshAnimation, value: model.isAutomaticallyRefreshing)
@@ -150,6 +167,18 @@ struct CodexAccountMenuBarApp: App {
                     }
                 }
             }
+            .task(id: steamAnimationIsActive) {
+                steamFrame = 0
+                guard steamAnimationIsActive else { return }
+                while !Task.isCancelled {
+                    do {
+                        try await Task.sleep(for: .milliseconds(120))
+                    } catch {
+                        return
+                    }
+                    steamFrame = (steamFrame + 1) % Self.steamFrameCount
+                }
+            }
         }
         .menuBarExtraStyle(.window)
     }
@@ -174,58 +203,29 @@ struct CodexAccountMenuBarApp: App {
         return usage + (sleepPrevention.isEnabled == true ? ", 잠자기 방지 켜짐" : "")
     }
 
-    private func usageStatusImage(
-        _ remainingPercent: Int?,
-        sleepPreventionEnabled: Bool
-    ) -> NSImage {
-        let size = NSSize(width: sleepPreventionEnabled ? 24 : 17, height: 17)
-        let image = NSImage(size: size, flipped: false) { rect in
-            let ringRect = NSRect(x: 0, y: 0, width: 17, height: 17)
-            let circleRect = ringRect.insetBy(dx: 1.25, dy: 1.25)
-            let track = NSBezierPath(ovalIn: circleRect)
-            track.lineWidth = 1.5
-            NSColor.black.withAlphaComponent(0.22).setStroke()
-            track.stroke()
+    private var steamAnimationIsActive: Bool {
+        sleepPrevention.isEnabled == true && !reduceMotion
+    }
 
-            if let remainingPercent, remainingPercent > 0 {
-                let arc = NSBezierPath()
-                arc.appendArc(
-                    withCenter: NSPoint(x: ringRect.midX, y: ringRect.midY),
-                    radius: circleRect.width / 2,
-                    startAngle: 90,
-                    endAngle: 90 - 360 * CGFloat(remainingPercent) / 100,
-                    clockwise: true
+    private var steamProgress: CGFloat {
+        CGFloat(steamFrame) / CGFloat(Self.steamFrameCount - 1)
+    }
+
+    private static func makeMenuBarSteamFrames() -> [NSImage] {
+        (0..<steamFrameCount).compactMap { frame in
+            let renderer = ImageRenderer(
+                content: SleepPreventionStatusIcon(
+                    isEnabled: true,
+                    reduceMotion: false,
+                    steamProgress: CGFloat(frame) / CGFloat(steamFrameCount - 1)
                 )
-                arc.lineWidth = 1.5
-                arc.lineCapStyle = .round
-                NSColor.black.setStroke()
-                arc.stroke()
-            }
-
-            let attributes: [NSAttributedString.Key: Any] = [
-                .font: NSFont.systemFont(ofSize: 8, weight: .bold),
-                .foregroundColor: NSColor.black,
-            ]
-            let label = "C" as NSString
-            let labelSize = label.size(withAttributes: attributes)
-            label.draw(
-                at: NSPoint(
-                    x: ringRect.midX - labelSize.width / 2,
-                    y: ringRect.midY - labelSize.height / 2
-                ),
-                withAttributes: attributes
+                .foregroundStyle(.black)
             )
-            if sleepPreventionEnabled,
-               let badge = NSImage(
-                   systemSymbolName: "cup.and.saucer.fill",
-                   accessibilityDescription: nil
-               ) {
-                badge.draw(in: NSRect(x: 14, y: 9, width: 10, height: 8))
-            }
-            return true
+            renderer.scale = 2
+            guard let image = renderer.nsImage else { return nil }
+            image.isTemplate = true
+            return image
         }
-        image.isTemplate = true
-        return image
     }
 
     private var refreshAnimation: Animation? {
@@ -233,6 +233,56 @@ struct CodexAccountMenuBarApp: App {
         return model.isAutomaticallyRefreshing
             ? .easeInOut(duration: 0.7).repeatForever(autoreverses: true)
             : .easeOut(duration: 0.2)
+    }
+}
+
+private struct SleepPreventionStatusIcon: View {
+    let isEnabled: Bool
+    let reduceMotion: Bool
+    let steamProgress: CGFloat
+
+    var body: some View {
+        ZStack {
+            if isEnabled, !reduceMotion {
+                Image(systemName: "cup.and.heat.waves.fill")
+                    .font(.system(size: 18, weight: .medium))
+                    .mask(alignment: .bottom) {
+                        Rectangle().frame(height: 14)
+                    }
+                ZStack {
+                    Image(systemName: "cup.and.heat.waves.fill")
+                        .font(.system(size: 18, weight: .medium))
+                        .mask(alignment: .top) {
+                            Rectangle().frame(height: 8)
+                        }
+                        .opacity(0.28)
+                    Image(systemName: "cup.and.heat.waves.fill")
+                        .font(.system(size: 18, weight: .medium))
+                        .mask(alignment: .top) {
+                            Rectangle().frame(height: 8)
+                        }
+                        .mask(alignment: .top) {
+                            LinearGradient(
+                                stops: [
+                                    .init(color: .clear, location: 0),
+                                    .init(color: .white, location: 0.25),
+                                    .init(color: .white, location: 0.75),
+                                    .init(color: .clear, location: 1),
+                                ],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                            .frame(height: 4)
+                            .offset(y: 7 - (9 * steamProgress))
+                        }
+                }
+                .offset(y: 1.5 - (3 * steamProgress))
+            } else {
+                Image(systemName: isEnabled ? "cup.and.heat.waves.fill" : "cup.and.saucer")
+                    .font(.system(size: 18, weight: .medium))
+            }
+        }
+        .frame(width: 23, height: 22)
     }
 }
 
@@ -302,6 +352,8 @@ private struct AccountMenuView: View {
     @ObservedObject var model: MenuBarViewModel
     @ObservedObject var sleepPrevention: SleepPreventionViewModel
     let now: Date
+    let steamProgress: CGFloat
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isRegistering = false
     @State private var registrationLabel = ""
     @State private var sleepGuardThresholdDraft =
@@ -478,7 +530,15 @@ private struct AccountMenuView: View {
 
             Divider()
             HStack {
-                Label("잠자기 방지", systemImage: "cup.and.saucer")
+                HStack(spacing: 8) {
+                    SleepPreventionStatusIcon(
+                        isEnabled: sleepPrevention.isEnabled == true,
+                        reduceMotion: reduceMotion,
+                        steamProgress: steamProgress
+                    )
+                        .accessibilityHidden(true)
+                    Text("잠자기 방지")
+                }
                 Spacer()
                 if sleepPrevention.isWorking {
                     ProgressView()
