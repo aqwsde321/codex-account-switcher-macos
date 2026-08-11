@@ -4,7 +4,7 @@ set -eu
 project_dir=${0:A:h:h}
 work_dir=$(mktemp -d "${TMPDIR:-/tmp}/codex-account-switcher-test.XXXXXX")
 trap 'rm -rf -- "$work_dir"' EXIT HUP INT TERM
-fixture_dir="$work_dir/codex-account-switcher-macos-v0.1.0"
+fixture_dir="$work_dir/codex-account-switcher-macos-v0.2.0"
 archive_path="$work_dir/source.tar.gz"
 marker_path="$work_dir/action"
 bootstrap_url="file://$project_dir/Scripts/install-remote.sh"
