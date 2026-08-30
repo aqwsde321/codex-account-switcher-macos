@@ -1,6 +1,6 @@
 # 보안
 
-- 기준일: 2026-08-09
+- 기준일: 2026-08-30
 - 적용 대상: Codex Account Switcher 메뉴바 앱과 진단 CLI
 
 ## 보호 범위
@@ -25,6 +25,7 @@
 |---|---|---|
 | 프로필 목록·active ID | `~/Library/Application Support/CodexAccountSwitcher/profiles.json` | `0600` |
 | 계정별 credential | `~/Library/Application Support/CodexAccountSwitcher/credentials/<UUID>.json` | `0600` |
+| 토큰 사용용 격리 workspace | `~/Library/Application Support/CodexAccountSwitcher/token-use-home/` | 디렉터리 `0700`, auth 파일 `0600` |
 | 배터리 자동 해제 기준 | `~/Library/Application Support/CodexAccountSwitcher/sleep-guard-threshold` | `0600` |
 | 현재 활성 인증 | `~/.codex/auth.json` | `0600` |
 | 상위 private 디렉터리 | `~/Library/Application Support/CodexAccountSwitcher/` | `0700` |
@@ -40,6 +41,14 @@
 - 현재·대상 계정 이메일이 등록 프로필과 완전히 일치할 때만 저장·커밋한다.
 - 사용량 수치는 계정 식별이나 전환 성공 판정에 사용하지 않는다.
 - 상태가 모순되거나 파일 내구성을 확인할 수 없으면 추측하지 않고 중단한다.
+
+## 수동·자동 토큰 사용
+
+- `⚡` 실행은 대상 계정 credential의 probe 사본만 `token-use-home/auth.json`에 기록하고, refresh token은 사본에서 비활성화한다.
+- 실행 프로세스의 `CODEX_HOME`은 `token-use-home`으로 지정한다. 공유 `~/.codex/auth.json`과 활성 계정은 변경하지 않는다.
+- `codex exec`에는 `OK`만 요청하고, 출력이 정확히 `OK`일 때만 성공으로 처리한다. 읽은 마지막 메시지 파일은 제거한다.
+- 자동 실행은 계정별 사용량 조회의 `resetsAt` 변경과 변경된 창의 잔여율 `100%`를 함께 확인한 뒤 순차 실행한다. 조회 실패나 토큰 실행 실패를 성공으로 기록하지 않는다.
+- `token-use-home`은 계정 관리 경로 아래 유지된다. 앱 제거 시 저장 계정·로그와 함께 자동 삭제하지 않으므로, 필요하면 사용자가 별도로 정리해야 한다.
 
 ## 프로세스 검사
 

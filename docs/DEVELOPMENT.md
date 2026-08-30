@@ -1,7 +1,7 @@
 # 개발
 
-- 기준일: 2026-08-09
-- 상태: 메뉴바 앱과 로컬 설치 구현 완료, 공개 릴리스 준비 중
+- 기준일: 2026-08-30
+- 상태: 메뉴바 앱, 수동·자동 토큰 사용, 로컬 설치 구현 완료, 공개 릴리스 준비 중
 
 ## 개발 환경 시작
 
@@ -21,7 +21,7 @@ cd codex-account-switcher-macos
 | 경로 | 역할 |
 |---|---|
 | `Sources/CodexAccountCore` | 인증 저장, 프로세스 검사, 전환·롤백·복구 |
-| `Sources/CodexAccountMenuBarModel` | 메뉴 상태와 사용량·카운트다운 계산 |
+| `Sources/CodexAccountMenuBarModel` | 메뉴 상태, 사용량·카운트다운, 자동 토큰 실행 |
 | `Sources/CodexAccountMenuBar` | SwiftUI `MenuBarExtra` UI |
 | `Sources/CodexSleepGuardCore` | 배터리 임계값·`pmset` 상태 판정 |
 | `Sources/CodexSleepGuard` | IOKit 이벤트 기반 root 자동 해제 서비스 |
@@ -31,6 +31,16 @@ cd codex-account-switcher-macos
 | `CHANGELOG.md` | 배포 버전별 사용자 영향 변경 |
 
 UI는 전환 로직을 구현하지 않고 `CodexAccountCore`의 typed API를 호출한다.
+
+## 사용량·자동 토큰 흐름
+
+1. 자동 조회는 활성 계정을 2분마다, 전체 계정을 30분마다 조회한다.
+2. 계정별 사용량 캐시의 각 창에서 `resetsAt`을 기록하고 다음 조회의 서버값과 비교한다. 첫 조회는 기준값만 만든다.
+3. 이전 값과 현재 값이 달라진 창의 남은 사용량이 `100%`인 경우에만 해당 계정을 자동 토큰 사용 대상으로 삼는다.
+4. 대상 계정은 한 번에 하나씩 `useToken(profileID:)`를 실행한다. 각 실행 뒤 해당 계정 사용량을 다시 조회해 새 `resetsAt`을 반영한다.
+5. 실행 실패 계정은 다음 자동 조회에서 재시도한다. 자동 토큰 사용은 메뉴에서 기본 OFF이며, 수동 전체 새로고침은 자동 토큰 실행을 시작하지 않는다.
+
+토큰 사용은 계정 credential의 probe 사본을 관리 경로 아래 `token-use-home`에 놓고 그 경로를 `CODEX_HOME`으로 지정한다. 공유 `~/.codex`의 대화·task·history·설정은 변경하지 않는다.
 
 ## 전환 흐름
 
@@ -94,7 +104,8 @@ root LaunchDaemon을 설치·갱신·제거할 때만 관리자 인증을 요청
 
 자동 검증:
 
-- Swift 183개 테스트
+- Swift 186개 테스트
+- `resetsAt` 변경·100% 조건·계정별 순차 자동 토큰 사용 테스트
 - 원격 install·uninstall 분기와 잘못된 인자 거부
 - 배터리 임계값·전원 상태·`pmset` 출력 정책 테스트
 - release 앱과 자동 해제 서비스 빌드, plist lint, strict ad-hoc codesign

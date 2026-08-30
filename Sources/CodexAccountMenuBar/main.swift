@@ -55,6 +55,9 @@ struct CodexAccountMenuBarApp: App {
                 loadRecoveryStatus: {
                     try await provider.recoveryStatus()
                 },
+                useToken: { profileID in
+                    try await provider.useToken(profileID: profileID)
+                },
                 captureProfile: {
                     try await provider.captureProfile(label: $0)
                 },
@@ -184,11 +187,10 @@ struct CodexAccountMenuBarApp: App {
     }
 
     private var activeResetCountdown: String? {
-        let resetCountdown = MenuBarViewModel.resetCountdownLabel(
+        MenuBarViewModel.resetCountdownLabel(
             resetAt: model.activeResetAt,
             now: menuBarNow
         )
-        return resetCountdown
     }
 
     private var statusAccessibilityLabel: String {
@@ -385,7 +387,7 @@ private struct AccountMenuView: View {
                     .foregroundStyle(.secondary)
             } else {
                 ForEach(model.profiles, id: \.id) { profile in
-                    HStack(spacing: 8) {
+                    ZStack(alignment: .topTrailing) {
                         Button {
                             Task {
                                 await model.select(profile)
@@ -415,27 +417,69 @@ private struct AccountMenuView: View {
                         .buttonStyle(.plain)
                         .frame(maxWidth: .infinity)
 
-                        if !profile.active {
-                            Button(role: .destructive) {
-                                model.requestRemoval(profile)
-                                guard let confirmation = model.pendingRemovalProfile else { return }
-                                guard confirmProfileRemoval(confirmation) else {
-                                    model.cancelRemoval()
-                                    return
-                                }
-                                Task { await model.confirmRemoval(confirmation) }
+                        HStack(spacing: 2) {
+                            Button {
+                                Task { await model.useToken(for: profile) }
                             } label: {
-                                Image(systemName: "trash")
-                                    .frame(width: 28, height: 28)
+                                if model.tokenUsingProfileID == profile.id {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                        .frame(width: 28, height: 28)
+                                } else {
+                                    Image(systemName: "bolt.fill")
+                                        .frame(width: 28, height: 28)
+                                }
                             }
                             .buttonStyle(.plain)
-                            .foregroundStyle(.red)
-                            .help("\(profile.label) 계정 삭제")
-                            .accessibilityLabel("\(profile.label) 계정 삭제")
+                            .foregroundStyle(Color.accentColor)
+                            .disabled(!model.canUseToken(for: profile))
+                            .help("\(profile.label) 계정 토큰 사용")
+                            .accessibilityLabel("\(profile.label) 계정 토큰 사용")
+
+                            if !profile.active {
+                                Button(role: .destructive) {
+                                    model.requestRemoval(profile)
+                                    guard let confirmation = model.pendingRemovalProfile else { return }
+                                    guard confirmProfileRemoval(confirmation) else {
+                                        model.cancelRemoval()
+                                        return
+                                    }
+                                    Task { await model.confirmRemoval(confirmation) }
+                                } label: {
+                                    Image(systemName: "trash")
+                                        .frame(width: 28, height: 28)
+                                }
+                                .buttonStyle(.plain)
+                                .foregroundStyle(.red)
+                                .help("\(profile.label) 계정 삭제")
+                                .accessibilityLabel("\(profile.label) 계정 삭제")
+                            }
                         }
+                        .padding(.top, 6)
+                        .padding(.trailing, 6)
                     }
+                    .background(
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(
+                                profile.active
+                                    ? Color.accentColor.opacity(0.12)
+                                    : Color.secondary.opacity(0.08)
+                            )
+                    )
                     .disabled(model.isWorking || model.recoveryRequired)
                 }
+            }
+
+            if model.canUseAutomaticTokenUse {
+                HStack {
+                    Label("자동 토큰 사용", systemImage: "bolt.fill")
+                    Spacer()
+                    Toggle("자동 토큰 사용", isOn: automaticTokenUseBinding)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .disabled(model.isWorking)
+                }
+                .help("사용량 조회에서 리셋을 감지하면 남은 한도가 100%인 계정을 순차적으로 사용합니다.")
             }
 
             if let progressMessage = model.switchProgressMessage {
@@ -656,6 +700,13 @@ private struct AccountMenuView: View {
         )
     }
 
+    private var automaticTokenUseBinding: Binding<Bool> {
+        Binding(
+            get: { model.isAutomaticTokenUseEnabled },
+            set: { model.setAutomaticTokenUseEnabled($0) }
+        )
+    }
+
     private var sleepGuardThresholdDraftLabel: String {
         let value = Int(sleepGuardThresholdDraft.rounded())
         return value == 0 ? "끔" : "\(value)%"
@@ -734,6 +785,7 @@ private struct ProfileCard: View {
                         .foregroundStyle(.secondary)
                 }
             }
+            .padding(.trailing, profile.active ? 28 : 58)
 
             if let usage {
                 if usage.windows.isEmpty {
@@ -753,10 +805,6 @@ private struct ProfileCard: View {
             }
         }
         .padding(10)
-        .background(
-            RoundedRectangle(cornerRadius: 8)
-                .fill(profile.active ? Color.accentColor.opacity(0.12) : Color.secondary.opacity(0.08))
-        )
         .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(profile.label), \(profile.email)")

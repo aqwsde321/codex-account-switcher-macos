@@ -175,6 +175,41 @@ func menuBarViewModelTests() -> [TestCase] {
                 "credential changes did not reload usage"
             )
         },
+        TestCase("MenuBarViewModel uses a token for one account and refreshes only that usage") {
+            let profiles = menuBarProfiles()
+            let target = profiles[1]
+            let tokenUses = TokenUseProbe()
+            let usageLoads = ProfileUsageLoadProbe()
+            let provider = MenuBarProviderSpy(profiles: profiles)
+            let model = await makeMenuBarModel(
+                provider: provider,
+                loadProfileUsage: { profileIDs in
+                    await usageLoads.record(profileIDs)
+                    return ProfileUsageReport(usageByProfileID: [:], failedProfileIDs: [])
+                },
+                useToken: { profileID in
+                    await tokenUses.record(profileID)
+                }
+            )
+
+            await model.load()
+            await model.useToken(for: target)
+
+            let usedProfileIDs = await tokenUses.profileIDs
+            let requestedUsage = await usageLoads.profileIDs
+            let state = await MainActor.run {
+                (model.tokenUsingProfileID, model.statusMessage, model.errorMessage)
+            }
+            try expect(usedProfileIDs == [target.id], "token use targeted the wrong account")
+            try expect(
+                requestedUsage == [nil, Set([target.id])],
+                "token use refreshed more than the selected account"
+            )
+            try expect(
+                state.0 == nil && state.1?.contains(target.label) == true && state.2 == nil,
+                "token use did not finish with a selected-account success state"
+            )
+        },
         TestCase("MenuBarViewModel selects the limiting reset and rounds its countdown up") {
             let now = Date(timeIntervalSince1970: 1_000_000)
             let windows = [
@@ -304,6 +339,121 @@ func menuBarViewModelTests() -> [TestCase] {
                 MenuBarViewModel.activeUsageRefreshInterval == .seconds(120)
                     && MenuBarViewModel.inactiveUsageRefreshInterval == 1_800,
                 "automatic refresh intervals changed"
+            )
+        },
+        TestCase("MenuBarViewModel uses full-reset accounts sequentially after automatic detection") {
+            let profiles = menuBarProfiles()
+            let firstID = profiles[0].id
+            let secondID = profiles[1].id
+            let baselineReset = Date(timeIntervalSince1970: 10_000)
+            let firstChangedReset = Date(timeIntervalSince1970: 20_000)
+            let secondChangedReset = Date(timeIntervalSince1970: 30_000)
+            let baseline = ProfileUsageReport(
+                usageByProfileID: [
+                    firstID: AppServerRateLimitsRead(
+                        planType: "pro",
+                        windows: [
+                            AppServerRateLimitWindow(
+                                usedPercent: 20,
+                                windowDurationMinutes: 300,
+                                resetsAt: baselineReset
+                            ),
+                        ]
+                    ),
+                    secondID: AppServerRateLimitsRead(
+                        planType: "team",
+                        windows: [
+                            AppServerRateLimitWindow(
+                                usedPercent: 15,
+                                windowDurationMinutes: 300,
+                                resetsAt: baselineReset
+                            ),
+                        ]
+                    ),
+                ],
+                failedProfileIDs: []
+            )
+            let changed = ProfileUsageReport(
+                usageByProfileID: [
+                    firstID: AppServerRateLimitsRead(
+                        planType: "pro",
+                        windows: [
+                            AppServerRateLimitWindow(
+                                usedPercent: 0,
+                                windowDurationMinutes: 300,
+                                resetsAt: firstChangedReset
+                            ),
+                        ]
+                    ),
+                    secondID: AppServerRateLimitsRead(
+                        planType: "team",
+                        windows: [
+                            AppServerRateLimitWindow(
+                                usedPercent: 0,
+                                windowDurationMinutes: 300,
+                                resetsAt: secondChangedReset
+                            ),
+                        ]
+                    ),
+                ],
+                failedProfileIDs: []
+            )
+            let afterFirst = ProfileUsageReport(
+                usageByProfileID: [
+                    firstID: AppServerRateLimitsRead(
+                        planType: "pro",
+                        windows: [
+                            AppServerRateLimitWindow(
+                                usedPercent: 1,
+                                windowDurationMinutes: 300,
+                                resetsAt: firstChangedReset
+                            ),
+                        ]
+                    ),
+                ],
+                failedProfileIDs: []
+            )
+            let afterSecond = ProfileUsageReport(
+                usageByProfileID: [
+                    secondID: AppServerRateLimitsRead(
+                        planType: "team",
+                        windows: [
+                            AppServerRateLimitWindow(
+                                usedPercent: 1,
+                                windowDurationMinutes: 300,
+                                resetsAt: secondChangedReset
+                            ),
+                        ]
+                    ),
+                ],
+                failedProfileIDs: []
+            )
+            let provider = MenuBarProviderSpy(profiles: profiles)
+            let usageLoads = UsageReportSequence(reports: [baseline, changed, afterFirst, afterSecond])
+            let tokenUses = TokenUseProbe()
+            let model = await makeMenuBarModel(
+                provider: provider,
+                loadProfileUsage: { profileIDs in
+                    await usageLoads.load(profileIDs: profileIDs)
+                },
+                useToken: { profileID in
+                    await tokenUses.record(profileID)
+                },
+                initialAutomaticTokenUseEnabled: true
+            )
+
+            await model.load()
+            await model.refreshUsageAutomatically(now: Date.now.addingTimeInterval(1_801))
+
+            let usedProfileIDs = await tokenUses.profileIDs
+            let usageLoadEvents = await usageLoads.events
+            try expect(
+                usedProfileIDs == [firstID, secondID],
+                "automatic token use did not process full-reset accounts sequentially"
+            )
+            try expect(
+                usageLoadEvents == ["all", "all", "active", "active"],
+                "automatic token use did not refresh each account after execution"
             )
         },
         TestCase("MenuBarViewModel cancels automatic usage before an account action") {
@@ -1664,6 +1814,8 @@ private func makeMenuBarModel(
     provider: MenuBarProviderSpy,
     useInjectedProfileLoad: Bool = false,
     loadProfileUsage: MenuBarViewModel.LoadProfileUsage? = nil,
+    useToken: MenuBarViewModel.UseToken? = nil,
+    initialAutomaticTokenUseEnabled: Bool? = nil,
     captureProfile: MenuBarViewModel.CaptureProfile? = nil,
     removeProfile: MenuBarViewModel.RemoveProfile? = nil,
     retryPendingRecovery: MenuBarViewModel.RetryPendingRecovery? = nil,
@@ -1681,6 +1833,7 @@ private func makeMenuBarModel(
             },
             loadProfileUsage: loadProfileUsage,
             loadRecoveryStatus: { await provider.recoveryStatus() },
+            useToken: useToken,
             captureProfile: captureProfile ?? { try await provider.captureProfile(label: $0) },
             removeProfile: removeProfile ?? { try await provider.removeProfile($0) },
             syncActiveProfile: { try await provider.syncActiveProfile() },
@@ -1692,8 +1845,26 @@ private func makeMenuBarModel(
             restoreRecoveryProfile: {
                 try await provider.restoreRecoveryProfile(target: $0, expectedTransactionID: $1)
             },
-            retryPendingRecovery: retryPendingRecovery
+            retryPendingRecovery: retryPendingRecovery,
+            attemptAutomaticRecovery: {},
+            initialAutomaticTokenUseEnabled: initialAutomaticTokenUseEnabled
         )
+    }
+}
+
+private actor TokenUseProbe {
+    private(set) var profileIDs = [ProfileID]()
+
+    func record(_ profileID: ProfileID) {
+        profileIDs.append(profileID)
+    }
+}
+
+private actor ProfileUsageLoadProbe {
+    private(set) var profileIDs = [Set<ProfileID>?]()
+
+    func record(_ profileIDs: Set<ProfileID>?) {
+        self.profileIDs.append(profileIDs)
     }
 }
 

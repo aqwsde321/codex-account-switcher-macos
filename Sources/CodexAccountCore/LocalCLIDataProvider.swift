@@ -369,6 +369,106 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
         )
     }
 
+    public func useToken(profileID: ProfileID) async throws {
+        guard !switchInProgress else {
+            throw LocalCLIDataProviderFailure.switchAlreadyRunning
+        }
+        switchInProgress = true
+        defer { switchInProgress = false }
+
+        guard let store = try openStoreIfPresent(),
+              let lock = try store.tryAcquireTransactionLock() else {
+            throw LocalCLIDataProviderFailure.lockBusy
+        }
+        defer { lock.release() }
+
+        let registry = try store.loadRegistry()
+        guard let profile = registry.profiles.first(where: { $0.id == profileID }) else {
+            throw LocalCLIDataProviderFailure.targetProfileUnavailable
+        }
+        guard !profile.needsRelogin else {
+            throw LocalCLIDataProviderFailure.targetNeedsRelogin
+        }
+        guard !probeChildUnconfirmed,
+              try journalIsDurablyAbsent(in: store),
+              try store.loadCaptureProfileIDIfPresent() == nil,
+              try store.loadProfileRemovalIfPresent() == nil,
+              try !verificationWorkspaceExists() else {
+            throw LocalCLIDataProviderFailure.pendingRecovery
+        }
+
+        let activeAuthIdentity = try files.snapshot(at: activeAuthURL)
+        let credential: CredentialBlob
+        if registry.activeProfileID == profileID {
+            credential = try readCurrentCredential().credential
+        } else {
+            guard let stored = try loadCredentialIfPresent(for: profileID) else {
+                throw LocalCLIDataProviderFailure.targetProfileUnavailable
+            }
+            credential = stored
+        }
+
+        let descriptor = try await locateApp()
+        let homeURL = tokenUseHomeURL
+        do {
+            _ = try PrivateDirectory.ensure(at: homeURL)
+        } catch {
+            throw LocalCLIDataProviderFailure.verificationWorkspaceFailed
+        }
+        let authURL = homeURL.appendingPathComponent("auth.json", isDirectory: false)
+        let outputURL = homeURL.appendingPathComponent("last-message.txt", isDirectory: false)
+        let markerURL = homeURL.appendingPathComponent(verificationChildMarkerName, isDirectory: false)
+        _ = try files.replace(
+            contents: SensitiveBytes(try CredentialBlob.usageProbeData(for: credential)),
+            at: authURL,
+            expecting: try files.snapshot(at: authURL)
+        )
+        _ = try files.replace(
+            contents: SensitiveBytes(Data()),
+            at: outputURL,
+            expecting: try files.snapshot(at: outputURL)
+        )
+        try writeVerificationChildMarker(at: markerURL, value: "launching")
+
+        do {
+            try await CodexExecSession(
+                configuration: CodexExecConfiguration(
+                    executableURL: descriptor.bundledCodexURL,
+                    codexHomeURL: homeURL,
+                    outputURL: outputURL,
+                    timeout: .seconds(60),
+                    terminateExitTimeout: .seconds(2)
+                ),
+                didLaunch: { pid in
+                    try writeVerificationChildMarker(at: markerURL, value: "pid=\(pid)")
+                }
+            ).run()
+            try removeFileIfPresent(markerURL)
+        } catch let failure as CodexExecFailure {
+            if failure.childDisposition == .unconfirmed {
+                probeChildUnconfirmed = true
+            } else {
+                try? removeFileIfPresent(markerURL)
+            }
+            throw failure
+        } catch {
+            try? removeFileIfPresent(markerURL)
+            throw error
+        }
+
+        let output = try files.read(at: outputURL, maximumBytes: 64).contents.data
+        try removeFileIfPresent(outputURL)
+        guard String(data: output, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            == "OK" else {
+            throw LocalCLIDataProviderFailure.unexpectedTokenUseResponse
+        }
+        guard try files.snapshot(at: activeAuthURL) == activeAuthIdentity,
+              try store.loadRegistry() == registry,
+              try await locateApp() == descriptor else {
+            throw LocalCLIDataProviderFailure.activeAuthChanged
+        }
+    }
+
     public func removeProfile(_ profileID: ProfileID) async throws -> ProfileListItem {
         guard !switchInProgress else {
             throw LocalCLIDataProviderFailure.switchAlreadyRunning
@@ -1552,6 +1652,7 @@ public enum LocalCLIDataProviderFailure: Error, Equatable, Sendable {
     case rollbackUnavailable
     case rollbackFailed
     case manualRecoveryUnavailable
+    case unexpectedTokenUseResponse
 }
 
 extension LocalCLIDataProvider: SwitchTransactionDriving {
@@ -2709,6 +2810,7 @@ private extension LocalCLIDataProvider {
     }
 
     func removeAbandonedVerificationWorkspacesIfSafe(in store: SpikeStore) throws {
+        try removeAbandonedTokenUseMarkerIfSafe()
         let homes = try verificationHomeURLs.filter(pathExists)
         guard !homes.isEmpty else { return }
         guard let lock = try store.tryAcquireTransactionLock() else {
@@ -2751,6 +2853,10 @@ private extension LocalCLIDataProvider {
 
     var isolatedLoginHomeURL: URL {
         storeURL.appendingPathComponent("isolated-login-workspace", isDirectory: true)
+    }
+
+    var tokenUseHomeURL: URL {
+        storeURL.appendingPathComponent("token-use-home", isDirectory: true)
     }
 
     var isolatedLoginMarkerURL: URL {
@@ -2849,7 +2955,43 @@ private extension LocalCLIDataProvider {
         for url in verificationHomeURLs where try pathExists(url) {
             return true
         }
-        return false
+        guard try pathExists(tokenUseHomeURL) else { return false }
+        switch try readVerificationChildMarker(in: tokenUseHomeURL) {
+        case .notLaunched:
+            return false
+        case .launching:
+            return true
+        case let .child(pid):
+            return try verificationChildIsAlive(pid)
+        }
+    }
+
+    func removeAbandonedTokenUseMarkerIfSafe() throws {
+        guard try pathExists(tokenUseHomeURL) else { return }
+        let markerURL = tokenUseHomeURL.appendingPathComponent(
+            verificationChildMarkerName,
+            isDirectory: false
+        )
+        switch try readVerificationChildMarker(in: tokenUseHomeURL) {
+        case .notLaunched:
+            return
+        case .launching:
+            probeChildUnconfirmed = true
+            throw LocalCLIDataProviderFailure.pendingRecovery
+        case let .child(pid):
+            guard try !verificationChildIsAlive(pid) else {
+                probeChildUnconfirmed = true
+                throw LocalCLIDataProviderFailure.pendingRecovery
+            }
+            try removeFileIfPresent(markerURL)
+            probeChildUnconfirmed = false
+        }
+    }
+
+    func removeFileIfPresent(_ url: URL) throws {
+        let expected = try files.snapshot(at: url)
+        guard expected != .absent else { return }
+        _ = try files.remove(at: url, expecting: expected)
     }
 
     func pathExists(_ url: URL) throws -> Bool {
