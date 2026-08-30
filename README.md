@@ -37,13 +37,13 @@ Codex Account Switcher는 macOS용 Codex 데스크톱 앱 계정을 메뉴바에
 - 공식 Codex 앱
 - Xcode Command Line Tools 또는 Xcode
 
-설치는 고정 릴리스 태그의 [bootstrap 스크립트](https://github.com/aqwsde321/codex-account-switcher-macos/blob/v0.2.0/Scripts/install-remote.sh)를 사용한다.
+설치는 고정 릴리스 태그의 [bootstrap 스크립트](https://github.com/aqwsde321/codex-account-switcher-macos/blob/v0.3.0/Scripts/install-remote.sh)를 사용한다.
 
 ```sh
-(set -o pipefail && curl -fsSL https://raw.githubusercontent.com/aqwsde321/codex-account-switcher-macos/v0.2.0/Scripts/install-remote.sh | /bin/zsh)
+(set -o pipefail && curl -fsSL https://raw.githubusercontent.com/aqwsde321/codex-account-switcher-macos/v0.3.0/Scripts/install-remote.sh | /bin/zsh)
 ```
 
-고정된 `v0.2.0` 소스를 임시 폴더에 받아 로컬에서 빌드하고 `~/Applications`에 설치한다. 배터리 자동 해제용 시스템 서비스 설치 때문에 관리자 암호를 한 번 요청한다. 설치 후 앱과 시스템 서비스가 자동 시작한다.
+고정된 `v0.3.0` 소스를 임시 폴더에 받아 로컬에서 빌드하고 `~/Applications`에 설치한다. 배터리 자동 해제용 시스템 서비스 설치 때문에 관리자 암호를 한 번 요청한다. 설치 후 앱과 시스템 서비스가 자동 시작한다.
 
 ## 사용
 
@@ -97,7 +97,7 @@ Codex Account Switcher는 macOS용 Codex 데스크톱 앱 계정을 메뉴바에
 - 자동 조회는 활성 계정 2분, 전체 계정 30분 주기다.
 - 카드의 `⚡` 버튼은 해당 계정 credential을 격리된 `CODEX_HOME`에서 사용해 `codex exec`에 `OK` 응답을 요청한다. 활성 계정이나 대화 목록을 바꾸지 않고, 실행 후 해당 계정 한도만 다시 조회한다.
 - `자동 토큰 사용`은 기본 OFF다. 켜면 자동 조회 때 계정별 5시간·7일 창의 `resetsAt`을 직전 조회값과 비교한다.
-- 어느 창이든 `resetsAt`이 변경되고 그 변경된 창의 남은 사용량이 `100%`이면 해당 계정의 `⚡`을 순차 실행한다. 실행 후 한도와 새 `resetsAt`을 다시 반영한다.
+- 어느 계정에서든 `resetsAt` 변경을 감지하면 전체 계정 한도를 다시 조회한다. 5시간·7일 창 중 하나라도 남은 사용량이 `100%`인 계정의 `⚡`을 계정당 한 번씩 순차 실행하고, 실행 후 한도와 새 `resetsAt`을 다시 반영한다.
 - 첫 조회는 자동 실행하지 않고 기준값으로 사용한다. 자동 토큰 실행 실패 계정은 다음 자동 조회 때 다시 시도한다.
 - `잠자기 방지`는 관리자 인증 후 macOS 시스템 설정을 바꾸며 앱을 종료해도 유지될 수 있다.
 - 메뉴바와 설정 행의 커피잔은 잠자기 방지 OFF일 때 윤곽선, ON일 때 채움과 아래에서 위로 선명해지는 김 세 줄로 표시한다. macOS `동작 줄이기`가 켜져 있으면 정지한다.
@@ -113,7 +113,7 @@ Codex Account Switcher는 macOS용 Codex 데스크톱 앱 계정을 메뉴바에
 ## 제거
 
 ```sh
-(set -o pipefail && curl -fsSL https://raw.githubusercontent.com/aqwsde321/codex-account-switcher-macos/v0.2.0/Scripts/install-remote.sh | /bin/zsh -s -- --uninstall)
+(set -o pipefail && curl -fsSL https://raw.githubusercontent.com/aqwsde321/codex-account-switcher-macos/v0.3.0/Scripts/install-remote.sh | /bin/zsh -s -- --uninstall)
 ```
 
 앱, 자동 시작 항목, 배터리 자동 해제 시스템 서비스를 제거한다. 시스템 서비스 제거 때문에 관리자 암호를 요청할 수 있다. 저장 계정, 로그, 현재 잠자기 방지 설정은 보존한다.

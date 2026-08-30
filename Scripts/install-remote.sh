@@ -1,7 +1,7 @@
 #!/bin/zsh
 set -eu
 
-readonly release_ref=v0.2.0
+readonly release_ref=v0.3.0
 readonly archive_url=${CODEX_ACCOUNT_SWITCHER_TEST_ARCHIVE_URL:-https://github.com/aqwsde321/codex-account-switcher-macos/archive/refs/tags/$release_ref.tar.gz}
 
 case ${1:-} in

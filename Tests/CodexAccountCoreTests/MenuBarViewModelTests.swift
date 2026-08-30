@@ -341,7 +341,7 @@ func menuBarViewModelTests() -> [TestCase] {
                 "automatic refresh intervals changed"
             )
         },
-        TestCase("MenuBarViewModel uses full-reset accounts sequentially after automatic detection") {
+        TestCase("MenuBarViewModel rechecks all accounts after one reset and uses full accounts") {
             let profiles = menuBarProfiles()
             let firstID = profiles[0].id
             let secondID = profiles[1].id
@@ -385,13 +385,28 @@ func menuBarViewModelTests() -> [TestCase] {
                             ),
                         ]
                     ),
+                ],
+                failedProfileIDs: []
+            )
+            let fullRecheck = ProfileUsageReport(
+                usageByProfileID: [
+                    firstID: AppServerRateLimitsRead(
+                        planType: "pro",
+                        windows: [
+                            AppServerRateLimitWindow(
+                                usedPercent: 0,
+                                windowDurationMinutes: 300,
+                                resetsAt: firstChangedReset
+                            ),
+                        ]
+                    ),
                     secondID: AppServerRateLimitsRead(
                         planType: "team",
                         windows: [
                             AppServerRateLimitWindow(
                                 usedPercent: 0,
                                 windowDurationMinutes: 300,
-                                resetsAt: secondChangedReset
+                                resetsAt: baselineReset
                             ),
                         ]
                     ),
@@ -429,7 +444,9 @@ func menuBarViewModelTests() -> [TestCase] {
                 failedProfileIDs: []
             )
             let provider = MenuBarProviderSpy(profiles: profiles)
-            let usageLoads = UsageReportSequence(reports: [baseline, changed, afterFirst, afterSecond])
+            let usageLoads = UsageReportSequence(
+                reports: [baseline, changed, fullRecheck, afterFirst, afterSecond]
+            )
             let tokenUses = TokenUseProbe()
             let model = await makeMenuBarModel(
                 provider: provider,
@@ -443,17 +460,17 @@ func menuBarViewModelTests() -> [TestCase] {
             )
 
             await model.load()
-            await model.refreshUsageAutomatically(now: Date.now.addingTimeInterval(1_801))
+            await model.refreshUsageAutomatically(now: Date.now.addingTimeInterval(121))
 
             let usedProfileIDs = await tokenUses.profileIDs
             let usageLoadEvents = await usageLoads.events
             try expect(
                 usedProfileIDs == [firstID, secondID],
-                "automatic token use did not process full-reset accounts sequentially"
+                "one reset did not trigger all full accounts sequentially"
             )
             try expect(
-                usageLoadEvents == ["all", "all", "active", "active"],
-                "automatic token use did not refresh each account after execution"
+                usageLoadEvents == ["all", "active", "all", "active", "active"],
+                "reset detection did not recheck all accounts before token use"
             )
         },
         TestCase("MenuBarViewModel cancels automatic usage before an account action") {

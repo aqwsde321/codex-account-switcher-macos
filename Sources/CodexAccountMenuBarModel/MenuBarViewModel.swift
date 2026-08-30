@@ -162,8 +162,10 @@ public final class MenuBarViewModel: ObservableObject {
             preservingMissingUsage: true
         )
         guard isAutomaticTokenUseEnabled else { return }
-        if !changedResetWindows.isEmpty || !automaticTokenUseRetryProfileIDs.isEmpty {
-            await automaticallyUseTokens(after: changedResetWindows)
+        let resetDetected = !changedResetWindows.isEmpty
+        if resetDetected || !automaticTokenUseRetryProfileIDs.isEmpty {
+            await reloadUsage()
+            await automaticallyUseTokens(afterResetDetection: resetDetected)
         }
     }
 
@@ -229,9 +231,7 @@ public final class MenuBarViewModel: ObservableObject {
         }
     }
 
-    private func automaticallyUseTokens(
-        after changedResetWindows: [ProfileID: Set<Int>]
-    ) async {
+    private func automaticallyUseTokens(afterResetDetection resetDetected: Bool) async {
         guard let useTokenOperation else { return }
         let retryProfileIDs = automaticTokenUseRetryProfileIDs
         let targets = profiles.filter { profile in
@@ -239,13 +239,8 @@ public final class MenuBarViewModel: ObservableObject {
                   let usage = usageByProfileID[profile.id] else {
                 return false
             }
-            let changedWindowIsFull = changedResetWindows[profile.id]?.contains { duration in
-                usage.windows.first(where: { $0.windowDurationMinutes == duration })
-                    .map(Self.remainingPercent) == 100
-            } == true
-            let retryWindowIsFull = retryProfileIDs.contains(profile.id)
-                && usage.windows.contains { Self.remainingPercent($0) == 100 }
-            return changedWindowIsFull || retryWindowIsFull
+            let hasFullWindow = usage.windows.contains { Self.remainingPercent($0) == 100 }
+            return hasFullWindow && (resetDetected || retryProfileIDs.contains(profile.id))
         }
         guard !targets.isEmpty else { return }
 
