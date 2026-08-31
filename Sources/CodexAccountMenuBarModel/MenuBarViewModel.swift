@@ -159,7 +159,8 @@ public final class MenuBarViewModel: ObservableObject {
         guard case let .success(report) = result else { return }
         let changedResetWindows = Self.changedResetWindows(
             from: previousUsage,
-            to: report.usageByProfileID
+            to: report.usageByProfileID,
+            at: now
         )
         applyUsageReport(
             report,
@@ -1069,7 +1070,8 @@ public final class MenuBarViewModel: ObservableObject {
 
     private static func changedResetWindows(
         from previous: [ProfileID: AppServerRateLimitsRead],
-        to current: [ProfileID: AppServerRateLimitsRead]
+        to current: [ProfileID: AppServerRateLimitsRead],
+        at now: Date
     ) -> [ProfileID: [ResetWindowChange]] {
         var changed = [ProfileID: [ResetWindowChange]]()
         for (profileID, currentUsage) in current {
@@ -1080,7 +1082,8 @@ public final class MenuBarViewModel: ObservableObject {
                 }),
                     let previousReset = previousWindow.resetsAt,
                     let currentReset = currentWindow.resetsAt,
-                    previousReset != currentReset else {
+                    previousReset <= now,
+                    currentReset > previousReset else {
                     continue
                 }
                 changed[profileID, default: []].append(

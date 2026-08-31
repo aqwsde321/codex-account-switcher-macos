@@ -137,9 +137,6 @@ struct CodexAccountMenuBarApp: App {
                     }
                 }
                     .frame(width: 23, height: 22)
-                    .scaleEffect(model.isAutomaticallyRefreshing && !reduceMotion ? 1.06 : 1)
-                    .opacity(model.isAutomaticallyRefreshing ? 0.55 : 1)
-                    .animation(refreshAnimation, value: model.isAutomaticallyRefreshing)
                 if let usageSummary = activeUsageSummary {
                     Text(usageSummary)
                         .monospacedDigit()
@@ -209,7 +206,7 @@ struct CodexAccountMenuBarApp: App {
     }
 
     private var steamAnimationIsActive: Bool {
-        sleepPrevention.isEnabled == true && !reduceMotion
+        false
     }
 
     private var steamProgress: CGFloat {
@@ -233,12 +230,6 @@ struct CodexAccountMenuBarApp: App {
         }
     }
 
-    private var refreshAnimation: Animation? {
-        guard !reduceMotion else { return nil }
-        return model.isAutomaticallyRefreshing
-            ? .easeInOut(duration: 0.7).repeatForever(autoreverses: true)
-            : .easeOut(duration: 0.2)
-    }
 }
 
 private struct SleepPreventionStatusIcon: View {
@@ -572,6 +563,7 @@ private struct AccountMenuView: View {
                 Text(statusMessage)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
                     .accessibilityLabel("상태: \(statusMessage)")
             }
 

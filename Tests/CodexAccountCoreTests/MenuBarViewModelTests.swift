@@ -511,6 +511,69 @@ func menuBarViewModelTests() -> [TestCase] {
                 "automatic token status did not explain its reset trigger"
             )
         },
+        TestCase("MenuBarViewModel ignores reset timestamp drift before the reset") {
+            let profile = menuBarProfiles()[0]
+            let now = Date(timeIntervalSince1970: 100_000)
+            let baselineReset = now.addingTimeInterval(3_600)
+            let driftedReset = baselineReset.addingTimeInterval(1)
+            let baseline = ProfileUsageReport(
+                usageByProfileID: [
+                    profile.id: AppServerRateLimitsRead(
+                        planType: "pro",
+                        windows: [
+                            AppServerRateLimitWindow(
+                                usedPercent: 0,
+                                windowDurationMinutes: 300,
+                                resetsAt: baselineReset
+                            ),
+                        ]
+                    ),
+                ],
+                failedProfileIDs: []
+            )
+            let drifted = ProfileUsageReport(
+                usageByProfileID: [
+                    profile.id: AppServerRateLimitsRead(
+                        planType: "pro",
+                        windows: [
+                            AppServerRateLimitWindow(
+                                usedPercent: 0,
+                                windowDurationMinutes: 300,
+                                resetsAt: driftedReset
+                            ),
+                        ]
+                    ),
+                ],
+                failedProfileIDs: []
+            )
+            let usageLoads = UsageReportSequence(
+                reports: [baseline, drifted, drifted, drifted]
+            )
+            let tokenUses = TokenUseProbe()
+            let model = await makeMenuBarModel(
+                provider: MenuBarProviderSpy(profiles: [profile]),
+                loadProfileUsage: { profileIDs in
+                    await usageLoads.load(profileIDs: profileIDs)
+                },
+                useToken: { profileID in
+                    await tokenUses.record(profileID)
+                },
+                initialAutomaticTokenUseEnabled: true
+            )
+
+            await model.load()
+            await model.refreshUsageAutomatically(now: now)
+
+            let usedProfileIDs = await tokenUses.profileIDs
+            let usageLoadEvents = await usageLoads.events
+            let statusMessage = await MainActor.run { model.statusMessage }
+            try expect(
+                usedProfileIDs.isEmpty
+                    && usageLoadEvents == ["all", "active"]
+                    && statusMessage == nil,
+                "future reset timestamp drift triggered automatic token use"
+            )
+        },
         TestCase("MenuBarViewModel cancels automatic usage before an account action") {
             let profiles = menuBarProfiles()
             let activeID = profiles[0].id
