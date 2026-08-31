@@ -140,9 +140,8 @@ struct CodexAccountMenuBarApp: App {
                     .scaleEffect(model.isAutomaticallyRefreshing && !reduceMotion ? 1.06 : 1)
                     .opacity(model.isAutomaticallyRefreshing ? 0.55 : 1)
                     .animation(refreshAnimation, value: model.isAutomaticallyRefreshing)
-                if let remaining = model.activeRemainingPercent {
-                    let resetCountdown = activeResetCountdown.map { " · \($0)" } ?? ""
-                    Text("\(remaining)%\(resetCountdown)")
+                if let usageSummary = activeUsageSummary {
+                    Text(usageSummary)
                         .monospacedDigit()
                 }
             }
@@ -186,19 +185,23 @@ struct CodexAccountMenuBarApp: App {
         .menuBarExtraStyle(.window)
     }
 
-    private var activeResetCountdown: String? {
-        MenuBarViewModel.resetCountdownLabel(
-            resetAt: model.activeResetAt,
-            now: menuBarNow
-        )
+    private var activeUsageSummary: String? {
+        let labels = model.activeRateLimitWindows.prefix(2).map { window in
+            let remaining = MenuBarViewModel.remainingPercent(window)
+            let countdown = MenuBarViewModel.resetCountdownLabel(
+                resetAt: window.resetsAt,
+                now: menuBarNow
+            )
+            return countdown.map { "\(remaining)% \($0)" } ?? "\(remaining)%"
+        }
+        return labels.isEmpty ? nil : labels.joined(separator: " · ")
     }
 
     private var statusAccessibilityLabel: String {
-        let resetCountdown = activeResetCountdown.map { ", \($0) 후 초기화" } ?? ""
-        let usage = model.activeRemainingPercent.map {
+        let usage = activeUsageSummary.map {
             model.isAutomaticallyRefreshing
-                ? "Codex 계정 한도 자동 조회 중, \($0)% 남음\(resetCountdown)"
-                : "Codex 계정 \($0)% 남음\(resetCountdown)"
+                ? "Codex 계정 한도 자동 조회 중, \($0)"
+                : "Codex 계정 \($0)"
         } ?? (model.isAutomaticallyRefreshing
             ? "Codex 계정 한도 자동 조회 중"
             : "Codex 계정")

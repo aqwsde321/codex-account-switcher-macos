@@ -37,13 +37,13 @@ Codex Account Switcher는 macOS용 Codex 데스크톱 앱 계정을 메뉴바에
 - 공식 Codex 앱
 - Xcode Command Line Tools 또는 Xcode
 
-설치는 고정 릴리스 태그의 [bootstrap 스크립트](https://github.com/aqwsde321/codex-account-switcher-macos/blob/v0.3.0/Scripts/install-remote.sh)를 사용한다.
+설치는 고정 릴리스 태그의 [bootstrap 스크립트](https://github.com/aqwsde321/codex-account-switcher-macos/blob/v0.3.1/Scripts/install-remote.sh)를 사용한다.
 
 ```sh
-(set -o pipefail && curl -fsSL https://raw.githubusercontent.com/aqwsde321/codex-account-switcher-macos/v0.3.0/Scripts/install-remote.sh | /bin/zsh)
+(set -o pipefail && curl -fsSL https://raw.githubusercontent.com/aqwsde321/codex-account-switcher-macos/v0.3.1/Scripts/install-remote.sh | /bin/zsh)
 ```
 
-고정된 `v0.3.0` 소스를 임시 폴더에 받아 로컬에서 빌드하고 `~/Applications`에 설치한다. 배터리 자동 해제용 시스템 서비스 설치 때문에 관리자 암호를 한 번 요청한다. 설치 후 앱과 시스템 서비스가 자동 시작한다.
+고정된 `v0.3.1` 소스를 임시 폴더에 받아 로컬에서 빌드하고 `~/Applications`에 설치한다. 배터리 자동 해제용 시스템 서비스 설치 때문에 관리자 암호를 한 번 요청한다. 설치 후 앱과 시스템 서비스가 자동 시작한다.
 
 ## 사용
 
@@ -113,7 +113,7 @@ Codex Account Switcher는 macOS용 Codex 데스크톱 앱 계정을 메뉴바에
 ## 제거
 
 ```sh
-(set -o pipefail && curl -fsSL https://raw.githubusercontent.com/aqwsde321/codex-account-switcher-macos/v0.3.0/Scripts/install-remote.sh | /bin/zsh -s -- --uninstall)
+(set -o pipefail && curl -fsSL https://raw.githubusercontent.com/aqwsde321/codex-account-switcher-macos/v0.3.1/Scripts/install-remote.sh | /bin/zsh -s -- --uninstall)
 ```
 
 앱, 자동 시작 항목, 배터리 자동 해제 시스템 서비스를 제거한다. 시스템 서비스 제거 때문에 관리자 암호를 요청할 수 있다. 저장 계정, 로그, 현재 잠자기 방지 설정은 보존한다.
