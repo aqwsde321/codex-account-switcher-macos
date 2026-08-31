@@ -124,9 +124,25 @@ public final class MenuBarViewModel: ObservableObject {
         }
     }
 
-    public func refreshUsage() async {
+    public func refreshUsage(now: Date = .now) async {
         await cancelAutomaticUsageRefresh()
-        await performUsageRefresh(profileIDs: nil, at: .now)
+        guard !isWorking, !recoveryRequired, loadProfileUsage != nil else {
+            if recoveryRequired { errorMessage = recoveryErrorMessage }
+            return
+        }
+        let previousUsage = usageByProfileID
+        isWorking = true
+        let report = await reloadUsage(at: now)
+        isWorking = false
+        guard let report, isAutomaticTokenUseEnabled else { return }
+        let changedResetWindows = Self.changedResetWindows(
+            from: previousUsage,
+            to: report.usageByProfileID,
+            at: now
+        )
+        if !changedResetWindows.isEmpty || !automaticTokenUseRetryProfileIDs.isEmpty {
+            await automaticallyUseTokens(after: changedResetWindows)
+        }
     }
 
     public func refreshUsageAutomatically(now: Date = .now) async {
@@ -170,19 +186,11 @@ public final class MenuBarViewModel: ObservableObject {
         )
         guard isAutomaticTokenUseEnabled else { return }
         if !changedResetWindows.isEmpty || !automaticTokenUseRetryProfileIDs.isEmpty {
-            await reloadUsage()
+            if profileIDs != nil {
+                await reloadUsage()
+            }
             await automaticallyUseTokens(after: changedResetWindows)
         }
-    }
-
-    private func performUsageRefresh(profileIDs: Set<ProfileID>?, at date: Date) async {
-        guard !isWorking, !recoveryRequired, loadProfileUsage != nil else {
-            if recoveryRequired { errorMessage = recoveryErrorMessage }
-            return
-        }
-        isWorking = true
-        defer { isWorking = false }
-        await reloadUsage(profileIDs: profileIDs, at: date)
     }
 
     public var canRefreshUsage: Bool {
@@ -1016,20 +1024,23 @@ public final class MenuBarViewModel: ObservableObject {
         automaticTokenUseRetryProfileIDs.formIntersection(profileIDs)
     }
 
+    @discardableResult
     private func reloadUsage(
         profileIDs requestedProfileIDs: Set<ProfileID>? = nil,
         at date: Date = .now
-    ) async {
-        guard let loadProfileUsage else { return }
+    ) async -> ProfileUsageReport? {
+        guard let loadProfileUsage else { return nil }
         do {
             let report = try await loadProfileUsage(requestedProfileIDs)
             applyUsageReport(report, profileIDs: requestedProfileIDs, at: date)
+            return report
         } catch {
             let failedProfileIDs = requestedProfileIDs ?? Set(profiles.map(\.id))
             for profileID in failedProfileIDs {
                 usageByProfileID[profileID] = nil
             }
             usageFailedProfileIDs.formUnion(failedProfileIDs)
+            return nil
         }
     }
 
@@ -1082,10 +1093,12 @@ public final class MenuBarViewModel: ObservableObject {
                 }),
                     let previousReset = previousWindow.resetsAt,
                     let currentReset = currentWindow.resetsAt,
-                    previousReset <= now,
-                    currentReset > previousReset else {
+                    previousReset <= now else {
                     continue
                 }
+                let previousResetMinute = (previousReset.timeIntervalSince1970 / 60).rounded(.down)
+                let currentResetMinute = (currentReset.timeIntervalSince1970 / 60).rounded(.down)
+                guard currentResetMinute > previousResetMinute else { continue }
                 changed[profileID, default: []].append(
                     ResetWindowChange(
                         windowDurationMinutes: currentWindow.windowDurationMinutes,
