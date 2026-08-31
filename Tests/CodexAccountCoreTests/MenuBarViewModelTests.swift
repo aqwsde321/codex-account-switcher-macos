@@ -341,10 +341,11 @@ func menuBarViewModelTests() -> [TestCase] {
                 "automatic refresh intervals changed"
             )
         },
-        TestCase("MenuBarViewModel rechecks all accounts after one reset and uses full accounts") {
+        TestCase("MenuBarViewModel rechecks all accounts and uses full five-hour accounts") {
             let profiles = menuBarProfiles()
             let firstID = profiles[0].id
             let secondID = profiles[1].id
+            let thirdID = profiles[2].id
             let baselineReset = Date(timeIntervalSince1970: 10_000)
             let firstChangedReset = Date(timeIntervalSince1970: 20_000)
             let secondChangedReset = Date(timeIntervalSince1970: 30_000)
@@ -366,6 +367,21 @@ func menuBarViewModelTests() -> [TestCase] {
                             AppServerRateLimitWindow(
                                 usedPercent: 15,
                                 windowDurationMinutes: 300,
+                                resetsAt: baselineReset
+                            ),
+                        ]
+                    ),
+                    thirdID: AppServerRateLimitsRead(
+                        planType: "team",
+                        windows: [
+                            AppServerRateLimitWindow(
+                                usedPercent: 1,
+                                windowDurationMinutes: 300,
+                                resetsAt: baselineReset
+                            ),
+                            AppServerRateLimitWindow(
+                                usedPercent: 0,
+                                windowDurationMinutes: 10_080,
                                 resetsAt: baselineReset
                             ),
                         ]
@@ -406,6 +422,21 @@ func menuBarViewModelTests() -> [TestCase] {
                             AppServerRateLimitWindow(
                                 usedPercent: 0,
                                 windowDurationMinutes: 300,
+                                resetsAt: baselineReset
+                            ),
+                        ]
+                    ),
+                    thirdID: AppServerRateLimitsRead(
+                        planType: "team",
+                        windows: [
+                            AppServerRateLimitWindow(
+                                usedPercent: 1,
+                                windowDurationMinutes: 300,
+                                resetsAt: baselineReset
+                            ),
+                            AppServerRateLimitWindow(
+                                usedPercent: 0,
+                                windowDurationMinutes: 10_080,
                                 resetsAt: baselineReset
                             ),
                         ]
@@ -464,13 +495,20 @@ func menuBarViewModelTests() -> [TestCase] {
 
             let usedProfileIDs = await tokenUses.profileIDs
             let usageLoadEvents = await usageLoads.events
+            let statusMessage = await MainActor.run { model.statusMessage }
             try expect(
                 usedProfileIDs == [firstID, secondID],
-                "one reset did not trigger all full accounts sequentially"
+                "one reset did not select only full five-hour accounts"
             )
             try expect(
                 usageLoadEvents == ["all", "active", "all", "active", "active"],
                 "reset detection did not recheck all accounts before token use"
+            )
+            try expect(
+                statusMessage?.contains("리셋 감지: 개인 5h") == true
+                    && statusMessage?.contains("→") == true
+                    && statusMessage?.contains("자동 토큰 사용: 개인, 회사") == true,
+                "automatic token status did not explain its reset trigger"
             )
         },
         TestCase("MenuBarViewModel cancels automatic usage before an account action") {

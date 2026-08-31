@@ -4,6 +4,12 @@ import Foundation
 
 @MainActor
 public final class MenuBarViewModel: ObservableObject {
+    private struct ResetWindowChange {
+        let windowDurationMinutes: Int
+        let previousReset: Date
+        let currentReset: Date
+    }
+
     public struct RecoveryConfirmation: Equatable, Sendable {
         public let profile: ProfileListItem
         public let transactionID: String
@@ -162,10 +168,9 @@ public final class MenuBarViewModel: ObservableObject {
             preservingMissingUsage: true
         )
         guard isAutomaticTokenUseEnabled else { return }
-        let resetDetected = !changedResetWindows.isEmpty
-        if resetDetected || !automaticTokenUseRetryProfileIDs.isEmpty {
+        if !changedResetWindows.isEmpty || !automaticTokenUseRetryProfileIDs.isEmpty {
             await reloadUsage()
-            await automaticallyUseTokens(afterResetDetection: resetDetected)
+            await automaticallyUseTokens(after: changedResetWindows)
         }
     }
 
@@ -231,16 +236,19 @@ public final class MenuBarViewModel: ObservableObject {
         }
     }
 
-    private func automaticallyUseTokens(afterResetDetection resetDetected: Bool) async {
+    private func automaticallyUseTokens(after resetChanges: [ProfileID: [ResetWindowChange]]) async {
         guard let useTokenOperation else { return }
+        let resetDetected = !resetChanges.isEmpty
         let retryProfileIDs = automaticTokenUseRetryProfileIDs
         let targets = profiles.filter { profile in
             guard !profile.needsRelogin,
                   let usage = usageByProfileID[profile.id] else {
                 return false
             }
-            let hasFullWindow = usage.windows.contains { Self.remainingPercent($0) == 100 }
-            return hasFullWindow && (resetDetected || retryProfileIDs.contains(profile.id))
+            let fiveHourWindowIsFull = usage.windows.first {
+                $0.windowDurationMinutes == 300
+            }.map(Self.remainingPercent) == 100
+            return fiveHourWindowIsFull && (resetDetected || retryProfileIDs.contains(profile.id))
         }
         guard !targets.isEmpty else { return }
 
@@ -267,7 +275,9 @@ public final class MenuBarViewModel: ObservableObject {
         }
 
         if !usedLabels.isEmpty {
-            statusMessage = "자동 토큰 사용: \(usedLabels.joined(separator: ", "))"
+            let useSummary = "자동 토큰 사용: \(usedLabels.joined(separator: ", "))"
+            let resetSummary = resetChangeSummary(resetChanges)
+            statusMessage = resetSummary.map { "리셋 감지: \($0)\n\(useSummary)" } ?? useSummary
         }
         if !failedLabels.isEmpty {
             errorMessage = "자동 토큰 사용 실패: \(failedLabels.joined(separator: ", "))"
@@ -1060,8 +1070,8 @@ public final class MenuBarViewModel: ObservableObject {
     private static func changedResetWindows(
         from previous: [ProfileID: AppServerRateLimitsRead],
         to current: [ProfileID: AppServerRateLimitsRead]
-    ) -> [ProfileID: Set<Int>] {
-        var changed = [ProfileID: Set<Int>]()
+    ) -> [ProfileID: [ResetWindowChange]] {
+        var changed = [ProfileID: [ResetWindowChange]]()
         for (profileID, currentUsage) in current {
             guard let previousUsage = previous[profileID] else { continue }
             for currentWindow in currentUsage.windows {
@@ -1073,10 +1083,39 @@ public final class MenuBarViewModel: ObservableObject {
                     previousReset != currentReset else {
                     continue
                 }
-                changed[profileID, default: []].insert(currentWindow.windowDurationMinutes)
+                changed[profileID, default: []].append(
+                    ResetWindowChange(
+                        windowDurationMinutes: currentWindow.windowDurationMinutes,
+                        previousReset: previousReset,
+                        currentReset: currentReset
+                    )
+                )
             }
         }
         return changed
+    }
+
+    private func resetChangeSummary(
+        _ changes: [ProfileID: [ResetWindowChange]]
+    ) -> String? {
+        let labels = profiles.flatMap { profile in
+            (changes[profile.id] ?? []).sorted {
+                $0.windowDurationMinutes < $1.windowDurationMinutes
+            }.map { change in
+                "\(profile.label) \(Self.periodLabel(minutes: change.windowDurationMinutes)) "
+                    + "\(Self.resetTimeLabel(change.previousReset))→"
+                    + Self.resetTimeLabel(change.currentReset)
+            }
+        }
+        return labels.isEmpty ? nil : labels.joined(separator: ", ")
+    }
+
+    private static func resetTimeLabel(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = .current
+        formatter.dateFormat = "MM/dd HH:mm"
+        return formatter.string(from: date)
     }
 
     private func cancelAutomaticUsageRefresh() async {

@@ -482,7 +482,7 @@ private struct AccountMenuView: View {
                         .toggleStyle(.switch)
                         .disabled(model.isWorking)
                 }
-                .help("사용량 조회에서 리셋을 감지하면 남은 한도가 100%인 계정을 순차적으로 사용합니다.")
+                .help("사용량 조회에서 리셋을 감지하면 5시간 한도가 100%인 계정을 순차적으로 사용합니다.")
             }
 
             if let progressMessage = model.switchProgressMessage {
