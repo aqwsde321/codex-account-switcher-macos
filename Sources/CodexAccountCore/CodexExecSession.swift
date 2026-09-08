@@ -5,6 +5,7 @@ package struct CodexExecConfiguration: Equatable, Sendable {
     package let executableURL: URL
     package let codexHomeURL: URL
     package let outputURL: URL
+    package let eventsOutput: FileHandle
     package let timeout: Duration
     package let terminateExitTimeout: Duration
 }
@@ -84,17 +85,18 @@ private extension CodexExecSession {
             "--config",
             "cli_auth_credentials_store=\"file\"",
             "exec",
+            "--json",
             "--ephemeral",
             "--skip-git-repo-check",
             "--sandbox",
             "read-only",
             "--output-last-message",
             configuration.outputURL.path,
-            "Respond with exactly OK. Do not use tools.",
+            "간단히 자기소개 부탁해. 도구는 사용하지 마.",
         ]
         process.environment = sanitizedCodexEnvironment(homeURL: configuration.codexHomeURL)
         process.standardInput = FileHandle.nullDevice
-        process.standardOutput = FileHandle.nullDevice
+        process.standardOutput = configuration.eventsOutput
         process.standardError = FileHandle.nullDevice
         process.terminationHandler = { [weak self] child in
             let status = child.terminationStatus

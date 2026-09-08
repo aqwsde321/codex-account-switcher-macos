@@ -3,7 +3,7 @@ import Foundation
 
 func manualTokenUseTests() -> [TestCase] {
     [
-        TestCase("manual token use isolates auth and requires an OK response") {
+        TestCase("manual token use isolates auth and requires a non-empty response") {
             try await withTokenUseTemporaryDirectory { directory in
                 let fixture = try makeTokenUseFixture(in: directory)
                 let provider = LocalCLIDataProvider(
@@ -14,7 +14,9 @@ func manualTokenUseTests() -> [TestCase] {
                     runningApplicationPIDs: { _ in [] }
                 )
 
-                try await provider.useToken(profileID: fixture.target.id)
+                let result = try await provider.useToken(profileID: fixture.target.id)
+                try expect(result.inputTokens == 42 && result.outputTokens == 12,
+                           "exec usage was not parsed")
 
                 let tokenHome = fixture.storeURL.appendingPathComponent(
                     "token-use-home",
@@ -45,18 +47,19 @@ func manualTokenUseTests() -> [TestCase] {
                 try expect(
                     invocation.contains("CODEX_HOME=\(tokenHome.path)")
                         && invocation.contains("--ephemeral")
-                        && invocation.contains("--output-last-message"),
+                        && invocation.contains("--output-last-message")
+                        && invocation.contains("간단히 자기소개 부탁해."),
                     "manual token use did not invoke isolated ephemeral exec"
                 )
 
-                try Data("NO\n".utf8).write(to: fixture.responseURL, options: .atomic)
+                try Data(" \n".utf8).write(to: fixture.responseURL, options: .atomic)
                 do {
-                    try await provider.useToken(profileID: fixture.target.id)
-                    throw TestFailure(description: "manual token use accepted a non-OK response")
+                    _ = try await provider.useToken(profileID: fixture.target.id)
+                    throw TestFailure(description: "manual token use accepted an empty response")
                 } catch let failure as LocalCLIDataProviderFailure {
                     try expect(
                         failure == .unexpectedTokenUseResponse,
-                        "manual token use returned the wrong non-OK failure: \(failure)"
+                        "manual token use returned the wrong empty-response failure: \(failure)"
                     )
                 }
                 let activeAuthAfterFailure = try Data(contentsOf: fixture.activeAuthURL)
@@ -125,7 +128,7 @@ private func makeTokenUseFixture(in directory: URL) throws -> TokenUseFixture {
 
     let responseURL = directory.appendingPathComponent("response.txt")
     let invocationURL = directory.appendingPathComponent("invocation.txt")
-    try Data("OK\n".utf8).write(to: responseURL, options: .withoutOverwriting)
+    try Data("안녕하세요. 저는 Codex입니다.\n".utf8).write(to: responseURL, options: .withoutOverwriting)
     let executableURL = directory.appendingPathComponent("fake-codex")
     let script = #"""
     #!/bin/zsh
@@ -141,6 +144,7 @@ private func makeTokenUseFixture(in directory: URL) throws -> TokenUseFixture {
     done
     [[ -n "$output" ]] || exit 20
     cp "\#(responseURL.path)" "$output"
+    print -r -- '{"type":"turn.completed","usage":{"input_tokens":42,"output_tokens":12}}'
     """#
     try Data(script.utf8).write(to: executableURL, options: .withoutOverwriting)
     try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executableURL.path)

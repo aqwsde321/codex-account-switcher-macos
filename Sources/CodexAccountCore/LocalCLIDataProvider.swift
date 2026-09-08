@@ -369,7 +369,7 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
         )
     }
 
-    public func useToken(profileID: ProfileID) async throws {
+    public func useToken(profileID: ProfileID) async throws -> TokenUseResult {
         guard !switchInProgress else {
             throw LocalCLIDataProviderFailure.switchAlreadyRunning
         }
@@ -417,6 +417,11 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
         }
         let authURL = homeURL.appendingPathComponent("auth.json", isDirectory: false)
         let outputURL = homeURL.appendingPathComponent("last-message.txt", isDirectory: false)
+        let eventsURL = homeURL.appendingPathComponent("last-events.jsonl")
+        _ = try files.replace(contents: SensitiveBytes(Data()), at: eventsURL,
+                              expecting: try files.snapshot(at: eventsURL))
+        let eventsOutput = try FileHandle(forWritingTo: eventsURL)
+        defer { try? eventsOutput.close() }
         let markerURL = homeURL.appendingPathComponent(verificationChildMarkerName, isDirectory: false)
         _ = try files.replace(
             contents: SensitiveBytes(try CredentialBlob.usageProbeData(for: credential)),
@@ -436,6 +441,7 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
                     executableURL: descriptor.bundledCodexURL,
                     codexHomeURL: homeURL,
                     outputURL: outputURL,
+                    eventsOutput: eventsOutput,
                     timeout: .seconds(60),
                     terminateExitTimeout: .seconds(2)
                 ),
@@ -456,10 +462,10 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
             throw error
         }
 
-        let output = try files.read(at: outputURL, maximumBytes: 64).contents.data
+        let output = try files.read(at: outputURL, maximumBytes: 4_096).contents.data
         try removeFileIfPresent(outputURL)
-        guard String(data: output, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
-            == "OK" else {
+        guard let response = String(data: output, encoding: .utf8),
+              !response.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw LocalCLIDataProviderFailure.unexpectedTokenUseResponse
         }
         guard try files.snapshot(at: activeAuthURL) == activeAuthIdentity,
@@ -467,6 +473,13 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
               try await locateApp() == descriptor else {
             throw LocalCLIDataProviderFailure.activeAuthChanged
         }
+        let events = try files.read(at: eventsURL, maximumBytes: 1_048_576).contents.data
+        try removeFileIfPresent(eventsURL)
+        let result = TokenUseResult(response: response, events: events)
+        let resultURL = homeURL.appendingPathComponent("result-\(profileID).json")
+        _ = try files.replace(contents: SensitiveBytes(try JSONEncoder().encode(result)),
+                              at: resultURL, expecting: try files.snapshot(at: resultURL))
+        return result
     }
 
     public func removeProfile(_ profileID: ProfileID) async throws -> ProfileListItem {

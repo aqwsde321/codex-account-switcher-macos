@@ -209,6 +209,10 @@ func menuBarViewModelTests() -> [TestCase] {
                 state.0 == nil && state.1?.contains(target.label) == true && state.2 == nil,
                 "token use did not finish with a selected-account success state"
             )
+            try expect(state.1?.contains("사용량 재조회 실패") == true
+                && state.1?.contains("입력 미확인") == true
+                && state.1?.contains("테스트 응답") == true,
+                "missing usage was reported as verified token consumption")
         },
         TestCase("MenuBarViewModel applies automatic token use after manual refresh") {
             let profile = menuBarProfiles()[0]
@@ -398,9 +402,10 @@ func menuBarViewModelTests() -> [TestCase] {
             let firstID = profiles[0].id
             let secondID = profiles[1].id
             let thirdID = profiles[2].id
-            let baselineReset = Date(timeIntervalSince1970: 10_000)
-            let firstChangedReset = Date(timeIntervalSince1970: 20_000)
-            let secondChangedReset = Date(timeIntervalSince1970: 30_000)
+            let now = Date(timeIntervalSince1970: 100_000)
+            let baselineReset = now.addingTimeInterval(3_600)
+            let firstChangedReset = baselineReset.addingTimeInterval(60)
+            let secondChangedReset = firstChangedReset.addingTimeInterval(60)
             let baseline = ProfileUsageReport(
                 usageByProfileID: [
                     firstID: AppServerRateLimitsRead(
@@ -543,7 +548,7 @@ func menuBarViewModelTests() -> [TestCase] {
             )
 
             await model.load()
-            await model.refreshUsageAutomatically(now: Date.now.addingTimeInterval(121))
+            await model.refreshUsageAutomatically(now: now)
 
             let usedProfileIDs = await tokenUses.profileIDs
             let usageLoadEvents = await usageLoads.events
@@ -563,7 +568,7 @@ func menuBarViewModelTests() -> [TestCase] {
                 "automatic token status did not explain its reset trigger"
             )
         },
-        TestCase("MenuBarViewModel ignores future and same-minute reset timestamp drift") {
+        TestCase("MenuBarViewModel ignores same-minute reset timestamp drift") {
             let profile = menuBarProfiles()[0]
             let now = Date(timeIntervalSince1970: 100_000)
             let baselineReset = now.addingTimeInterval(3_600)
@@ -2042,8 +2047,9 @@ private func makeMenuBarModel(
 private actor TokenUseProbe {
     private(set) var profileIDs = [ProfileID]()
 
-    func record(_ profileID: ProfileID) {
+    func record(_ profileID: ProfileID) -> TokenUseResult {
         profileIDs.append(profileID)
+        return TokenUseResult(response: "테스트 응답")
     }
 }
 

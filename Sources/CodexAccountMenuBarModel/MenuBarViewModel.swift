@@ -18,7 +18,7 @@ public final class MenuBarViewModel: ObservableObject {
     public typealias LoadProfiles = @Sendable () async throws -> [ProfileListItem]
     public typealias LoadProfileUsage = @Sendable (Set<ProfileID>?) async throws -> ProfileUsageReport
     public typealias LoadRecoveryStatus = @Sendable () async throws -> RecoveryCLIStatus
-    public typealias UseToken = @Sendable (ProfileID) async throws -> Void
+    public typealias UseToken = @Sendable (ProfileID) async throws -> TokenUseResult
     public typealias CaptureProfile = @Sendable (String) async throws -> ProfileListItem
     public typealias RemoveProfile = @Sendable (ProfileID) async throws -> ProfileListItem
     public typealias SyncActiveProfile = @Sendable () async throws -> ProfileListItem
@@ -137,8 +137,7 @@ public final class MenuBarViewModel: ObservableObject {
         guard let report, isAutomaticTokenUseEnabled else { return }
         let changedResetWindows = Self.changedResetWindows(
             from: previousUsage,
-            to: report.usageByProfileID,
-            at: now
+            to: report.usageByProfileID
         )
         if !changedResetWindows.isEmpty || !automaticTokenUseRetryProfileIDs.isEmpty {
             await automaticallyUseTokens(after: changedResetWindows)
@@ -175,8 +174,7 @@ public final class MenuBarViewModel: ObservableObject {
         guard case let .success(report) = result else { return }
         let changedResetWindows = Self.changedResetWindows(
             from: previousUsage,
-            to: report.usageByProfileID,
-            at: now
+            to: report.usageByProfileID
         )
         applyUsageReport(
             report,
@@ -235,11 +233,12 @@ public final class MenuBarViewModel: ObservableObject {
             isWorking = false
         }
         do {
-            try await useTokenOperation(current.id)
-            await reloadUsage(profileIDs: [current.id])
+            let result = try await useTokenOperation(current.id)
+            let report = await reloadUsage(profileIDs: [current.id])
             automaticTokenUseRetryProfileIDs.remove(current.id)
             errorMessage = nil
-            statusMessage = "\(current.label) 계정으로 토큰을 사용했습니다."
+            statusMessage = tokenUseSummary(label: current.label, result: result,
+                usage: report?.usageByProfileID[current.id])
         } catch {
             errorMessage = "\(current.label) 계정의 토큰 사용 요청에 실패했습니다."
         }
@@ -263,6 +262,7 @@ public final class MenuBarViewModel: ObservableObject {
 
         isWorking = true
         var usedLabels = [String]()
+        var details = [String]()
         var failedLabels = [String]()
         defer {
             tokenUsingProfileID = nil
@@ -273,8 +273,10 @@ public final class MenuBarViewModel: ObservableObject {
             guard !Task.isCancelled else { return }
             tokenUsingProfileID = profile.id
             do {
-                try await useTokenOperation(profile.id)
-                await reloadUsage(profileIDs: [profile.id])
+                let result = try await useTokenOperation(profile.id)
+                let report = await reloadUsage(profileIDs: [profile.id])
+                details.append(tokenUseSummary(label: profile.label, result: result,
+                    usage: report?.usageByProfileID[profile.id]))
                 automaticTokenUseRetryProfileIDs.remove(profile.id)
                 usedLabels.append(profile.label)
             } catch {
@@ -287,12 +289,20 @@ public final class MenuBarViewModel: ObservableObject {
             let useSummary = "자동 토큰 사용: \(usedLabels.joined(separator: ", "))"
             let resetSummary = resetChangeSummary(resetChanges)
             statusMessage = resetSummary.map { "리셋 감지: \($0)\n\(useSummary)" } ?? useSummary
+            statusMessage = (statusMessage ?? "") + "\n" + details.joined(separator: "\n")
         }
         if !failedLabels.isEmpty {
             errorMessage = "자동 토큰 사용 실패: \(failedLabels.joined(separator: ", "))"
         } else if !usedLabels.isEmpty {
             errorMessage = nil
         }
+    }
+
+    private func tokenUseSummary(label: String, result: TokenUseResult, usage: AppServerRateLimitsRead?) -> String {
+        let time = result.completedAt.formatted(date: .omitted, time: .standard)
+        let tokens = "입력 \(result.inputTokens.map(String.init) ?? "미확인") · 출력 \(result.outputTokens.map(String.init) ?? "미확인") 토큰"
+        let refreshed = usage == nil ? "사용량 재조회 실패" : "사용량 재조회 완료 · 이번 요청 반영/리셋 고정은 미확인"
+        return "\(label) 요청 성공 · \(time)\n\(tokens)\n\(refreshed)\n응답: \(result.response.prefix(200))"
     }
 
     public var activeRateLimitWindow: AppServerRateLimitWindow? {
@@ -1081,8 +1091,7 @@ public final class MenuBarViewModel: ObservableObject {
 
     private static func changedResetWindows(
         from previous: [ProfileID: AppServerRateLimitsRead],
-        to current: [ProfileID: AppServerRateLimitsRead],
-        at now: Date
+        to current: [ProfileID: AppServerRateLimitsRead]
     ) -> [ProfileID: [ResetWindowChange]] {
         var changed = [ProfileID: [ResetWindowChange]]()
         for (profileID, currentUsage) in current {
@@ -1092,8 +1101,7 @@ public final class MenuBarViewModel: ObservableObject {
                     $0.windowDurationMinutes == currentWindow.windowDurationMinutes
                 }),
                     let previousReset = previousWindow.resetsAt,
-                    let currentReset = currentWindow.resetsAt,
-                    previousReset <= now else {
+                    let currentReset = currentWindow.resetsAt else {
                     continue
                 }
                 let previousResetMinute = (previousReset.timeIntervalSince1970 / 60).rounded(.down)
