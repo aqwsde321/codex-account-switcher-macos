@@ -114,6 +114,33 @@ func cliApplicationTests() -> [TestCase] {
                     "usage workspace was not removed"
                 )
 
+                // A timed-out probe can leave a marker behind after its child
+                // has already exited. The next refresh must recover it in
+                // place instead of requiring the provider (or app) to restart.
+                let staleUsageHome = fixture.storeURL
+                    .appendingPathComponent("credential-verification-workspace")
+                try FileManager.default.createDirectory(
+                    at: staleUsageHome,
+                    withIntermediateDirectories: false
+                )
+                try FileManager.default.setAttributes(
+                    [.posixPermissions: 0o700],
+                    ofItemAtPath: staleUsageHome.path
+                )
+                try Data("pid=2147483647\n".utf8).write(
+                    to: staleUsageHome.appendingPathComponent("helper-child")
+                )
+                let recovered = try await provider.profileUsage(profileIDs: [fixture.source.id])
+                try expect(
+                    recovered.failedProfileIDs.isEmpty
+                        && recovered.usageByProfileID[fixture.source.id] != nil,
+                    "stale usage workspace blocked the next refresh"
+                )
+                try expect(
+                    !FileManager.default.fileExists(atPath: staleUsageHome.path),
+                    "stale usage workspace was not cleaned up"
+                )
+
                 let activeOnly = try await provider.profileUsage(profileIDs: [fixture.source.id])
                 try expect(
                     Set(activeOnly.usageByProfileID.keys) == [fixture.source.id]

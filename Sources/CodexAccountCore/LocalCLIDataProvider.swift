@@ -274,6 +274,11 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
         defer { lock.release() }
 
         let registry = try store.loadRegistry()
+        // A probe can time out while its child is still being reaped.  The
+        // next refresh must re-check that marker and clean it up once the
+        // child has exited; otherwise one transient timeout permanently
+        // blocks usage for the lifetime of this provider.
+        try removeAbandonedVerificationWorkspacesIfSafeLocked(in: store)
         guard !probeChildUnconfirmed,
               try journalIsDurablyAbsent(in: store),
               try store.loadCaptureProfileIDIfPresent() == nil,
@@ -2824,12 +2829,19 @@ private extension LocalCLIDataProvider {
 
     func removeAbandonedVerificationWorkspacesIfSafe(in store: SpikeStore) throws {
         try removeAbandonedTokenUseMarkerIfSafe()
-        let homes = try verificationHomeURLs.filter(pathExists)
-        guard !homes.isEmpty else { return }
         guard let lock = try store.tryAcquireTransactionLock() else {
             throw LocalCLIDataProviderFailure.lockBusy
         }
         defer { lock.release() }
+        try removeAbandonedVerificationWorkspacesIfSafeLocked(in: store)
+    }
+
+    func removeAbandonedVerificationWorkspacesIfSafeLocked(in store: SpikeStore) throws {
+        let homes = try verificationHomeURLs.filter(pathExists)
+        guard !homes.isEmpty else {
+            probeChildUnconfirmed = false
+            return
+        }
         for homeURL in homes {
             switch try readVerificationChildMarker(in: homeURL) {
             case .notLaunched:
