@@ -106,8 +106,15 @@ private extension CodexAppLocator {
               let build = bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String else {
             throw CodexAppLocatorFailure.invalidBundle
         }
-        let bundledCodexURL = bundleURL
-            .appendingPathComponent("Contents/Resources/codex", isDirectory: false)
+        let bundledCodexURL = [
+            "Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+            "Contents/Resources/codex",
+        ]
+        .map { bundleURL.appendingPathComponent($0, isDirectory: false) }
+        .first { FileManager.default.fileExists(atPath: $0.path) }
+        guard let bundledCodexURL else {
+            throw CodexAppLocatorFailure.invalidExecutable
+        }
         let crashpadExecutableURL = canonicalURL(
             bundleURL.appendingPathComponent(
                 "Contents/Frameworks/Codex Framework.framework/Versions/Current/Helpers/browser_crashpad_handler"
