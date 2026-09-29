@@ -1,6 +1,6 @@
 # 보안
 
-- 기준일: 2026-08-30
+- 기준일: 2026-09-29
 - 적용 대상: Codex Account Switcher 메뉴바 앱과 진단 CLI
 
 ## 보호 범위
@@ -25,7 +25,10 @@
 |---|---|---|
 | 프로필 목록·active ID | `~/Library/Application Support/CodexAccountSwitcher/profiles.json` | `0600` |
 | 계정별 credential | `~/Library/Application Support/CodexAccountSwitcher/credentials/<UUID>.json` | `0600` |
+| 추가 등록·재로그인 임시 홈 | `~/Library/Application Support/CodexAccountSwitcher/isolated-login-workspace/` | 디렉터리 `0700`, `auth.json`·`helper-child` `0600` |
+| 계정 검증 임시 홈 | 같은 저장 디렉터리의 `credential-verification-workspace/`, `capture-verification-workspace/` | 디렉터리 `0700`, `auth.json`·`helper-child` `0600` |
 | 토큰 사용용 격리 workspace | `~/Library/Application Support/CodexAccountSwitcher/token-use-home/` | 디렉터리 `0700`, auth 파일 `0600` |
+| 계정별 마지막 토큰 사용 결과 | `~/Library/Application Support/CodexAccountSwitcher/token-use-home/result-<UUID>.json` | `0600` |
 | 배터리 자동 해제 기준 | `~/Library/Application Support/CodexAccountSwitcher/sleep-guard-threshold` | `0600` |
 | 현재 활성 인증 | `~/.codex/auth.json` | `0600` |
 | 상위 private 디렉터리 | `~/Library/Application Support/CodexAccountSwitcher/` | `0700` |
@@ -34,20 +37,33 @@
 
 비활성 계정 삭제는 해당 프로필과 credential만 제거한다. 앱 제거는 저장 계정과 로그를 삭제하지 않는다.
 
-## 인증 교체
+## 인증 저장과 교체
 
-- 모든 mutation은 단일 lock과 내구 journal 아래 실행한다.
+- 계정 등록·재로그인·전환·삭제는 같은 저장소의 단일 transaction lock으로 직렬화한다. 활성 계정을 교체하는 전환과 그 복구는 내구 journal을 사용한다.
+- 추가 등록·비활성 계정 재로그인은 공유 활성 인증을 교체하지 않으며 전환 journal을 만들지 않는다. 추가 등록은 `needsRelogin` 상태의 프로필을 먼저 기록한 뒤 credential과 완료 상태를 저장한다. 재로그인은 credential 저장·읽기 검증 후 프로필의 `needsRelogin`을 해제한다. 중간 실패는 저장된 registry 상태를 확인해 되돌리거나 복구 대상으로 남긴다.
+- 첫 현재 로그인 등록은 capture marker와 credential을 사용하고, 비활성 계정 삭제는 별도의 removal record를 사용한다. 모든 로컬 파일 변경이 전환 journal을 만드는 것은 아니다.
 - 임시 파일을 같은 디렉터리에 `0600`으로 쓰고 `fsync`한 뒤 rename과 상위 디렉터리 `fsync`를 확인한다.
 - 현재·대상 계정 이메일이 등록 프로필과 완전히 일치할 때만 저장·커밋한다.
 - 사용량 수치는 계정 식별이나 전환 성공 판정에 사용하지 않는다.
 - 상태가 모순되거나 파일 내구성을 확인할 수 없으면 추측하지 않고 중단한다.
 
+## 브라우저 로그인과 임시 작업 정리
+
+- 추가 등록·재로그인은 현재 활성 계정의 credential 사본을 먼저 검증한 뒤 공식 앱에 포함된 `codex login`을 실행한다. 로그인과 후속 계정 검증은 `isolated-login-workspace`에서 진행하며, `CODEX_HOME`과 `CODEX_SQLITE_HOME`을 이 임시 홈으로 지정한다. 상속한 `CODEX_*`·`OPENAI_*` 환경변수는 제거하고 credential 저장 방식은 `file`로 고정한다.
+- 임시 홈은 현재 사용자 소유의 `0700` 디렉터리여야 한다. credential과 자식 프로세스 marker는 현재 사용자 소유의 `0600` regular file만 읽으며, symlink나 예상과 다른 권한은 거부한다. 등록·재로그인 도중 공유 `auth.json`의 내용이나 파일 identity가 달라져도 중단한다.
+- 사용량 조회·추가 등록·재로그인은 transaction lock을 잡은 상태에서 남은 검증 임시 홈을 확인한다. 자식을 실행하지 않은 홈이나 기록된 PID가 더 이상 살아 있지 않은 홈만 정리하며, 미완료 journal·capture marker·removal record가 있으면 정리하지 않는다.
+- 자식이 살아 있거나 marker가 `launching`인 경우, PID·marker 내용·권한을 확인할 수 없는 경우에는 증거를 보존하고 작업을 중단한다. 정상 완료와 종료가 확인된 실패·취소에서는 임시 홈을 제거하지만, 자식 종료를 확인하지 못하면 홈을 남겨 이후 안전한 복구를 기다린다.
+- `브라우저 다시 열기`에 전달할 URL은 로그인 자식의 stderr에서 별도의 완결된 한 줄로 나온 값만 허용한다. 파서는 한 줄을 최대 8,192바이트로 제한하고 초과한 줄은 다음 줄바꿈까지 버리며, URL은 세션당 한 번만 전달한다. 나머지 stderr 원문은 저장하거나 로그에 남기지 않는다.
+- 허용 주소는 HTTPS의 `auth.openai.com/oauth/authorize`이며 포트는 생략 또는 `443`이어야 한다. 사용자 정보·fragment·중복 query 항목·제어문자를 거부하고 `response_type=code`, `code_challenge_method=S256`, 비어 있지 않은 client ID·challenge·state, `openid` scope를 확인한다. redirect는 `http://localhost:<1–65535>/auth/callback`만 허용하며 사용자 정보·query·fragment를 허용하지 않는다.
+- URL과 OAuth state는 로그인 대기 중 메모리에만 둔다. 새 계정 검증 단계로 넘어가거나 완료·실패·취소하면 UI에서 제거하고, 종료·취소한 세션의 callback을 차단한다. UI도 작업별 ID와 진행 단계 순서를 확인하여 이전 로그인이나 늦게 도착한 URL을 다시 표시하지 않는다. 브라우저의 방문 기록 등 외부 브라우저 저장은 이 앱의 통제 범위 밖이다.
+
 ## 수동·자동 토큰 사용
 
 - `⚡` 실행은 대상 계정 credential의 probe 사본만 `token-use-home/auth.json`에 기록하고, refresh token은 사본에서 비활성화한다.
 - 실행 프로세스의 `CODEX_HOME`은 `token-use-home`으로 지정한다. 공유 `~/.codex/auth.json`과 활성 계정은 변경하지 않는다.
-- `codex exec`에는 `OK`만 요청하고, 출력이 정확히 `OK`일 때만 성공으로 처리한다. 읽은 마지막 메시지 파일은 제거한다.
-- 자동 실행은 자동 조회나 수동 전체 새로고침에서 분 단위로 정규화한 `resetsAt` 변경을 감지한 뒤 수행한다. 부분 조회에서 감지하면 전체 계정 사용량을 다시 조회하고, 수동 전체 새로고침에서 감지하면 해당 결과를 재사용한다. 5시간 창의 잔여율이 `100%`인 계정만 계정당 한 번씩 순차 실행하며, 조회 실패나 토큰 실행 실패를 성공으로 기록하지 않는다.
+- `codex exec --json --ephemeral --sandbox read-only`에 고정 문구 `간단히 자기소개 부탁해. 도구는 사용하지 마.`를 전달한다. 프로세스 정상 종료 후 마지막 응답이 비어 있지 않은 UTF-8인지 확인하고, 활성 인증·registry·공식 앱 identity가 유지되어야 성공으로 처리한다. `OK`와의 일치 검사는 하지 않는다.
+- 마지막 응답은 최대 4,096바이트, JSONL 이벤트는 최대 1,048,576바이트로 읽는다. 정상 처리한 `last-message.txt`와 `last-events.jsonl`은 제거하고, 응답·완료 시각·이벤트에서 추출한 입력 및 출력 토큰 수를 계정별 `result-<UUID>.json`에 저장한다. 실패 시 임시 출력이 남을 수 있으며 `--ephemeral`이 이 앱의 결과 파일까지 삭제하지는 않는다.
+- 자동 실행은 자동 조회나 수동 전체 새로고침에서 분 단위로 정규화한 `resetsAt`이 이전보다 뒤로 이동하면 수행한다. 부분 조회에서 감지하면 전체 계정 사용량을 다시 조회하고, 수동 전체 새로고침에서 감지하면 해당 결과를 재사용한다. 5시간 창의 잔여율이 `100%`인 계정만 계정당 한 번씩 순차 실행하며, 조회 실패나 토큰 실행 실패를 성공으로 기록하지 않는다.
 - `token-use-home`은 계정 관리 경로 아래 유지된다. 앱 제거 시 저장 계정·로그와 함께 자동 삭제하지 않으므로, 필요하면 사용자가 별도로 정리해야 한다.
 
 ## 프로세스 검사
@@ -68,7 +84,7 @@
 - 앱 시작 시 미완료 journal을 먼저 검사한다. 안전한 단일 결론이 없으면 자동 변경하지 않는다.
 - 수동 복구는 journal의 exact 이전 profile만 대상으로 하며 현재 상태를 추측하지 않는다.
 
-복구 중 `auth.json`을 직접 편집하거나 다른 계정으로 로그인하면 증거가 바뀔 수 있다. 앱의 수동 복구 UI 또는 개발 문서의 복구 CLI를 사용한다.
+복구 중 `auth.json`을 직접 편집하거나 다른 계정으로 로그인하면 증거가 바뀔 수 있다. 메뉴바 앱의 작업은 앱의 수동 복구 UI를 사용한다. 개발 문서의 복구 CLI는 별도 `CodexAccountSwitcherSpike` 저장소를 사용하므로 메뉴바 앱의 미완료 작업을 복구하지 않는다.
 
 ## 배터리 자동 해제
 
@@ -95,6 +111,8 @@ README의 한 줄 설치는 다음을 신뢰한다.
 
 ## 로그와 공유 자료
 
+등록·재로그인 진단은 OSLog subsystem `local.codex.account-switcher`, category `profile-login`을 사용한다. 진행 단계와 허용된 오류 enum 코드, 자식 종료 코드, 파일 작업 단계·errno만 기록하며 알 수 없는 오류는 `unknown`으로 처리한다. 오류의 임의 문자열은 출력하지 않는다. `ProfileLoginProgress`의 description·debugDescription·Mirror도 URL 없이 단계 이름만 제공한다.
+
 허용:
 
 - profile UUID, transaction ID, phase
@@ -107,7 +125,8 @@ README의 한 줄 설치는 다음을 신뢰한다.
 
 - access·refresh·ID token
 - credential JSON 또는 `auth.json` 원문
-- authorization header, 쿠키, App Server 원문 stderr
+- authorization header, 쿠키, App Server·로그인 프로세스의 원문 stderr
+- 브라우저 로그인 전체 URL과 OAuth state
 - 전체 process command line
 - task 본문, 사용자 prompt, 회사 코드
 - 실제 이메일이 보이는 공유 screenshot
