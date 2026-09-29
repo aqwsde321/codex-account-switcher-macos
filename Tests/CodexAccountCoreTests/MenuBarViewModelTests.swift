@@ -1038,6 +1038,161 @@ func menuBarViewModelTests() -> [TestCase] {
             try expect(labelsAfterBlockedRetry == ["회사"], "recovery gate retried registration")
             try expect(targetsAfterBlockedRetry.isEmpty, "recovery gate allowed profile selection")
         },
+        TestCase("MenuBarViewModel clears the previous registration error while retrying browser login") {
+            let provider = MenuBarProviderSpy(profiles: [menuBarProfiles()[0]])
+            let progress = ProfileLoginProgressProbe()
+            let loginURL = URL(string: "https://auth.openai.com/oauth/authorize?state=retry-state")!
+            let model = await makeMenuBarModel(
+                provider: provider,
+                captureProfileWithProgress: { label, onProgress in
+                    if label == "실패" {
+                        throw CodexLoginFailure(code: .launchFailed, childDisposition: .notStarted)
+                    }
+                    try await progress.pause(onProgress: onProgress, initial: .awaitingBrowser(loginURL))
+                    return try await provider.captureProfile(label: label)
+                }
+            )
+            await model.load()
+            _ = await model.register(label: "실패")
+            let previousError = await MainActor.run { model.errorMessage }
+
+            let registration = Task { await model.register(label: "회사") }
+            await progress.waitUntilStarted(attempt: 0)
+            let pending = await MainActor.run {
+                (model.errorMessage, model.profileLoginProgress, model.profileLoginURL,
+                 model.profileLoginProgressMessage, model.isProfileLoginInProgress)
+            }
+            await MainActor.run { model.reportBrowserOpenFailure() }
+            let browserFailure = await MainActor.run { model.errorMessage }
+            await progress.finish(attempt: 0)
+            let registered = await registration.value
+            let completed = await MainActor.run {
+                (model.profileLoginProgress, model.profileLoginURL,
+                 model.profileLoginProgressMessage, model.errorMessage)
+            }
+
+            try expect(previousError != nil, "registration fixture did not produce the first error")
+            try expect(
+                pending.0 == nil && pending.1 == .awaitingBrowser(loginURL)
+                    && pending.2 == loginURL && pending.3?.isEmpty == false && pending.4,
+                "retry kept the previous error or did not expose browser login progress"
+            )
+            try expect(
+                browserFailure?.contains("브라우저") == true
+                    && browserFailure?.contains("retry-state") == false,
+                "browser launch failure was missing or exposed the authorization URL"
+            )
+            try expect(
+                registered && completed.0 == nil && completed.1 == nil
+                    && completed.2 == nil && completed.3 == nil,
+                "completed registration retained its login URL, progress, or browser error"
+            )
+            await MainActor.run { model.reportBrowserOpenFailure() }
+            let staleBrowserFailure = await MainActor.run { model.errorMessage }
+            try expect(staleBrowserFailure == nil, "a late browser result changed a completed registration")
+        },
+        TestCase("MenuBarViewModel clears relogin errors and removes progress after success") {
+            let provider = MenuBarProviderSpy(profiles: menuBarReloginProfiles())
+            let progress = ProfileLoginProgressProbe()
+            let loginURL = URL(string: "https://auth.openai.com/oauth/authorize?state=relogin-state")!
+            let model = await makeMenuBarModel(
+                provider: provider,
+                reloginProfileWithProgress: { target, onProgress in
+                    let attempt = try await progress.pause(
+                        onProgress: onProgress,
+                        initial: .awaitingBrowser(loginURL)
+                    )
+                    if attempt == 0 {
+                        throw CodexLoginFailure(code: .launchFailed, childDisposition: .notStarted)
+                    }
+                    return try await provider.reloginProfile(target: target)
+                }
+            )
+            await model.load()
+            let target = menuBarReloginProfiles().first { !$0.active && $0.needsRelogin }!
+            let firstRelogin = Task { await model.confirmRelogin(target) }
+            await progress.waitUntilStarted(attempt: 0)
+            await progress.finish(attempt: 0)
+            await firstRelogin.value
+            let failed = await MainActor.run {
+                (model.errorMessage, model.profileLoginProgress, model.profileLoginURL)
+            }
+
+            let retry = Task { await model.confirmRelogin(target) }
+            await progress.waitUntilStarted(attempt: 1)
+            let pending = await MainActor.run {
+                (model.errorMessage, model.profileLoginURL, model.profileLoginProgressMessage)
+            }
+            await progress.emit(.validatingNewAccount, attempt: 1)
+            await progress.emit(.awaitingBrowser(loginURL), attempt: 1)
+            let validating = await MainActor.run {
+                (model.profileLoginProgress, model.profileLoginURL)
+            }
+            await progress.finish(attempt: 1)
+            await retry.value
+            let completed = await MainActor.run {
+                (model.errorMessage, model.profileLoginProgress, model.profileLoginURL)
+            }
+            try expect(
+                failed.0 != nil && failed.1 == nil && failed.2 == nil,
+                "failed relogin retained its authorization URL or failed to explain the error"
+            )
+            try expect(
+                pending.0 == nil && pending.1 == loginURL && pending.2?.isEmpty == false,
+                "relogin retry kept a stale error or omitted the browser URL"
+            )
+            try expect(
+                validating.0 == .validatingNewAccount && validating.1 == nil,
+                "a delayed browser callback restored the login URL after authentication finished"
+            )
+            try expect(
+                completed.0 == nil && completed.1 == nil && completed.2 == nil,
+                "successful relogin retained an error or login progress"
+            )
+        },
+        TestCase("MenuBarViewModel ignores cancelled login callbacks during the next registration") {
+            let provider = MenuBarProviderSpy(profiles: [menuBarProfiles()[0]])
+            let progress = ProfileLoginProgressProbe()
+            let oldURL = URL(string: "https://auth.openai.com/oauth/authorize?state=old-attempt")!
+            let newURL = URL(string: "https://auth.openai.com/oauth/authorize?state=new-attempt")!
+            let model = await makeMenuBarModel(
+                provider: provider,
+                captureProfileWithProgress: { label, onProgress in
+                    try await progress.pause(onProgress: onProgress, initial: .startingLogin)
+                    return try await provider.captureProfile(label: label)
+                },
+                cancelProfileLogin: { await progress.cancelLatest() }
+            )
+            await model.load()
+            let first = Task { await model.register(label: "회사") }
+            await progress.waitUntilStarted(attempt: 0)
+            await progress.emit(.awaitingBrowser(oldURL), attempt: 0)
+            await model.cancelProfileLogin()
+            let firstRegistered = await first.value
+            await progress.emit(.awaitingBrowser(oldURL), attempt: 0)
+            let cancelled = await MainActor.run {
+                (model.profileLoginProgress, model.profileLoginURL, model.isProfileLoginInProgress)
+            }
+
+            let retry = Task { await model.register(label: "회사") }
+            await progress.waitUntilStarted(attempt: 1)
+            await progress.emit(.awaitingBrowser(newURL), attempt: 1)
+            await progress.emit(.awaitingBrowser(oldURL), attempt: 0)
+            let current = await MainActor.run {
+                (model.profileLoginProgress, model.profileLoginURL)
+            }
+            await progress.finish(attempt: 1)
+            let retryRegistered = await retry.value
+
+            try expect(
+                !firstRegistered && cancelled.0 == nil && cancelled.1 == nil && !cancelled.2,
+                "cancelled registration accepted its delayed browser callback"
+            )
+            try expect(
+                current.0 == .awaitingBrowser(newURL) && current.1 == newURL && retryRegistered,
+                "the previous registration's callback replaced the next login URL"
+            )
+        },
         TestCase("MenuBarViewModel explains registration compatibility and process blockers") {
             let provider = MenuBarProviderSpy(profiles: [])
             let model = await makeMenuBarModel(
@@ -1064,6 +1219,93 @@ func menuBarViewModelTests() -> [TestCase] {
                 processMessage == "독립 Codex CLI와 IDE 작업을 종료한 뒤 다시 시도하세요.",
                 "registration process blocker was not actionable"
             )
+        },
+        TestCase("Profile login diagnostics omit authorization URLs and unknown error details") {
+            let loginURL = URL(string: "https://auth.openai.com/oauth/authorize?state=secret-oauth-state")!
+            let progress = ProfileLoginProgress.awaitingBrowser(loginURL)
+            var dumpText = ""
+            dump(progress, to: &dumpText)
+            let renderings = [
+                progress.description,
+                progress.debugDescription,
+                String(reflecting: progress),
+                String(describing: Optional(progress)),
+                dumpText,
+            ]
+            try expect(
+                renderings.allSatisfy {
+                    !$0.contains("secret-oauth-state") && !$0.contains("auth.openai.com")
+                },
+                "progress diagnostics exposed the authorization URL"
+            )
+            let unknown = NSError(
+                domain: "private-domain",
+                code: 123,
+                userInfo: [NSLocalizedDescriptionKey: "sensitive authentication output \(loginURL)"]
+            )
+            try expect(
+                profileLoginFailureDiagnostic(unknown) == "unknown",
+                "unknown login error details reached the diagnostic log"
+            )
+            try expect(
+                profileLoginFailureDiagnostic(
+                    CodexLoginFailure(code: .launchFailed, childDisposition: .notStarted, exitCode: 42)
+                ) == "login_launchFailed exit=42",
+                "safe login failure code and exit status were lost"
+            )
+        },
+        TestCase("MenuBarViewModel reports login failures without exposing diagnostic details") {
+            let scenarios: [(error: any Error, requiredWords: [String])] = [
+                (
+                    AppServerProbeFailure(
+                        code: .timeout,
+                        stage: .readingAccount,
+                        childDisposition: .confirmedExited,
+                        rpcCode: 918273,
+                        childPID: 918274
+                    ),
+                    ["확인", "시간"]
+                ),
+                (
+                    CodexLoginFailure(
+                        code: .launchFailed,
+                        childDisposition: .notStarted,
+                        exitCode: 918275,
+                        childPID: 918276
+                    ),
+                    ["로그인", "실행"]
+                ),
+                (LocalCLIDataProviderFailure.activeAuthChanged, ["계정", "변경"]),
+                (LocalCLIDataProviderFailure.lockBusy, ["작업"]),
+            ]
+            for scenario in scenarios {
+                let provider = MenuBarProviderSpy(profiles: [menuBarProfiles()[0]])
+                let model = await makeMenuBarModel(
+                    provider: provider,
+                    captureProfile: { _ in throw scenario.error }
+                )
+                await model.load()
+                let registered = await model.register(label: "회사")
+                let state = await MainActor.run {
+                    (model.errorMessage, model.profileLoginProgress, model.profileLoginURL, model.isWorking)
+                }
+                let message = state.0 ?? ""
+                try expect(
+                    !registered && scenario.requiredWords.allSatisfy { message.contains($0) }
+                        && message != "계정 등록을 완료하지 못했습니다.",
+                    "registration failure omitted actionable guidance: \(scenario.error)"
+                )
+                try expect(
+                    !["918273", "918274", "918275", "918276", "AppServerProbeFailure",
+                      "CodexLoginFailure", "activeAuthChanged", "lockBusy"]
+                        .contains(where: { message.contains($0) }),
+                    "registration exposed internal login failure details"
+                )
+                try expect(
+                    state.1 == nil && state.2 == nil && !state.3,
+                    "registration failure retained login progress or a busy state"
+                )
+            }
         },
         TestCase("MenuBarViewModel syncs the active credential and stops on recovery") {
             let provider = MenuBarProviderSpy(profiles: menuBarProfiles())
@@ -1953,6 +2195,50 @@ private actor AutomaticUsageRefreshProbe {
     }
 }
 
+private actor ProfileLoginProgressProbe {
+    typealias Progress = @Sendable (ProfileLoginProgress) async -> Void
+
+    private var callbacks = [Progress]()
+    private var pending = [Int: CheckedContinuation<Void, Error>]()
+    private var started = Set<Int>()
+    private var startedWaiters = [Int: CheckedContinuation<Void, Never>]()
+
+    @discardableResult
+    func pause(onProgress: @escaping Progress, initial: ProfileLoginProgress) async throws -> Int {
+        let attempt = callbacks.count
+        callbacks.append(onProgress)
+        await onProgress(initial)
+        try await withCheckedThrowingContinuation { continuation in
+            pending[attempt] = continuation
+            started.insert(attempt)
+            startedWaiters.removeValue(forKey: attempt)?.resume()
+        }
+        return attempt
+    }
+
+    func waitUntilStarted(attempt: Int) async {
+        guard !started.contains(attempt) else { return }
+        await withCheckedContinuation { continuation in
+            startedWaiters[attempt] = continuation
+        }
+    }
+
+    func emit(_ progress: ProfileLoginProgress, attempt: Int) async {
+        await callbacks[attempt](progress)
+    }
+
+    func finish(attempt: Int) {
+        pending.removeValue(forKey: attempt)?.resume()
+    }
+
+    func cancelLatest() {
+        guard let attempt = pending.keys.max() else { return }
+        pending.removeValue(forKey: attempt)?.resume(
+            throwing: CodexLoginFailure(code: .cancelled, childDisposition: .confirmedExited)
+        )
+    }
+}
+
 private actor ProfileLoginCancellationProbe {
     private var loginContinuation: CheckedContinuation<Void, Never>?
     private var startedContinuation: CheckedContinuation<Void, Never>?
@@ -2009,10 +2295,12 @@ private func makeMenuBarModel(
     useToken: MenuBarViewModel.UseToken? = nil,
     initialAutomaticTokenUseEnabled: Bool? = nil,
     captureProfile: MenuBarViewModel.CaptureProfile? = nil,
+    captureProfileWithProgress: MenuBarViewModel.CaptureProfileWithProgress? = nil,
     removeProfile: MenuBarViewModel.RemoveProfile? = nil,
     retryPendingRecovery: MenuBarViewModel.RetryPendingRecovery? = nil,
     switchProfile: MenuBarViewModel.SwitchProfile? = nil,
     reloginProfile: MenuBarViewModel.ReloginProfile? = nil,
+    reloginProfileWithProgress: MenuBarViewModel.ReloginProfileWithProgress? = nil,
     cancelProfileLogin: @escaping MenuBarViewModel.CancelProfileLogin = {}
 ) async -> MenuBarViewModel {
     await MainActor.run {
@@ -2027,12 +2315,14 @@ private func makeMenuBarModel(
             loadRecoveryStatus: { await provider.recoveryStatus() },
             useToken: useToken,
             captureProfile: captureProfile ?? { try await provider.captureProfile(label: $0) },
+            captureProfileWithProgress: captureProfileWithProgress,
             removeProfile: removeProfile ?? { try await provider.removeProfile($0) },
             syncActiveProfile: { try await provider.syncActiveProfile() },
             switchProfile: switchProfile ?? {
                 try await provider.switchProfile(target: $0, onPhaseChange: $1)
             },
             reloginProfile: reloginProfile ?? { try await provider.reloginProfile(target: $0) },
+            reloginProfileWithProgress: reloginProfileWithProgress,
             cancelProfileLogin: cancelProfileLogin,
             restoreRecoveryProfile: {
                 try await provider.restoreRecoveryProfile(target: $0, expectedTransactionID: $1)

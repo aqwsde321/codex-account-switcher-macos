@@ -61,6 +61,9 @@ struct CodexAccountMenuBarApp: App {
                 captureProfile: {
                     try await provider.captureProfile(label: $0)
                 },
+                captureProfileWithProgress: { label, onProgress in
+                    try await provider.captureProfile(label: label, onProgress: onProgress)
+                },
                 removeProfile: { profileID in
                     try await provider.removeProfile(profileID)
                 },
@@ -75,6 +78,9 @@ struct CodexAccountMenuBarApp: App {
                 },
                 reloginProfile: { target in
                     try await provider.reloginProfile(target: target)
+                },
+                reloginProfileWithProgress: { target, onProgress in
+                    try await provider.reloginProfile(target: target, onProgress: onProgress)
                 },
                 cancelProfileLogin: {
                     await provider.cancelProfileLogin()
@@ -484,11 +490,20 @@ private struct AccountMenuView: View {
             }
 
             if model.isProfileLoginInProgress {
-                Text("브라우저 로그인을 기다리는 중… 현재 활성 계정은 유지됩니다.")
+                Text(model.profileLoginProgressMessage ?? "로그인을 준비하는 중…")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Button("브라우저 로그인 취소") {
-                    Task { await model.cancelProfileLogin() }
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack {
+                    if model.profileLoginURL != nil {
+                        Button("브라우저 다시 열기") {
+                            guard let url = model.profileLoginURL else { return }
+                            model.reportBrowserOpenResult(NSWorkspace.shared.open(url))
+                        }
+                    }
+                    Button("로그인 취소") {
+                        Task { await model.cancelProfileLogin() }
+                    }
                 }
             }
 
@@ -558,6 +573,7 @@ private struct AccountMenuView: View {
                 Text(errorMessage)
                     .font(.caption)
                     .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
                     .accessibilityLabel("오류: \(errorMessage)")
             } else if let statusMessage = model.statusMessage {
                 Text(statusMessage)

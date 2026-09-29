@@ -20,6 +20,10 @@ public final class MenuBarViewModel: ObservableObject {
     public typealias LoadRecoveryStatus = @Sendable () async throws -> RecoveryCLIStatus
     public typealias UseToken = @Sendable (ProfileID) async throws -> TokenUseResult
     public typealias CaptureProfile = @Sendable (String) async throws -> ProfileListItem
+    public typealias LoginProgress = @Sendable (ProfileLoginProgress) async -> Void
+    public typealias CaptureProfileWithProgress = @Sendable (
+        String, @escaping LoginProgress
+    ) async throws -> ProfileListItem
     public typealias RemoveProfile = @Sendable (ProfileID) async throws -> ProfileListItem
     public typealias SyncActiveProfile = @Sendable () async throws -> ProfileListItem
     public typealias SwitchProgress = @Sendable (SwitchPhase) async -> Void
@@ -28,6 +32,9 @@ public final class MenuBarViewModel: ObservableObject {
         @escaping SwitchProgress
     ) async throws -> ProfileListItem
     public typealias ReloginProfile = @Sendable (String) async throws -> ProfileReloginOutcome
+    public typealias ReloginProfileWithProgress = @Sendable (
+        String, @escaping LoginProgress
+    ) async throws -> ProfileReloginOutcome
     public typealias CancelProfileLogin = @Sendable () async -> Void
     public typealias RestoreRecoveryProfile = @Sendable (String, String) async throws -> RecoveryRestoreOutcome
     public typealias RetryPendingRecovery = @Sendable (String) async throws -> RecoveryOutcome
@@ -51,6 +58,7 @@ public final class MenuBarViewModel: ObservableObject {
     @Published public private(set) var isWorking = false
     @Published public private(set) var isAutomaticallyRefreshing = false
     @Published public private(set) var isProfileLoginInProgress = false
+    @Published public private(set) var profileLoginProgress: ProfileLoginProgress?
     @Published public private(set) var tokenUsingProfileID: ProfileID?
     @Published public private(set) var isAutomaticTokenUseEnabled: Bool
     @Published public private(set) var errorMessage: String?
@@ -61,15 +69,18 @@ public final class MenuBarViewModel: ObservableObject {
     private let loadRecoveryStatus: LoadRecoveryStatus
     private let useTokenOperation: UseToken?
     private let captureProfile: CaptureProfile
+    private let captureProfileWithProgress: CaptureProfileWithProgress?
     private let removeProfile: RemoveProfile?
     private let syncActiveProfile: SyncActiveProfile
     private let switchProfile: SwitchProfile
     private let reloginProfile: ReloginProfile
+    private let reloginProfileWithProgress: ReloginProfileWithProgress?
     private let cancelProfileLoginOperation: CancelProfileLogin
     private let restoreRecoveryProfile: RestoreRecoveryProfile
     private let retryPendingRecovery: RetryPendingRecovery?
     private let attemptAutomaticRecovery: AttemptAutomaticRecovery
     private var cancelCurrentProfileLoginTask: (() -> Void)?
+    private var profileLoginOperationID: UUID?
     private var lastFullUsageRefreshAt: Date?
     private var automaticUsageRefreshTask: Task<ProfileUsageReport, Error>?
     private var isCancellingAutomaticUsageRefresh = false
@@ -81,10 +92,12 @@ public final class MenuBarViewModel: ObservableObject {
         loadRecoveryStatus: @escaping LoadRecoveryStatus,
         useToken: UseToken? = nil,
         captureProfile: @escaping CaptureProfile,
+        captureProfileWithProgress: CaptureProfileWithProgress? = nil,
         removeProfile: RemoveProfile? = nil,
         syncActiveProfile: @escaping SyncActiveProfile,
         switchProfile: @escaping SwitchProfile,
         reloginProfile: @escaping ReloginProfile,
+        reloginProfileWithProgress: ReloginProfileWithProgress? = nil,
         cancelProfileLogin: @escaping CancelProfileLogin = {},
         restoreRecoveryProfile: @escaping RestoreRecoveryProfile,
         retryPendingRecovery: RetryPendingRecovery? = nil,
@@ -98,10 +111,12 @@ public final class MenuBarViewModel: ObservableObject {
         isAutomaticTokenUseEnabled = initialAutomaticTokenUseEnabled
             ?? UserDefaults.standard.bool(forKey: Self.automaticTokenUseDefaultsKey)
         self.captureProfile = captureProfile
+        self.captureProfileWithProgress = captureProfileWithProgress
         self.removeProfile = removeProfile
         self.syncActiveProfile = syncActiveProfile
         self.switchProfile = switchProfile
         self.reloginProfile = reloginProfile
+        self.reloginProfileWithProgress = reloginProfileWithProgress
         cancelProfileLoginOperation = cancelProfileLogin
         self.restoreRecoveryProfile = restoreRecoveryProfile
         self.retryPendingRecovery = retryPendingRecovery
@@ -456,8 +471,13 @@ public final class MenuBarViewModel: ObservableObject {
             return
         }
         cancelRelogin()
+        errorMessage = nil
+        statusMessage = nil
         isWorking = true
-        defer { isWorking = false }
+        defer {
+            endProfileLogin()
+            isWorking = false
+        }
         var reloginStarted = false
         var reloginOutcome: ProfileReloginOutcome?
         var sourceID: ProfileID?
@@ -476,15 +496,17 @@ public final class MenuBarViewModel: ObservableObject {
             }
             sourceID = currentSource.id
             reloginStarted = true
-            let task = Task { try await reloginProfile(current.id.description) }
-            cancelCurrentProfileLoginTask = { task.cancel() }
-            isProfileLoginInProgress = true
-            defer {
-                cancelCurrentProfileLoginTask = nil
-                isProfileLoginInProgress = false
+            let onProgress = beginProfileLogin()
+            let task = Task {
+                if let reloginProfileWithProgress {
+                    return try await reloginProfileWithProgress(current.id.description, onProgress)
+                }
+                return try await reloginProfile(current.id.description)
             }
+            cancelCurrentProfileLoginTask = { task.cancel() }
             let outcome = try await task.value
             reloginOutcome = outcome
+            endProfileLogin()
             try await refreshState()
             guard reloginOutcomeMatches(outcome, targetID: current.id) else {
                 recoveryStatus = .blocked
@@ -504,6 +526,8 @@ public final class MenuBarViewModel: ObservableObject {
             errorMessage = nil
             statusMessage = "\(current.label) 계정 인증을 갱신했습니다. 현재 계정은 유지됩니다. 전환하려면 계정을 다시 선택하세요."
         } catch {
+            let failedProgress = profileLoginProgress
+            endProfileLogin()
             await refreshAfterMutationFailure()
             guard reloginStarted, let sourceID else {
                 errorMessage = recoveryRequired ? recoveryErrorMessage : "계정 재로그인을 완료하지 못했습니다."
@@ -520,7 +544,7 @@ public final class MenuBarViewModel: ObservableObject {
                 } else if reloginOutcome != nil {
                     recoveryStatus = .blocked
                     errorMessage = "재로그인 결과를 확인하지 못했습니다. 계정 작업을 중단했습니다."
-                } else if let failure = error as? CodexLoginFailure, failure.code == .cancelled {
+                } else if Self.isProfileLoginCancellation(error) {
                     errorMessage = nil
                     statusMessage = "로그인을 취소했습니다. 현재 계정과 저장된 인증은 바뀌지 않았습니다."
                 } else if let failure = error as? CodexLoginFailure, failure.code == .timeout {
@@ -528,7 +552,8 @@ public final class MenuBarViewModel: ObservableObject {
                 } else if error is ProfileCaptureFailure {
                     errorMessage = "다른 계정으로 로그인했습니다. \(profile.email) 계정으로 다시 시도하세요."
                 } else {
-                    errorMessage = "브라우저 로그인을 완료하지 못했습니다. 현재 계정은 유지됩니다."
+                    errorMessage = profileLoginFailureMessage(error, during: failedProgress)
+                        ?? "브라우저 로그인을 완료하지 못했습니다. 현재 계정은 유지됩니다."
                 }
                 return
             }
@@ -545,12 +570,135 @@ public final class MenuBarViewModel: ObservableObject {
 
     public func cancelProfileLogin() async {
         guard isProfileLoginInProgress else { return }
+        // Invalidate the URL immediately, including callbacks already queued by the child.
+        profileLoginOperationID = nil
+        profileLoginProgress = nil
         cancelCurrentProfileLoginTask?()
         await cancelProfileLoginOperation()
     }
 
     public func cancelRelogin() {
         pendingReloginProfile = nil
+    }
+
+    public var profileLoginURL: URL? {
+        guard isProfileLoginInProgress,
+              case let .awaitingBrowser(url) = profileLoginProgress else { return nil }
+        return url
+    }
+
+    public var profileLoginProgressMessage: String? {
+        guard isProfileLoginInProgress else { return nil }
+        switch profileLoginProgress {
+        case .preparing: return "로그인을 준비하는 중…"
+        case .validatingCurrentAccount: return "현재 계정을 확인하는 중…"
+        case .startingLogin: return "브라우저 로그인 페이지를 준비하는 중…"
+        case .awaitingBrowser: return "브라우저에서 로그인을 완료하세요. 현재 활성 계정은 유지됩니다."
+        case .validatingNewAccount: return "로그인한 계정을 확인하는 중…"
+        case .savingAccount: return "계정을 저장하는 중…"
+        case nil: return "로그인을 취소하는 중…"
+        }
+    }
+
+    public func reportBrowserOpenFailure() {
+        reportBrowserOpenResult(false)
+    }
+
+    public func reportBrowserOpenResult(_ opened: Bool) {
+        guard profileLoginURL != nil else { return }
+        errorMessage = opened
+            ? nil
+            : "로그인 페이지를 열지 못했습니다. 기본 브라우저 설정을 확인하고 다시 시도하세요."
+    }
+
+    private func beginProfileLogin() -> LoginProgress {
+        let operationID = UUID()
+        profileLoginOperationID = operationID
+        profileLoginProgress = .preparing
+        isProfileLoginInProgress = true
+        return { [weak self] progress in
+            guard !Task.isCancelled else { return }
+            await self?.receiveProfileLoginProgress(progress, operationID: operationID)
+        }
+    }
+
+    private func receiveProfileLoginProgress(_ progress: ProfileLoginProgress, operationID: UUID) {
+        guard !Task.isCancelled, isProfileLoginInProgress, profileLoginOperationID == operationID,
+              Self.loginProgressOrder(progress) >= Self.loginProgressOrder(profileLoginProgress) else {
+            return
+        }
+        profileLoginProgress = progress
+        errorMessage = nil
+    }
+
+    private static func loginProgressOrder(_ progress: ProfileLoginProgress?) -> Int {
+        switch progress {
+        case nil: -1
+        case .preparing: 0
+        case .validatingCurrentAccount: 1
+        case .startingLogin: 2
+        case .awaitingBrowser: 3
+        case .validatingNewAccount: 4
+        case .savingAccount: 5
+        }
+    }
+
+    private func endProfileLogin() {
+        profileLoginOperationID = nil
+        profileLoginProgress = nil
+        cancelCurrentProfileLoginTask = nil
+        isProfileLoginInProgress = false
+    }
+
+    private static func isProfileLoginCancellation(_ error: Error) -> Bool {
+        if error is CancellationError { return true }
+        if let failure = error as? CodexLoginFailure { return failure.code == .cancelled }
+        if let failure = error as? AppServerProbeFailure { return failure.code == .cancelled }
+        return false
+    }
+
+    private func profileLoginFailureMessage(
+        _ error: Error,
+        during progress: ProfileLoginProgress?
+    ) -> String? {
+        switch error {
+        case let failure as AppServerProbeFailure:
+            let account = Self.loginProgressOrder(progress) >= Self.loginProgressOrder(.validatingNewAccount)
+                ? "로그인한 계정" : "현재 계정"
+            if failure.code == .timeout {
+                return "\(account) 확인 시간이 초과되었습니다. 네트워크 연결을 확인하고 다시 시도하세요."
+            }
+            return "\(account)을 확인하지 못했습니다. 네트워크 연결과 Codex 로그인 상태를 확인한 뒤 다시 시도하세요."
+        case let failure as CodexLoginFailure:
+            switch failure.code {
+            case .launchFailed:
+                return "브라우저 로그인을 실행하지 못했습니다. Codex 앱을 확인하고 다시 시도하세요."
+            case .abnormalExit:
+                return "브라우저 로그인 프로세스가 종료되었습니다. 다시 시도하세요."
+            case .invalidConfiguration:
+                return "로그인에 필요한 파일이나 권한을 확인하지 못했습니다. 앱을 다시 실행하세요."
+            case .childExitUnconfirmed:
+                return "로그인 프로세스의 종료를 확인하지 못했습니다. 잠시 후 다시 시도하세요."
+            case .alreadyUsed:
+                return "이 로그인은 이미 종료되었습니다. 다시 시도하세요."
+            case .cancelled, .timeout:
+                return nil
+            }
+        case LocalCLIDataProviderFailure.activeAuthChanged:
+            return "진행 중 현재 계정 인증이 변경되었습니다. 계정 상태를 새로고침한 뒤 다시 시도하세요."
+        case LocalCLIDataProviderFailure.activeProfileUnavailable:
+            return "현재 활성 계정의 로그인을 확인한 뒤 다시 시도하세요."
+        case LocalCLIDataProviderFailure.lockBusy,
+             LocalCLIDataProviderFailure.switchAlreadyRunning,
+             LocalCLIDataProviderFailure.captureAlreadyRunning:
+            return "다른 계정 작업이 진행 중입니다. 완료된 뒤 다시 시도하세요."
+        case LocalCLIDataProviderFailure.pendingRecovery:
+            return "이전 계정 작업으로 로그인이 중단되었습니다. 잠시 후 다시 시도하세요."
+        case LocalCLIDataProviderFailure.verificationWorkspaceFailed:
+            return "로그인 임시 작업을 준비하거나 정리하지 못했습니다. 앱을 다시 실행한 뒤 재시도하세요."
+        default:
+            return nil
+        }
     }
 
     public var recoveryProfile: ProfileListItem? {
@@ -681,15 +829,20 @@ public final class MenuBarViewModel: ObservableObject {
             return false
         }
         let sourceID = activeProfiles.first?.id
+        errorMessage = nil
         isWorking = true
+        let onProgress = additional ? beginProfileLogin() : nil
         let task: Task<ProfileListItem, Error>? = additional
-            ? Task { try await captureProfile(label) }
+            ? Task {
+                if let captureProfileWithProgress, let onProgress {
+                    return try await captureProfileWithProgress(label, onProgress)
+                }
+                return try await captureProfile(label)
+            }
             : nil
         cancelCurrentProfileLoginTask = task.map { task in { task.cancel() } }
-        isProfileLoginInProgress = additional
         defer {
-            cancelCurrentProfileLoginTask = nil
-            isProfileLoginInProgress = false
+            endProfileLogin()
             isWorking = false
         }
         var captureReturned = false
@@ -701,6 +854,7 @@ public final class MenuBarViewModel: ObservableObject {
                 captured = try await captureProfile(label)
             }
             captureReturned = true
+            endProfileLogin()
             try await refreshState()
             guard !recoveryRequired else {
                 errorMessage = recoveryErrorMessage
@@ -720,6 +874,8 @@ public final class MenuBarViewModel: ObservableObject {
             reportRegistrationSuccess(label: label, additional: additional)
             return true
         } catch {
+            let failedProgress = profileLoginProgress
+            endProfileLogin()
             await refreshAfterMutationFailure()
             if recoveryRequired {
                 errorMessage = recoveryErrorMessage
@@ -745,7 +901,7 @@ public final class MenuBarViewModel: ObservableObject {
                 return true
             }
             switch error {
-            case let failure as CodexLoginFailure where failure.code == .cancelled:
+            case _ where Self.isProfileLoginCancellation(error):
                 errorMessage = nil
                 statusMessage = "로그인을 취소했습니다. 현재 계정과 저장된 인증은 바뀌지 않았습니다."
             case let failure as CodexLoginFailure where failure.code == .timeout:
@@ -762,7 +918,8 @@ public final class MenuBarViewModel: ObservableObject {
             case LocalCLIDataProviderFailure.processBlocked:
                 errorMessage = "독립 Codex CLI와 IDE 작업을 종료한 뒤 다시 시도하세요."
             default:
-                errorMessage = "계정 등록을 완료하지 못했습니다."
+                errorMessage = profileLoginFailureMessage(error, during: failedProgress)
+                    ?? "계정 등록을 완료하지 못했습니다."
             }
             return false
         }

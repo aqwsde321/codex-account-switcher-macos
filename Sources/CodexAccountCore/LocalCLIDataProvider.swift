@@ -7,6 +7,11 @@ private let recoveryLogger = Logger(
     category: "recovery"
 )
 
+private let profileLoginLogger = Logger(
+    subsystem: "local.codex.account-switcher",
+    category: "profile-login"
+)
+
 private enum ProcessTerminationFailure: Error {
     case identityChanged
     case signalFailed
@@ -536,10 +541,26 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
     }
 
     public func captureProfile(label: String) async throws -> ProfileListItem {
+        try await captureProfile(label: label, onProgress: { _ in })
+    }
+
+    public func captureProfile(
+        label: String,
+        onProgress: @escaping @Sendable (ProfileLoginProgress) async -> Void
+    ) async throws -> ProfileListItem {
         if let store = try openStoreIfPresent(),
            let registry = try store.loadRegistryIfPresent(),
            !registry.profiles.isEmpty {
-            return try await registerAdditionalProfile(label: label, store: store)
+            do {
+                return try await registerAdditionalProfile(
+                    label: label, store: store, onProgress: onProgress
+                )
+            } catch {
+                profileLoginLogger.error(
+                    "event=registration_failed code=\(profileLoginFailureDiagnostic(error), privacy: .public)"
+                )
+                throw error
+            }
         }
         routedFirstCaptureCount += 1
         defer { routedFirstCaptureCount -= 1 }
@@ -556,7 +577,11 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
         )
     }
 
-    private func registerAdditionalProfile(label: String, store: SpikeStore) async throws -> ProfileListItem {
+    private func registerAdditionalProfile(
+        label: String,
+        store: SpikeStore,
+        onProgress: @escaping @Sendable (ProfileLoginProgress) async -> Void
+    ) async throws -> ProfileListItem {
         try requireProfileLoginNotCancelled()
         guard !switchInProgress else {
             throw LocalCLIDataProviderFailure.switchAlreadyRunning
@@ -574,6 +599,9 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
             profileLoginCancellationRequested = false
             switchInProgress = false
         }
+
+        await reportProfileLoginProgress(.preparing, to: onProgress)
+        try requireProfileLoginNotCancelled()
 
         guard let lock = try store.tryAcquireTransactionLock() else {
             throw LocalCLIDataProviderFailure.lockBusy
@@ -593,6 +621,7 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
               !source.needsRelogin else {
             throw LocalCLIDataProviderFailure.activeProfileUnavailable
         }
+        try removeAbandonedVerificationWorkspacesIfSafeLocked(in: store)
         guard try journalIsDurablyAbsent(in: store),
               try store.loadCaptureProfileIDIfPresent() == nil,
               try store.loadProfileRemovalIfPresent() == nil,
@@ -604,6 +633,8 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
         guard ApprovedResidentRule.codexCrashpad(for: descriptor) != nil else {
             throw LocalCLIDataProviderFailure.incompatibleApplication
         }
+        await reportProfileLoginProgress(.validatingCurrentAccount, to: onProgress)
+        try requireProfileLoginNotCancelled()
         let current = try readCurrentCredential()
         _ = try await validatedCredential(
             current.credential,
@@ -637,7 +668,8 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
 
         let login = try await runIsolatedLogin(
             descriptor: descriptor,
-            disallowedEmails: Set(registry.profiles.map(\.email))
+            disallowedEmails: Set(registry.profiles.map(\.email)),
+            onProgress: onProgress
         )
         guard try await locateApp() == descriptor,
               try store.loadRegistry() == registry,
@@ -650,6 +682,8 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
         }
         try requireProfileLoginNotCancelled()
 
+        await reportProfileLoginProgress(.savingAccount, to: onProgress)
+        try requireProfileLoginNotCancelled()
         let now = Date(timeIntervalSince1970: Date().timeIntervalSince1970.rounded(.down))
         let profileID = ProfileID(UUID())
         let pendingProfile = ProfileMetadata(
@@ -753,6 +787,27 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
     }
 
     public func reloginProfile(target value: String) async throws -> ProfileReloginOutcome {
+        try await reloginProfile(target: value, onProgress: { _ in })
+    }
+
+    public func reloginProfile(
+        target value: String,
+        onProgress: @escaping @Sendable (ProfileLoginProgress) async -> Void
+    ) async throws -> ProfileReloginOutcome {
+        do {
+            return try await performProfileRelogin(target: value, onProgress: onProgress)
+        } catch {
+            profileLoginLogger.error(
+                "event=relogin_failed code=\(profileLoginFailureDiagnostic(error), privacy: .public)"
+            )
+            throw error
+        }
+    }
+
+    private func performProfileRelogin(
+        target value: String,
+        onProgress: @escaping @Sendable (ProfileLoginProgress) async -> Void
+    ) async throws -> ProfileReloginOutcome {
         try requireProfileLoginNotCancelled()
         guard !switchInProgress else {
             throw LocalCLIDataProviderFailure.switchAlreadyRunning
@@ -765,6 +820,9 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
             profileLoginCancellationRequested = false
             switchInProgress = false
         }
+
+        await reportProfileLoginProgress(.preparing, to: onProgress)
+        try requireProfileLoginNotCancelled()
 
         guard let requestedUUID = UUID(uuidString: value),
               value == requestedUUID.uuidString,
@@ -786,6 +844,7 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
               target.needsRelogin else {
             throw LocalCLIDataProviderFailure.targetProfileUnavailable
         }
+        try removeAbandonedVerificationWorkspacesIfSafeLocked(in: store)
         guard try journalIsDurablyAbsent(in: store),
               try store.loadCaptureProfileIDIfPresent() == nil,
               try store.loadProfileRemovalIfPresent() == nil,
@@ -798,6 +857,8 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
             throw LocalCLIDataProviderFailure.incompatibleApplication
         }
         let sourceCredential = try credentialStore.loadCredential(for: source.id)
+        await reportProfileLoginProgress(.validatingCurrentAccount, to: onProgress)
+        try requireProfileLoginNotCancelled()
         let current = try readCurrentCredential()
         _ = try await validatedCredential(
             current.credential,
@@ -815,7 +876,8 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
 
         let login = try await runIsolatedLogin(
             descriptor: descriptor,
-            expectedEmail: target.email
+            expectedEmail: target.email,
+            onProgress: onProgress
         )
         guard try store.loadRegistry() == registry,
               try journalIsDurablyAbsent(in: store),
@@ -826,6 +888,8 @@ public actor LocalCLIDataProvider: CLIDataProviding, ProfileCaptureDriving {
             throw LocalCLIDataProviderFailure.activeAuthChanged
         }
 
+        await reportProfileLoginProgress(.savingAccount, to: onProgress)
+        try requireProfileLoginNotCancelled()
         let previousTargetCredential = try loadCredentialIfPresent(for: target.id)
         let updatedTarget = ProfileMetadata(
             id: target.id,
@@ -3212,8 +3276,11 @@ private extension LocalCLIDataProvider {
     func runIsolatedLogin(
         descriptor: CodexAppDescriptor,
         expectedEmail: String? = nil,
-        disallowedEmails: Set<String> = []
+        disallowedEmails: Set<String> = [],
+        onProgress: @escaping @Sendable (ProfileLoginProgress) async -> Void
     ) async throws -> IsolatedLoginResult {
+        try requireProfileLoginNotCancelled(childDisposition: .notStarted)
+        await reportProfileLoginProgress(.startingLogin, to: onProgress)
         try requireProfileLoginNotCancelled(childDisposition: .notStarted)
         let loginHome = isolatedLoginHomeURL
         try createVerificationHome(loginHome)
@@ -3226,6 +3293,9 @@ private extension LocalCLIDataProvider {
                     codexHomeURL: loginHome,
                     timeouts: CodexLoginTimeouts(login: .seconds(600), terminateExit: .seconds(2))
                 ),
+                onAuthorizationURL: { url in
+                    await self.reportProfileLoginProgress(.awaitingBrowser(url), to: onProgress)
+                },
                 didLaunch: { pid in
                     try writeVerificationChildMarker(at: markerURL, value: "pid=\(pid)")
                 }
@@ -3233,6 +3303,8 @@ private extension LocalCLIDataProvider {
             isolatedLoginSession = session
             try await session.run()
             isolatedLoginSession = nil
+            try requireProfileLoginNotCancelled()
+            await reportProfileLoginProgress(.validatingNewAccount, to: onProgress)
             try requireProfileLoginNotCancelled()
             guard try await locateApp() == descriptor else {
                 throw LocalCLIDataProviderFailure.incompatibleApplication
@@ -3301,6 +3373,15 @@ private extension LocalCLIDataProvider {
             probeChildUnconfirmed = false
             throw error
         }
+    }
+
+    func reportProfileLoginProgress(
+        _ progress: ProfileLoginProgress,
+        to onProgress: @Sendable (ProfileLoginProgress) async -> Void
+    ) async {
+        guard !Task.isCancelled, profileLoginOperationActive, !profileLoginCancellationRequested else { return }
+        profileLoginLogger.notice("event=progress stage=\(progress.description, privacy: .public)")
+        await onProgress(progress)
     }
 
     func requireProfileLoginNotCancelled(

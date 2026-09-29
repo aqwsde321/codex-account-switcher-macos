@@ -127,8 +127,10 @@ func cliApplicationTests() -> [TestCase] {
                     [.posixPermissions: 0o700],
                     ofItemAtPath: staleUsageHome.path
                 )
-                try Data("pid=2147483647\n".utf8).write(
-                    to: staleUsageHome.appendingPathComponent("helper-child")
+                _ = try DarwinDurableFileOperations().replace(
+                    contents: SensitiveBytes(Data("pid=2147483647\n".utf8)),
+                    at: staleUsageHome.appendingPathComponent("helper-child"),
+                    expecting: .absent
                 )
                 let recovered = try await provider.profileUsage(profileIDs: [fixture.source.id])
                 try expect(
@@ -2195,6 +2197,162 @@ func cliApplicationTests() -> [TestCase] {
                 try expect(processes.contains(pid: app.identity.pid), "isolated capture disturbed the official app")
                 try expect(registryBefore.profiles == Array(registry.profiles.prefix(2)), "isolated capture changed existing metadata")
                 try expect(credentials.pendingProfileIDs == [profileC.id], "C credential preceded its durable intent")
+            }
+        },
+        TestCase("Local provider cleans exited verifier workspaces before first registration and relogin") {
+            for relogin in [false, true] {
+                try await withCaptureTemporaryDirectory { directory in
+                    let fixture = try makeReloginFixture(
+                        in: directory,
+                        activeAuthIsSource: true,
+                        isolatedLoginAccount: relogin ? "b" : "c"
+                    )
+                    let store = try SpikeStore.openExisting(at: fixture.storeURL)
+                    let authBefore = try DarwinDurableFileOperations().snapshot(at: fixture.authURL)
+                    let sourceBefore = try store.loadCredential(for: fixture.source.id)
+                    let workspaces = try [
+                        "credential-verification-workspace",
+                        "capture-verification-workspace",
+                        "isolated-login-workspace",
+                    ].map {
+                        try makeAbandonedVerificationWorkspace(
+                            in: fixture.storeURL,
+                            name: $0,
+                            marker: "pid=801\n"
+                        )
+                    }
+                    let provider = LocalCLIDataProvider(
+                        storeURL: fixture.storeURL,
+                        activeAuthURL: fixture.authURL,
+                        processProvider: EmptyProcessSnapshotProvider(),
+                        locateApp: { fixture.descriptor },
+                        runningApplicationPIDs: { _ in [] },
+                        verificationChildIsAlive: { _ in false }
+                    )
+
+                    if relogin {
+                        _ = try await provider.reloginProfile(target: fixture.target.id.description)
+                    } else {
+                        _ = try await provider.captureProfile(label: "C")
+                    }
+
+                    let registryAfter = try store.loadRegistry()
+                    let sourceAfter = try store.loadCredential(for: fixture.source.id)
+                    let targetAfter = try store.loadCredential(for: fixture.target.id)
+                    let authAfter = try DarwinDurableFileOperations().snapshot(at: fixture.authURL)
+                    try expect(registryAfter.profiles.count == (relogin ? 2 : 3), "first login attempt did not finish")
+                    try expect(registryAfter.activeProfileID == fixture.source.id, "cleanup changed the active profile")
+                    try expect(sourceAfter == sourceBefore, "cleanup changed the active credential")
+                    try expect(authAfter == authBefore, "cleanup rewrote public auth")
+                    try expect(
+                        targetAfter == (relogin ? fixture.refreshedTargetCredential : fixture.staleTargetCredential),
+                        "cleanup changed the wrong stored credential"
+                    )
+                    try expect(
+                        workspaces.allSatisfy { !FileManager.default.fileExists(atPath: $0.path) },
+                        "completed login left verifier workspaces"
+                    )
+                }
+            }
+        },
+        TestCase("Local provider preserves live and launching verifier workspaces before profile login") {
+            for relogin in [false, true] {
+                for marker in ["pid=801\n", "launching\n"] {
+                    try await withCaptureTemporaryDirectory { directory in
+                        let fixture = try makeReloginFixture(in: directory, activeAuthIsSource: true)
+                        let store = try SpikeStore.openExisting(at: fixture.storeURL)
+                        let registryBefore = try store.loadRegistry()
+                        let authBefore = try DarwinDurableFileOperations().snapshot(at: fixture.authURL)
+                        let workspace = try makeAbandonedVerificationWorkspace(
+                            in: fixture.storeURL,
+                            name: "credential-verification-workspace",
+                            marker: marker
+                        )
+                        let markerURL = workspace.appendingPathComponent("helper-child")
+                        let markerBefore = try DarwinDurableFileOperations().snapshot(at: markerURL)
+                        let provider = LocalCLIDataProvider(
+                            storeURL: fixture.storeURL,
+                            activeAuthURL: fixture.authURL,
+                            processProvider: EmptyProcessSnapshotProvider(),
+                            locateApp: { throw TestFailure(description: "unsafe workspace reached login preparation") },
+                            runningApplicationPIDs: { _ in [] },
+                            verificationChildIsAlive: { _ in true }
+                        )
+
+                        do {
+                            if relogin {
+                                _ = try await provider.reloginProfile(target: fixture.target.id.description)
+                            } else {
+                                _ = try await provider.captureProfile(label: "C")
+                            }
+                            throw TestFailure(description: "unsafe verifier workspace allowed profile login")
+                        } catch let failure as LocalCLIDataProviderFailure {
+                            try expect(failure == .pendingRecovery, "unsafe workspace returned the wrong failure")
+                        }
+
+                        let registryAfter = try store.loadRegistry()
+                        let sourceAfter = try store.loadCredential(for: fixture.source.id)
+                        let targetAfter = try store.loadCredential(for: fixture.target.id)
+                        let authAfter = try DarwinDurableFileOperations().snapshot(at: fixture.authURL)
+                        let markerAfter = try DarwinDurableFileOperations().snapshot(at: markerURL)
+                        try expect(registryAfter == registryBefore, "blocked login changed registry")
+                        try expect(sourceAfter == fixture.sourceCredential, "blocked login changed A")
+                        try expect(targetAfter == fixture.staleTargetCredential, "blocked login changed B")
+                        try expect(authAfter == authBefore, "blocked login changed public auth")
+                        try expect(markerAfter == markerBefore, "blocked login changed live child evidence")
+                    }
+                }
+            }
+        },
+        TestCase("Local provider preserves verifier markers with unsafe permissions before profile login") {
+            for relogin in [false, true] {
+                try await withCaptureTemporaryDirectory { directory in
+                    let fixture = try makeReloginFixture(in: directory, activeAuthIsSource: true)
+                    let store = try SpikeStore.openExisting(at: fixture.storeURL)
+                    let registryBefore = try store.loadRegistry()
+                    let authBefore = try DarwinDurableFileOperations().snapshot(at: fixture.authURL)
+                    let workspace = try makeAbandonedVerificationWorkspace(
+                        in: fixture.storeURL,
+                        name: "credential-verification-workspace",
+                        marker: "pid=801\n"
+                    )
+                    let markerURL = workspace.appendingPathComponent("helper-child")
+                    try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: markerURL.path)
+                    let provider = LocalCLIDataProvider(
+                        storeURL: fixture.storeURL,
+                        activeAuthURL: fixture.authURL,
+                        processProvider: EmptyProcessSnapshotProvider(),
+                        locateApp: { throw TestFailure(description: "unsafe marker reached login preparation") },
+                        runningApplicationPIDs: { _ in [] },
+                        verificationChildIsAlive: { _ in
+                            throw TestFailure(description: "unsafe marker was trusted for child liveness")
+                        }
+                    )
+
+                    do {
+                        if relogin {
+                            _ = try await provider.reloginProfile(target: fixture.target.id.description)
+                        } else {
+                            _ = try await provider.captureProfile(label: "C")
+                        }
+                        throw TestFailure(description: "unsafe marker allowed profile login")
+                    } catch let failure as DurableFileFailure {
+                        try expect(failure.stage == .inspect && failure.errno == EPERM, "unsafe marker was not rejected")
+                    }
+
+                    let registryAfter = try store.loadRegistry()
+                    let sourceAfter = try store.loadCredential(for: fixture.source.id)
+                    let targetAfter = try store.loadCredential(for: fixture.target.id)
+                    let authAfter = try DarwinDurableFileOperations().snapshot(at: fixture.authURL)
+                    let markerAfter = try Data(contentsOf: markerURL)
+                    let markerMode = try FileManager.default.attributesOfItem(atPath: markerURL.path)[.posixPermissions] as? NSNumber
+                    try expect(registryAfter == registryBefore, "unsafe marker changed registry")
+                    try expect(sourceAfter == fixture.sourceCredential, "unsafe marker changed A")
+                    try expect(targetAfter == fixture.staleTargetCredential, "unsafe marker changed B")
+                    try expect(authAfter == authBefore, "unsafe marker changed public auth")
+                    try expect(markerAfter == Data("pid=801\n".utf8), "unsafe marker evidence was changed")
+                    try expect(markerMode?.intValue == 0o644, "unsafe marker permissions were changed")
+                }
             }
         },
         TestCase("Local provider replaces a file-less inactive profile through isolated registration") {
@@ -4891,6 +5049,22 @@ private func makeCommittedCaptureRecoveryFixture(
         )
     )
     return fixture
+}
+
+private func makeAbandonedVerificationWorkspace(
+    in storeURL: URL,
+    name: String,
+    marker: String
+) throws -> URL {
+    let workspace = storeURL.appendingPathComponent(name, isDirectory: true)
+    try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: false)
+    try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: workspace.path)
+    _ = try DarwinDurableFileOperations().replace(
+        contents: SensitiveBytes(Data(marker.utf8)),
+        at: workspace.appendingPathComponent("helper-child"),
+        expecting: .absent
+    )
+    return workspace
 }
 
 private func withCaptureTemporaryDirectory(
