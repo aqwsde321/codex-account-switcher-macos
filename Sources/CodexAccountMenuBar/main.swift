@@ -10,6 +10,7 @@ struct CodexAccountMenuBarApp: App {
     @NSApplicationDelegateAdaptor(MenuBarAppDelegate.self) private var appDelegate
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @StateObject private var model: MenuBarViewModel
+    @StateObject private var claudeUsage: ClaudeUsageViewModel
     @StateObject private var sleepPrevention: SleepPreventionViewModel
     @State private var menuBarNow = Date.now
     @State private var steamFrame = 0
@@ -101,6 +102,7 @@ struct CodexAccountMenuBarApp: App {
                 }
             )
         )
+        _claudeUsage = StateObject(wrappedValue: ClaudeUsageViewModel())
         _sleepPrevention = StateObject(
             wrappedValue: SleepPreventionViewModel(
                 readEnabled: {
@@ -124,6 +126,7 @@ struct CodexAccountMenuBarApp: App {
         MenuBarExtra {
             AccountMenuView(
                 model: model,
+                claudeUsage: claudeUsage,
                 sleepPrevention: sleepPrevention,
                 now: menuBarNow,
                 steamProgress: steamProgress
@@ -143,14 +146,24 @@ struct CodexAccountMenuBarApp: App {
                     }
                 }
                     .frame(width: 23, height: 22)
-                if let usageSummary = activeUsageSummary {
-                    Text(usageSummary)
+                if let summary = menuBarUsageSummary {
+                    Text(summary)
                         .monospacedDigit()
                 }
             }
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(statusAccessibilityLabel)
             .task { await sleepPrevention.load() }
+            .task {
+                while !Task.isCancelled {
+                    await claudeUsage.refresh()
+                    do {
+                        try await Task.sleep(for: MenuBarViewModel.activeUsageRefreshInterval)
+                    } catch {
+                        return
+                    }
+                }
+            }
             .task {
                 await model.load()
                 while !Task.isCancelled {
@@ -200,6 +213,42 @@ struct CodexAccountMenuBarApp: App {
         return labels.isEmpty ? nil : labels.joined(separator: " · ")
     }
 
+    private var menuBarCodexSummary: String? {
+        guard menuBarClaudeSummary != nil else { return activeUsageSummary }
+        guard let window = model.activeRateLimitWindows.first else { return nil }
+        let remaining = MenuBarViewModel.remainingPercent(window)
+        let countdown = MenuBarViewModel.resetCountdownLabel(
+            resetAt: window.resetsAt, now: menuBarNow
+        )
+        return "Codex \(remaining)%" + (countdown.map { " · \($0)" } ?? "")
+    }
+
+    private var menuBarUsageSummary: String? {
+        switch (menuBarCodexSummary, menuBarClaudeSummary) {
+        case let (codex?, claude?):
+            return "\(codex) | Claude \(claude)"
+        case let (codex?, nil):
+            return codex
+        case let (nil, claude?):
+            return "Claude \(claude)"
+        case (nil, nil):
+            return nil
+        }
+    }
+
+    private var menuBarClaudeSummary: String? {
+        guard let snapshot = claudeUsage.snapshot else { return nil }
+        guard let window = snapshot.windows.first(where: { $0.label == "5시간" })
+            ?? snapshot.windows.first else { return nil }
+        let countdown = MenuBarViewModel.resetCountdownLabel(
+            resetAt: window.resetsAt, now: menuBarNow
+        )
+        let period = window.label == "5시간" ? "" : "\(window.label) "
+        return "\(period)\(window.remainingPercent)%"
+            + (countdown.map { " · \($0)" } ?? "")
+            + (claudeUsage.errorMessage == nil ? "" : " !")
+    }
+
     private var statusAccessibilityLabel: String {
         let usage = activeUsageSummary.map {
             model.isAutomaticallyRefreshing
@@ -208,7 +257,14 @@ struct CodexAccountMenuBarApp: App {
         } ?? (model.isAutomaticallyRefreshing
             ? "Codex 계정 한도 자동 조회 중"
             : "Codex 계정")
-        return usage + (sleepPrevention.isEnabled == true ? ", 잠자기 방지 켜짐" : "")
+        let claude = claudeUsage.snapshot?.windows.prefix(2)
+            .map { "\($0.label) \($0.remainingPercent)% 남음" }
+            .joined(separator: ", ")
+        let claudeLabel = claudeUsage.errorMessage == nil
+            ? claude.map { ", Claude 계정 \($0)" } ?? ""
+            : ""
+        return usage + claudeLabel
+            + (sleepPrevention.isEnabled == true ? ", 잠자기 방지 켜짐" : "")
     }
 
     private var steamAnimationIsActive: Bool {
@@ -352,6 +408,7 @@ private enum SleepGuardSystem {
 
 private struct AccountMenuView: View {
     @ObservedObject var model: MenuBarViewModel
+    @ObservedObject var claudeUsage: ClaudeUsageViewModel
     @ObservedObject var sleepPrevention: SleepPreventionViewModel
     let now: Date
     let steamProgress: CGFloat
@@ -584,6 +641,9 @@ private struct AccountMenuView: View {
             }
 
             Divider()
+            ClaudeUsageCard(model: claudeUsage, now: now)
+
+            Divider()
             HStack {
                 HStack(spacing: 8) {
                     SleepPreventionStatusIcon(
@@ -753,6 +813,94 @@ private struct AccountMenuView: View {
             return "등록하면 공식 Codex 앱을 정상 종료하고 현재 로그인을 저장한 뒤 다시 엽니다. 독립 Codex CLI와 IDE는 먼저 직접 종료하세요."
         }
         return "브라우저에서 새 계정으로 로그인합니다. 현재 활성 계정은 유지되며 새 계정으로 자동 전환하지 않습니다."
+    }
+}
+
+private struct ClaudeUsageCard: View {
+    @ObservedObject var model: ClaudeUsageViewModel
+    let now: Date
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Claude 계정")
+                    .font(.headline)
+                Spacer()
+                if model.isRefreshing {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+                Button {
+                    Task { await model.refresh() }
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.plain)
+                .disabled(model.isRefreshing)
+                .help("Claude 사용량 새로고침")
+                .accessibilityLabel("Claude 사용량 새로고침")
+            }
+            if let snapshot = model.snapshot {
+                HStack {
+                    Text(snapshot.email ?? "현재 로그인")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    if let plan = snapshot.plan {
+                        Text(plan.uppercased())
+                            .font(.caption2.weight(.semibold))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.secondary.opacity(0.12), in: Capsule())
+                    }
+                }
+                ForEach(snapshot.windows, id: \.label) { window in
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack {
+                            Text(window.label)
+                                .font(.caption.weight(.medium))
+                            Spacer()
+                            Text("\(window.remainingPercent)% 남음")
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
+                        ProgressView(value: Double(window.remainingPercent), total: 100)
+                            .controlSize(.small)
+                        if let reset = window.resetsAt {
+                            HStack(spacing: 3) {
+                                Text(reset, format: .dateTime.month().day().hour().minute())
+                                Text("초기화")
+                                if let countdown = MenuBarViewModel.resetCountdownLabel(
+                                    resetAt: reset, now: now
+                                ) {
+                                    Text("· " + countdown + " 후")
+                                }
+                            }
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        } else if !window.resetDescription.isEmpty {
+                            Text("초기화: \(window.resetDescription)")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            } else if !model.isRefreshing && model.errorMessage == nil {
+                Text("Claude 사용량을 불러오는 중…")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            if let error = model.errorMessage {
+                Text(model.snapshot == nil ? error : "마지막 조회 값 · \(error)")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                if model.snapshot != nil, let refreshedAt = model.refreshedAt {
+                    Text("마지막 성공: \(refreshedAt, format: .dateTime.month().day().hour().minute())")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
     }
 }
 

@@ -1,7 +1,7 @@
 # 개발
 
 - 기준일: 2026-09-29
-- 상태: 계정 등록·재로그인 개선 구현 및 로컬 설치 완료, 태그 배포 전
+- 상태: Claude 사용량 표시와 계정 등록·재로그인 개선을 포함한 `v0.4.0`
 
 ## 개발 환경 시작
 
@@ -77,6 +77,12 @@ UI는 전환 로직을 구현하지 않고 `CodexAccountCore`의 typed API를 �
 토큰 사용은 계정 credential의 probe 사본을 관리 경로 아래 `token-use-home`에 놓고 그 경로를 `CODEX_HOME`으로 지정한다. 공유 `~/.codex`의 대화·task·history·설정은 변경하지 않는다.
 
 현재 요청은 도구 사용 없는 짧은 자기소개다. 비어 있지 않은 응답을 읽고 JSON 이벤트의 토큰 수를 함께 표시한다. 실행 후 한도 조회가 성공해도 이번 요청의 사용량 반영이나 리셋 시각 고정까지 확인한 것으로 처리하지 않는다.
+
+### Claude 사용량
+
+`ClaudeUsageProbe`는 로컬 Claude Code CLI의 `auth status`와 `-p /usage --output-format json --no-session-persistence`로 현재 로그인된 계정의 구독 한도를 조회한다. CLI는 `/opt/homebrew/bin/claude`, `/usr/local/bin/claude`, `~/.local/bin/claude` 순서로 찾는다. 자동 조회는 2분마다 수행하며, 카드의 새로고침 버튼으로 다시 조회할 수 있다.
+
+`ClaudeUsageParser`는 5시간·주간 사용률과 초기화 시각을 읽는다. 날짜의 시간대와 `6:59pm`, `7pm` 두 형식을 처리한다. 날짜를 읽을 수 없으면 메뉴바에는 잔여율만 표시하고 카드에는 초기화 원문을 표시한다. 조회 실패 시 마지막 값을 유지하면서 오류를 표시하며, 로그아웃 상태가 확인되면 마지막 값을 지운다. Claude 계정 전환은 제공하지 않는다.
 
 ## 전환 흐름
 

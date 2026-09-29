@@ -10,7 +10,7 @@ let tests = credentialBlobTests() + profileRegistryTests() + registryCodecTests(
     + recoveryCoordinatorTests() + switchCoordinatorTests()
     + profileCaptureCoordinatorTests() + profileRemovalTests()
     + cliApplicationTests() + manualTokenUseTests() + menuBarViewModelTests()
-    + safeRendererTests()
+    + safeRendererTests() + claudeUsageTests()
 var failureCount = 0
 
 for test in tests {
